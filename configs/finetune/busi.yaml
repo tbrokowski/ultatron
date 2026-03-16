@@ -1,0 +1,44 @@
+# configs/finetune/busi.yaml
+# ============================================================
+# Finetune hyperparameters for BUSI.
+# Loaded by oura.finetune.busi.BUSIFinetune
+# Usage: python -m oura.finetune.busi --config configs/finetune/busi.yaml ...
+# ============================================================
+
+# Model backbone (which checkpoint to load from)
+model:
+  image_backbone: dinov3_l
+  video_backbone: vjepa2_l
+  frozen_teacher: null       # not needed for finetune; saves memory
+  dtype: bfloat16
+
+finetune:
+  # ── Optimiser ───────────────────────────────────────────────────────────────
+  lr:           1.0e-4
+  weight_decay: 0.01
+  max_epochs:   50
+  batch_size:   16
+  num_workers:  4
+
+  # ── Head architecture ────────────────────────────────────────────────────────
+  # "linear" = LinearSegHead (1 linear layer on patch tokens)
+  # "dpt"    = DPTSegHead (conv neck + bilinear upsample; better for dense pred)
+  # "mlp"    = MLPClsHead (2-layer MLP on CLS token, for classification tasks)
+  head_type:  dpt
+  # Note: two heads — seg + cls. See BUSIFinetune.setup()
+  # The second head (LinearClsHead) uses default params.
+
+  # ── Early stopping ───────────────────────────────────────────────────────────
+  patience:      10
+  monitor:       val_dice      # metric key in compute_val_metrics() output
+  monitor_mode:  max          # "max" for dice/auc, "min" for loss/mae
+
+  # ── Backbone ─────────────────────────────────────────────────────────────────
+  freeze_backbone: true        # keep backbone frozen; only head is trained
+
+  # ── Resolution ───────────────────────────────────────────────────────────────
+  output_size: 224             # head output is upsampled to this before loss
+
+  # ── Logging / checkpointing ──────────────────────────────────────────────────
+  log_every:       5           # log every N epochs
+  checkpoint_best: true        # save best_head.pt when monitor improves

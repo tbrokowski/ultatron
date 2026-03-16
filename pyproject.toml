@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "Ultatron"
+version = "0.1.0"
+description = "Ultatron Foundation Model — DINO-guided JEPA with Semantic Prototype Distillation"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+
+# ── Core dependencies ──────────────────────────────────────────────────────────
+dependencies = [
+    # Deep learning
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+
+    # HuggingFace — model downloads and VJEPA2/DINOv3 wrappers
+    "transformers>=4.45.0",
+    "accelerate>=0.28.0",
+    "huggingface_hub>=0.22.0",
+
+    # Data loading
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+    "decord>=0.6.0",           # fast video decoding
+
+    # Medical image formats
+    "pydicom>=2.4.0",          # DICOM support
+    "SimpleITK>=2.3.0",        # .mhd/.mha support
+
+    # Serialisation / config
+    "pyyaml>=6.0",
+    "omegaconf>=2.3.0",        # hierarchical config with _base_ inheritance
+
+    # Evaluation
+    "scikit-learn>=1.3.0",     # linear probe (LogisticRegression, AUC)
+    "scipy>=1.11.0",           # Hausdorff distance, signal processing
+
+    # Utilities
+    "tqdm>=4.65.0",
+    "tensorboard>=2.14.0",     # optional but expected for logging
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0",
+    "isort>=5.12.0",
+    "mypy>=1.5.0",
+]
+
+# For 8-bit quantisation of the 7B teacher on single-GPU nodes
+quantisation = [
+    "bitsandbytes>=0.41.0",
+]
+
+# ── Entry points (CLI scripts) ─────────────────────────────────────────────────
+[project.scripts]
+train         = "train.trainer:main"
+validate      = "eval.linear_probe:_main"
+build-manifest= "scripts.build_manifest:main"
+
+# ── Package discovery ──────────────────────────────────────────────────────────
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ultatron*", "scripts*"]
+
+# ── Pytest ─────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths     = ["tests"]
+python_files  = ["test_*.py"]
+python_classes= ["Test*"]
+python_functions = ["test_*"]
+addopts       = "-v --tb=short"
+
+# ── Black ──────────────────────────────────────────────────────────────────────
+[tool.black]
+line-length    = 100
+target-version = ["py310", "py311", "py312"]
+
+# ── isort ─────────────────────────────────────────────────────────────────────
+[tool.isort]
+profile       = "black"
+line_length   = 100
+known_first_party = ["oura"]
+
+# ── mypy ──────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_return_any = false

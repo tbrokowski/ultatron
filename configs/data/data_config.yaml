@@ -1,0 +1,207 @@
+# data_config.yaml  ·  USFoundationDataModule configuration
+# ==========================================================
+
+manifest:
+  path: "/data/manifests/us_foundation_train.jsonl"
+  val_path: "/data/manifests/us_foundation_val.jsonl"
+  root_remap: {}
+
+loaders:
+  image_batch_size: 64     # Vary, 64, 128, 256 
+                            # Effective batch is 64 × n_nodes × n_gpus_per_node.
+                            # With 512 nodes × 4 GPUs: global batch = 131,072.
+  video_batch_size: 8      # Native-res video frames are large. 8 per GPU.
+  num_workers: 8
+  pin_memory: true
+
+transforms:
+  patch_size: 16
+
+  image:
+    n_global_crops: 2
+    global_crop_scale: [0.4, 1.0]   # fraction of source image area
+
+    n_local_crops: 8                 # DINOv3 uses 8 local crops
+    local_crop_scale: [0.05, 0.4]
+
+    patch_size: 16
+    mask_ratio: 0.40
+
+    # ── Native-resolution constraints ─────────────────────────────────────────
+    # Crops are NOT resized.  They are extracted at native pixel scale and padded
+    # to the nearest patch_size multiple.  The ViT sees real pixels, not bicubic
+    # downsamples.
+    #
+    # max_global_crop_px: largest side of a global crop before padding.
+    #   At 896px → max (896/16)² = 3136 tokens per crop with FlashAttention.
+    #   Phase 1: 512px  (→ 1024 tokens, fast warm-up)
+    #   Phase 2: 672px  (→ 1764 tokens)
+    #   Phase 3: 896px  (→ 3136 tokens, full native res for most US images)
+    max_global_crop_px: 512          # Override per-phase via curriculum config
+
+    # min_crop_px: crops smaller than this are discarded and retried.
+    # Must be ≥ patch_size (16).  32px = 2×2 patches minimum.
+    min_crop_px: 32
+
+    # Photometric
+    brightness: 0.4
+    contrast: 0.4
+    apply_speckle: true
+    speckle_sigma: 0.10
+    apply_blur: true
+    blur_sigma: [0.1, 2.0]
+    apply_solarize: true
+    solarize_thresh: 0.5
+
+    allow_hflip: false
+    allow_vflip: false
+    max_rotation_deg: 15.0
+
+    freq_mask:
+      r_inner_min: 0.10
+      r_outer_max: 0.95
+      band_width_min: 0.15
+      band_width_max: 0.40
+      mask_ratio: 0.40
+      use_alp_bias: true
+      perturb_phase: false
+      phase_perturb_sigma: 0.10
+      n_bands: 1
+
+  video:
+    n_frames: 8
+    max_n_frames: 64
+    temporal_stride: 2
+    tube_mask_ratio: 0.75
+    min_mask_ratio: 0.40
+    max_mask_ratio: 0.80
+
+    # Native-resolution video crop constraints
+    # max_crop_px: 672px → max (672/16)² = 1764 tokens per frame.
+    # With T=16 frames: 28,224 tokens per clip — tractable with FlashAttention.
+    max_crop_px: 512
+    min_crop_px: 64
+    crop_scale: [0.5, 1.0]
+
+    allow_hflip: false
+    apply_speckle: true
+    speckle_sigma: 0.08
+
+    freq_mask:
+      r_inner_min: 0.10
+      r_outer_max: 0.95
+      band_width_min: 0.20
+      band_width_max: 0.50
+      mask_ratio: 0.75
+      use_alp_bias: false
+      perturb_phase: false
+      phase_perturb_sigma: 0.10
+      n_bands: 1
+
+curriculum:
+  total_training_steps: 300000
+  image_samples_per_epoch: 500000
+  video_samples_per_epoch: 100000
+  #
+  # Resolution curriculum (override max_global_crop_px at each phase):
+  #   Phase 1 (steps 0–30k):    max_global_crop_px=512,  max_crop_px=512
+  #   Phase 2 (steps 30k–150k): max_global_crop_px=672,  max_crop_px=672
+  #   Phase 3 (steps 150k–270k):max_global_crop_px=896,  max_crop_px=672
+  #   Phase 4 (steps 270k–300k):frozen backbone, downstream heads
+  #
+  # Gram anchoring activation (see gram_anchoring section below):
+  #   Activated at step 100k.  Gram teacher refreshed every 50k steps.
+
+# ── Gram anchoring ────────────────────────────────────────────────────────────
+# Controls the GramTeacher in training_integration.py.
+#
+# start_step: training step at which Gram anchoring is switched on.
+#   DINOv3 activates it after ~1M iterations on their schedule; at 300k total
+#   steps, 100k is a reasonable analogue (33% through training).
+#   At this point the student representations have stabilised enough for the
+#   initial Gram teacher snapshot to be meaningful.
+#
+# refresh_interval: how often (in steps) the Gram teacher snapshot is hard-
+#   updated from the current student.  50k gives the student enough time to
+#   drift before the anchor is refreshed.  Shorter = tighter anchor (less drift
+#   allowed); longer = looser anchor (more flexibility).
+#
+# lambda: weight of the Gram loss in the total objective.
+#   L_total = L_img + L_vid + λ6·L_cross + λ7·L_proto + lambda·L_gram
+#   DINOv3 uses 1.0.  Start at 0.5 and increase to 1.0 at Phase 3 if needed.
+gram_anchoring:
+  start_step: 100000
+  refresh_interval: 50000
+  lambda: 1.0
+
+anatomy_weights:
+  cardiac: 0.6
+  breast: 0.8
+  thyroid: 1.0
+  lung: 2.0
+  fetal_head: 1.5
+  fetal_abdomen: 1.5
+  intrapartum: 2.0
+  cardiac_fetal: 2.0
+  prostate: 2.0
+  ovarian: 2.0
+  brain: 1.5
+  muscle: 1.0
+  spine: 1.5
+  nerve: 1.5
+  liver: 1.2
+  gallbladder: 2.0
+  kidney: 1.5
+  carotid: 1.0
+  vascular: 1.5
+  skin: 2.0
+  ocular: 3.0
+
+datasets:
+  CAMUS:            "/data/us/CAMUS"
+  EchoNet-Dynamic:  "/data/us/EchoNet-Dynamic"
+  EchoNet-LVH:      "/data/us/EchoNet-LVH"
+  MIMIC-IV-ECHO:    "/data/us/MIMIC-IV-ECHO"
+  Unity-Imaging:    "/data/us/Unity-Imaging"
+  BUS-BRA:          "/data/us/BUS-BRA"
+  FETAL_PLANES_DB:  "/data/us/FETAL_PLANES_DB"
+  COVIDx-US:        "/data/us/COVIDx-US"
+  TN3K:             "/data/us/TN3K"
+  TN5000:           "/data/us/TN5000"
+  DDTI:             "/data/us/DDTI"
+  KidneyUS:         "/data/us/KidneyUS"
+  HC18:             "/data/us/HC18"
+  ACOUSLIC-AI:      "/data/us/ACOUSLIC-AI"
+  
+  ###Add other datasets here
+
+# ── Model configuration ───────────────────────────────────────────────────────
+# Controls which backbone is used for each branch.
+# Change image_backbone or video_backbone to swap models with no code changes.
+#
+# Available image backbones (registered in models/image_backbones/):
+#   dinov3_s      DINOv3-Small  (21M)   — fast iteration / ablations
+#   dinov3_splus  DINOv3-Small+ (21M)
+#   dinov3_b      DINOv3-Base   (86M)   — good balance
+#   dinov3_l      DINOv3-Large  (307M)  — recommended default
+#   dinov3_hplus  DINOv3-Huge+  (632M)  — max quality, high compute
+#   rad_dino      RadDINO       (86M)   — medical imaging fine-tuned, patch_size=14
+#   swin_v2_l     SwinV2-Large  (197M)  — hierarchical, patch_size=4
+#
+# Available video backbones (registered in models/video_backbones/):
+#   vjepa2_l      V-JEPA2-Large (307M)  — recommended default
+#   vjepa2_h      V-JEPA2-Huge  (632M)
+#   vjepa2_g      V-JEPA2-Giant (1.1B)
+#
+# Available frozen teachers (registered via @register_frozen_teacher):
+#   dinov3_7b     DINOv3-7B     permanently frozen, ~14 GB bf16
+#   null          disable frozen teacher entirely
+model:
+  image_backbone:  dinov3_l
+  video_backbone:  vjepa2_l
+  frozen_teacher:  dinov3_7b    # set to null to skip (saves ~14 GB per node)
+  ema_momentum:    0.9995
+  n_prototypes:    256
+  align_dim:       256
+  dtype:           bfloat16
+  hf_cache_dir:    null         # overridden at runtime to CSCS Store path

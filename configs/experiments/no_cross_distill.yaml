@@ -1,0 +1,16 @@
+# configs/experiments/no_cross_distill.yaml
+# ============================================================
+# Dual-stream training 
+# Tests whether the img-teacher → vid-student alignment objective
+# (λ6) adds value over training the two branches independently.
+# ============================================================
+
+_base_:
+  - configs/data/data_config.yaml
+  - configs/train/train_config.yaml
+
+experiment_name: no_cross_distill
+seed: 42
+
+train:
+  lam6: 0.0   # cross-branch distillation off; everything else unchanged

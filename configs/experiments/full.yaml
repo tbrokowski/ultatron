@@ -1,0 +1,18 @@
+# configs/experiments/full_oura.yaml
+# ============================================================
+# Full Ultatron training run — all components active.
+# This is the reproducibility record for the primary experiment.
+#
+# Usage:
+#   python scripts/train.py --config configs/experiments/full_oura.yaml
+# ============================================================
+
+_base_:
+  - configs/data/data_config.yaml
+  - configs/train/train_config.yaml
+
+experiment_name: full_oura_run1
+seed: 42
+
+# No overrides — all defaults from base configs apply.
+# Document any deviations from the base here for traceability.

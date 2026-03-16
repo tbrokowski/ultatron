@@ -1,0 +1,22 @@
+# configs/experiments/image_only_baseline.yaml
+# ============================================================
+# Image-only SSL baseline.  
+# ============================================================
+
+_base_:
+  - configs/data/data_config.yaml
+  - configs/train/train_config.yaml
+
+experiment_name: image_only_baseline
+seed: 42
+
+train:
+  # Disable video, cross-branch, and prototype losses
+  lam4:  0.0   # video CLS loss off
+  lam5:  0.0   # tube prediction off
+  lam6:  0.0   # cross-branch distillation off
+  lam7:  0.0   # prototype consistency off
+  # lam1, lam2, lam3 unchanged — image SSL fully active
+
+model:
+  video_backbone: null   # skip building the video branch entirely

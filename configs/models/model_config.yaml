@@ -1,0 +1,61 @@
+# configs/models/model_config.yaml
+# ============================================================
+# Model architecture configuration.
+
+# This file controls WHICH models are used and their key architecture parameters.  
+# Training hyperparameters (LR, loss weights, etc.) 
+
+# ============================================================
+
+model:
+  # ── Backbone selection ────────────────────────────────────────────────────
+  # String keys into the backbone registry (ultatron/models/registry.py).
+  # Change these to swap models 
+  #
+  # Image backbones:
+  #   dinov3_s     DINOv3-Small  (21M)   
+  #   dinov3_b     DINOv3-Base   (86M)  
+  #   dinov3_l     DINOv3-Large  (307M)  
+  #   dinov3_hplus DINOv3-Huge+  (632M)  
+  #   rad_dino     RadDINO       (86M)   medical pretrained, patch_size=14
+  #   swin_v2_l    SwinV2-Large  (197M)  hierarchical, patch_size=4
+  #
+  # Video backbones:
+  #   vjepa2_l     V-JEPA2-Large (307M) 
+  #   vjepa2_h     V-JEPA2-Huge  (632M)
+  #   vjepa2_g     V-JEPA2-Giant (1.1B)
+  #
+  # Frozen teacher (null to disable, saves ~14 GB VRAM per node):
+  #   dinov3_7b    DINOv3-7B permanently frozen distillation target
+  #   null         disabled
+  image_backbone:  dinov3_l
+  video_backbone:  vjepa2_l
+  frozen_teacher:  dinov3_7b
+
+  # ── EMA ──────────────────────────────────────────────────────────────────
+  # EMA momentum for student→teacher update (constant, no schedule).
+  # 0.9995 is optimal at global batch size ~131k (512 nodes × 4 GPUs × 64 imgs).
+  # Reduce to 0.999 for smaller batch sizes.
+  ema_momentum: 0.9995
+
+  # ── Cross-branch projection ───────────────────────────────────────────────
+  # Hidden dimension of the cross-branch alignment projection space.
+  # Both image patch tokens and video tube tokens are projected to this
+  # dimension for the cross-branch distillation loss.
+  align_dim: 512 # Vary, 128, 256, 512, 1024
+
+  # ── Prototype head ────────────────────────────────────────────────────────
+  # Number of learnable prototype vectors for the consistency loss.
+  n_prototypes: 256 # Vary, 128, 256, 512, 1024
+
+  # ── Precision ─────────────────────────────────────────────────────────────
+  # Dtype for student and EMA teacher.
+  # bfloat16: recommended — stable training, good throughput on GH200.
+  # float32:  use for debugging or if instability observed.
+  dtype: bfloat16
+
+  # ── HuggingFace cache ────────────────────────────────────────────────────
+  # Overridden at runtime by the trainer to point to the CSCS Store path
+  # (/capstor/store/cscs/swissai/a127/ultrasound/hf_cache).
+  # Leave null here; set via CSCSConfig.store_path("hf_cache") at startup.
+  hf_cache_dir: null

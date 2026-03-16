@@ -1,0 +1,43 @@
+# configs/finetune/echonet.yaml
+# ============================================================
+# Finetune hyperparameters for EchoNet-Dynamic.
+# Loaded by oura.finetune.echonet.EchoNetFinetune
+# Usage: python -m oura.finetune.echonet --config configs/finetune/echonet.yaml ...
+# ============================================================
+
+# Model backbone (which checkpoint to load from)
+model:
+  image_backbone: dinov3_l
+  video_backbone: vjepa2_l
+  frozen_teacher: null       # not needed for finetune; saves memory
+  dtype: bfloat16
+
+finetune:
+  # ── Optimiser ───────────────────────────────────────────────────────────────
+  lr:           1.0e-4
+  weight_decay: 0.01
+  max_epochs:   50
+  batch_size:   16
+  num_workers:  4
+
+  # ── Head architecture ────────────────────────────────────────────────────────
+  # "linear" = LinearSegHead (1 linear layer on patch tokens)
+  # "dpt"    = DPTSegHead (conv neck + bilinear upsample; better for dense pred)
+  # "mlp"    = MLPClsHead (2-layer MLP on CLS token, for classification tasks)
+  head_type:  linear   # regression uses clip_cls token, not patch tokens
+  # Note: uses video branch (vid_branch), not image branch.
+
+  # ── Early stopping ───────────────────────────────────────────────────────────
+  patience:      10
+  monitor:       val_mae      # metric key in compute_val_metrics() output
+  monitor_mode:  min          # "max" for dice/auc, "min" for loss/mae
+
+  # ── Backbone ─────────────────────────────────────────────────────────────────
+  freeze_backbone: true        # keep backbone frozen; only head is trained
+
+  # ── Resolution ───────────────────────────────────────────────────────────────
+  output_size: 224             # head output is upsampled to this before loss
+
+  # ── Logging / checkpointing ──────────────────────────────────────────────────
+  log_every:       5           # log every N epochs
+  checkpoint_best: true        # save best_head.pt when monitor improves
