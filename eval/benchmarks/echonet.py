@@ -69,7 +69,8 @@ class EchoNetBenchmarkDataset(Dataset):
         return samples
 
     def _load_clip(self, path: str) -> torch.Tensor:
-        """Load video clip → (T, 3, 112, 112) float32 [0, 1]."""
+        """Load video clip → (T, 3, 112, 112) float32 [0, 1]. Uses decord if available, else OpenCV (aarch64)."""
+        frames = None
         try:
             from decord import VideoReader, cpu
             vr      = VideoReader(path, ctx=cpu(0))
@@ -77,8 +78,31 @@ class EchoNetBenchmarkDataset(Dataset):
             indices = np.linspace(0, total - 1, self.n_frames, dtype=int).tolist()
             frames  = vr.get_batch(indices).asnumpy()   # (T, H, W, 3)
         except Exception:
-            # Fallback: return black clip if video unreadable
-            frames = np.zeros((self.n_frames, 112, 112, 3), dtype=np.uint8)
+            pass
+        if frames is None:
+            # OpenCV fallback (decord has no aarch64 wheel)
+            try:
+                import cv2
+                cap = cv2.VideoCapture(path)
+                total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+                cap.release()
+                indices = np.linspace(0, total - 1, self.n_frames, dtype=int).tolist()
+                cap = cv2.VideoCapture(path)
+                frames = []
+                for i in indices:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                    ret, frame = cap.read()
+                    if ret:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        frames.append(frame)
+                    else:
+                        frames.append(np.zeros((112, 112, 3), dtype=np.uint8))
+                cap.release()
+                if len(frames) < self.n_frames:
+                    frames.extend([np.zeros((112, 112, 3), dtype=np.uint8)] * (self.n_frames - len(frames)))
+                frames = np.stack(frames[:self.n_frames], axis=0)   # (T, H, W, 3)
+            except Exception:
+                frames = np.zeros((self.n_frames, 112, 112, 3), dtype=np.uint8)
 
         # Resize to 112×112 and normalise
         clip = []

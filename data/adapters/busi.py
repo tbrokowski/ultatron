@@ -51,22 +51,24 @@ class BUSIAdapter(BaseAdapter):
             split     = self._infer_split(img_path.stem, i, n)
 
             label_raw, label_ontology = self.CLASSES[cls_name]
-            instances = []
-            if has_mask:
-                instances.append(self._make_instance(
+            # Always create a classification instance so that all three classes
+            # (benign, malignant, normal) are represented in the manifest.
+            instances = [
+                self._make_instance(
                     instance_id    = img_path.stem,
                     label_raw      = label_raw,
                     label_ontology = label_ontology,
-                    mask_path      = str(mask_path),
-                    is_promptable  = True,
-                ))
+                    mask_path      = str(mask_path) if has_mask else None,
+                    is_promptable  = has_mask,
+                )
+            ]
 
             yield self._make_entry(
                 str(img_path), split,
                 modality      = "image",
                 instances     = instances,
                 has_mask      = has_mask,
-                task_type     = "segmentation" if has_mask else "ssl_only",
+                task_type     = "segmentation" if has_mask else "classification",
                 ssl_stream    = "image",
                 is_promptable = has_mask,
                 source_meta   = {

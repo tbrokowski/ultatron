@@ -1,0 +1,10 @@
+# configs/experiments/run1.yaml
+# First training run: BUSI + EchoNet + Benin-LUS + RSA-LUS
+# =============================================================================
+
+_base_:
+  - configs/run1/data_run1.yaml
+  - configs/train/train_config.yaml
+
+experiment_name: run1_busi_echonet_lus
+seed: 42

@@ -145,15 +145,47 @@ class ImageSSLCollator:
         # ── Seg masks (optional, pad to max spatial size) ─────────────────────
         raw_segs = [s.get("seg_mask") for s in samples]
         if any(m is not None for m in raw_segs):
-            valid = [m for m in raw_segs if m is not None]
-            _, _, sH, sW = valid[0].shape
-            padded_segs  = []
+            # Determine max spatial size across all masks
+            max_H = 0
+            max_W = 0
             for m in raw_segs:
                 if m is None:
-                    padded_segs.append(torch.zeros(1, 1, sH, sW))
+                    continue
+                if m.ndim == 4:
+                    _, _, h, w = m.shape
+                elif m.ndim == 3:
+                    _, h, w = m.shape
+                elif m.ndim == 2:
+                    h, w = m.shape
                 else:
-                    padded_segs.append(m.unsqueeze(0) if m.ndim == 3 else m.unsqueeze(0))
-            seg_masks = torch.cat(padded_segs, dim=0)
+                    raise ValueError(f"Unexpected seg_mask ndim={m.ndim}")
+                max_H = max(max_H, h)
+                max_W = max(max_W, w)
+
+            if max_H == 0 or max_W == 0:
+                seg_masks = None
+            else:
+                padded_segs: List[torch.Tensor] = []
+                for m in raw_segs:
+                    if m is None:
+                        padded = torch.zeros(1, 1, max_H, max_W)
+                    else:
+                        if m.ndim == 4:
+                            t = m
+                        elif m.ndim == 3:
+                            # (1, H, W) -> (1, 1, H, W)
+                            t = m.unsqueeze(0)
+                        elif m.ndim == 2:
+                            # (H, W) -> (1, 1, H, W)
+                            t = m.unsqueeze(0).unsqueeze(0)
+                        else:
+                            raise ValueError(f"Unexpected seg_mask ndim={m.ndim}")
+
+                        _, _, h, w = t.shape
+                        padded = torch.zeros(1, 1, max_H, max_W, dtype=t.dtype)
+                        padded[:, :, :h, :w] = t
+                    padded_segs.append(padded)
+                seg_masks = torch.cat(padded_segs, dim=0)
         else:
             seg_masks = None
 

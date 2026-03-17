@@ -12,6 +12,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _iter_params(model: nn.Module):
+    """
+    Yield trainable parameters for EMA.
+    Uses .parameters_for_ema() if available (our BaseModel subclasses can
+    exclude frozen adapter layers), otherwise falls back to .parameters().
+    """
+    if hasattr(model, "parameters_for_ema"):
+        yield from model.parameters_for_ema()
+    else:
+        yield from model.parameters()
+
+
 @torch.no_grad()
 def ema_update(student: nn.Module, teacher: nn.Module, momentum: float):
     """
@@ -19,8 +31,7 @@ def ema_update(student: nn.Module, teacher: nn.Module, momentum: float):
     Operates on .data directly — no gradient graph, no optimizer.
     Only updates parameters (not buffers like BN running stats).
     """
-    for s_p, t_p in zip(student.parameters_for_ema(),
-                        teacher.parameters_for_ema()):
+    for s_p, t_p in zip(_iter_params(student), _iter_params(teacher)):
         t_p.data.mul_(momentum).add_(s_p.data, alpha=1.0 - momentum)
 
 

@@ -107,6 +107,11 @@ class BaseAdapter(ABC):
         if isinstance(image_paths, str):
             image_paths = [image_paths]
 
+        # Allow adapters to extend source_meta without overriding the defaults.
+        extra_source_meta = kwargs.pop("source_meta", {}) or {}
+        source_meta = {"root": str(self.root), "doi": self.DOI}
+        source_meta.update(extra_source_meta)
+
         entry = USManifestEntry(
             sample_id=USManifestEntry.make_sample_id(self.DATASET_ID, image_paths[0]),
             dataset_id=self.DATASET_ID,
@@ -117,7 +122,7 @@ class BaseAdapter(ABC):
             modality_type=modality,
             image_paths=image_paths,
             instances=instances or [],
-            source_meta={"root": str(self.root), "doi": self.DOI},
+            source_meta=source_meta,
             **kwargs,
         )
         # Assign curriculum tier based on entry properties

@@ -24,9 +24,9 @@ from pathlib import Path
 
 import yaml
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from data.schema.manifest import ManifestWriter, manifest_stats, load_manifest
-from data.adapters.dataset_adapters import ADAPTER_REGISTRY, build_manifest_for_dataset
+from data.adapters import build_manifest_for_dataset
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")

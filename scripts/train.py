@@ -106,7 +106,6 @@ def main():
     # ── Imports (after sys.path is set) ───────────────────────────────────────
     from models import ModelConfig, build_image_branch, build_video_branch
     from models.branches.shared import CrossBranchDistillation, PrototypeHead
-    from models.heads import build_seg_head, build_cls_head
     from train.trainer import Trainer, TrainConfig
     from data.pipeline.datamodule import USFoundationDataModule
     from data.infra.cscs_paths import CSCSConfig
@@ -139,20 +138,17 @@ def main():
     proto_head = PrototypeHead(
         img_dim, model_cfg.n_prototypes
     ).to(device=device, dtype=dtype)
-    seg_n    = cfg.get("head", {}).get("seg", {}).get("n_classes", 1)
-    cls_n    = cfg.get("head", {}).get("cls", {}).get("n_classes", 256)
-    seg_head = build_seg_head(img_dim, n_classes=seg_n, head_type="linear").to(device=device, dtype=dtype)
-    cls_head = build_cls_head(img_dim, n_classes=cls_n, head_type="linear").to(device=device, dtype=dtype)
 
     # ── DDP wrap ──────────────────────────────────────────────────────────────
     if world_size > 1:
+        # Image branch: some params (e.g. DINOv3 registers) may be unused in Phase 1 loss.
         img_branch.student = DDP(
             img_branch.student, device_ids=[local_rank],
-            find_unused_parameters=False
+            find_unused_parameters=True,
         )
         vid_branch.student = DDP(
             vid_branch.student, device_ids=[local_rank],
-            find_unused_parameters=False
+            find_unused_parameters=True,
         )
         cross_distill = DDP(cross_distill, device_ids=[local_rank],
                             find_unused_parameters=True)
@@ -181,10 +177,23 @@ def main():
         freq_mask=FreqMaskConfig(**vid_freq) if vid_freq else FreqMaskConfig(),
     )
 
+    # Resolve manifest: use config path if it exists (absolute or repo-relative)
+    _manifest_cfg = Path(cfg["manifest"]["path"])
+    if not _manifest_cfg.is_absolute():
+        _manifest_cfg = Path(__file__).resolve().parent.parent / _manifest_cfg
+    if _manifest_cfg.exists():
+        manifest_path = str(_manifest_cfg)
+    else:
+        manifest_path = str(cscs.manifest_path(Path(cfg["manifest"]["path"]).name))
+
+    # Use config root_remap if present (e.g. {} to use manifest paths as-is from store).
+    # Otherwise remap store → scratch for staged runs.
+    root_remap = cfg["manifest"].get("root_remap")
+    if root_remap is None:
+        root_remap = cscs.remap_dict()
+
     dm = USFoundationDataModule(
-        manifest_path           = str(cscs.manifest_path(
-            Path(cfg["manifest"]["path"]).name
-        )),
+        manifest_path           = manifest_path,
         image_batch_size        = cfg["loaders"]["image_batch_size"],
         video_batch_size        = cfg["loaders"]["video_batch_size"],
         num_workers             = cfg["loaders"]["num_workers"],
@@ -194,28 +203,30 @@ def main():
         image_samples_per_epoch = cfg["curriculum"]["image_samples_per_epoch"],
         video_samples_per_epoch = cfg["curriculum"]["video_samples_per_epoch"],
         anatomy_weights         = cfg.get("anatomy_weights", {}),
-        root_remap              = cscs.remap_dict(),
+        root_remap              = root_remap,
         image_cfg               = img_tcfg,
         video_cfg               = vid_tcfg,
     )
     dm.setup()
 
     # ── Build trainer and run ─────────────────────────────────────────────────
+    # Disable AMP GradScaler for bfloat16 (not implemented for bf16 on some CUDA; bf16 doesn't need scaling).
+    use_amp_scaler = model_cfg.dtype != "bfloat16"
     trainer = Trainer(
-        cfg           = train_cfg,
-        img_branch    = img_branch,
-        vid_branch    = vid_branch,
-        cross_distill = cross_distill,
-        proto_head    = proto_head,
-        seg_head      = seg_head,
-        cls_head      = cls_head,
-        dm            = dm,
-        ckpt_dir      = ckpt_dir,
-        log_dir       = log_dir,
-        rank          = rank,
-        local_rank    = local_rank,
-        total_steps   = total_steps,
-        no_7b         = args.no_7b,
+        cfg                   = train_cfg,
+        img_branch            = img_branch,
+        vid_branch            = vid_branch,
+        cross_distill         = cross_distill,
+        proto_head            = proto_head,
+        dm                    = dm,
+        ckpt_dir              = ckpt_dir,
+        log_dir               = log_dir,
+        finetune_experiments  = [],
+        rank                  = rank,
+        local_rank            = local_rank,
+        total_steps           = total_steps,
+        no_7b                 = args.no_7b,
+        use_amp_scaler        = use_amp_scaler,
     )
 
     if args.phase:

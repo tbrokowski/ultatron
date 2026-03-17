@@ -126,7 +126,22 @@ class TrainConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "TrainConfig":
-        return cls(**{k: v for k, v in d.items() if hasattr(cls, k)})
+        filtered = {k: v for k, v in d.items() if hasattr(cls, k)}
+        # Coerce numeric fields in case YAML loaded them as str (e.g. 1e-4)
+        for key in ("base_lr", "phase4_lr", "weight_decay", "phase4_weight_decay",
+                    "beta1", "beta2", "grad_clip", "ema_momentum",
+                    "lam1", "lam2", "lam3", "lam4", "lam5", "lam6", "lam7",
+                    "lam_7b", "lam_gram", "lam_koleo",
+                    "phase1_frac", "phase2_frac", "phase3_frac"):
+            if key in filtered and isinstance(filtered[key], str):
+                filtered[key] = float(filtered[key])
+        for key in ("warmup_steps_p1", "warmup_steps_p2", "warmup_steps_p3",
+                    "gram_start_step", "gram_refresh_interval",
+                    "res_step_1", "res_step_2", "res_px_1", "res_px_2", "res_px_3",
+                    "checkpoint_every", "log_every"):
+            if key in filtered and isinstance(filtered[key], str):
+                filtered[key] = int(filtered[key])
+        return cls(**filtered)
 
     @classmethod
     def from_yaml(cls, path: str) -> "TrainConfig":
@@ -245,8 +260,10 @@ class Trainer:
         local_rank:            int  = 0,
         total_steps:           int  = 300_000,
         no_7b:                 bool = False,
+        use_amp_scaler:        bool = True,
     ):
         self.cfg                  = cfg
+        self.use_amp_scaler       = use_amp_scaler
         self.img_branch           = img_branch
         self.vid_branch           = vid_branch
         self.cross_distill        = cross_distill
@@ -287,7 +304,8 @@ class Trainer:
             weight_decay=cfg.weight_decay,
             betas=(cfg.beta1, cfg.beta2),
         )
-        self.scaler = GradScaler(enabled=torch.cuda.is_available())
+        # BFloat16 does not need loss scaling; GradScaler unscale is not implemented for bfloat16 on some CUDA builds.
+        self.scaler = GradScaler(enabled=use_amp_scaler and torch.cuda.is_available())
 
         # State
         self.global_step   = 0
@@ -379,8 +397,11 @@ class Trainer:
         """backward + clip + step + EMA + curriculum + log"""
         loss_tensor = losses["loss"]
 
-        self.scaler.scale(loss_tensor).backward()
-        self.scaler.unscale_(self.optimizer)
+        if self.scaler.is_enabled():
+            self.scaler.scale(loss_tensor).backward()
+            self.scaler.unscale_(self.optimizer)
+        else:
+            loss_tensor.backward()
 
         all_params = (
             list(self.img_branch.parameters())
@@ -393,8 +414,11 @@ class Trainer:
             self.cfg.grad_clip,
         )
 
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        if self.scaler.is_enabled():
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
 
         # EMA

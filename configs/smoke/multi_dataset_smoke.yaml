@@ -1,0 +1,99 @@
+# configs/smoke/multi_dataset_smoke.yaml
+# ============================================================
+# Minimal multi-dataset config for training smoke tests.
+# Mirrors the structure of configs/data/data_config.yaml but
+# with tiny batch sizes, short curriculum, and small crops.
+#
+# Used ONLY by tests/dataset_adapters/training_smoke.py.
+
+manifest:
+  # Combined manifest built by training_smoke.py at runtime.
+  path: "dataset_exploration_outputs/smoke/combined_smoke_manifest.jsonl"
+
+loaders:
+  image_batch_size: 2
+  video_batch_size: 2
+  num_workers: 0        # single-process for debuggability
+  pin_memory: false
+
+transforms:
+  patch_size: 16
+
+  image:
+    n_global_crops: 2
+    global_crop_scale: [0.4, 1.0]
+    n_local_crops: 2
+    local_crop_scale: [0.2, 0.6]
+
+    patch_size: 16
+    mask_ratio: 0.40
+
+    max_global_crop_px: 112
+    min_crop_px: 32
+
+    brightness: 0.4
+    contrast: 0.4
+    apply_speckle: true
+    speckle_sigma: 0.10
+    apply_blur: true
+    blur_sigma: [0.1, 2.0]
+    apply_solarize: true
+    solarize_thresh: 0.5
+
+    allow_hflip: false
+    allow_vflip: false
+    max_rotation_deg: 15.0
+
+  video:
+    n_frames: 4
+    max_n_frames: 16
+    temporal_stride: 2
+    tube_mask_ratio: 0.75
+    min_mask_ratio: 0.40
+    max_mask_ratio: 0.80
+
+    max_crop_px: 112
+    min_crop_px: 32
+    crop_scale: [0.5, 1.0]
+
+    allow_hflip: false
+    apply_speckle: true
+    speckle_sigma: 0.08
+
+    # Tubelet masking: both freq + spatial for full V-JEPA coverage.
+    # tube_size=2 with n_frames=4 gives 2 independent spatial masks per clip.
+    mask_strategy: "both"
+    tube_size: 2
+    spatial_mask_ratio: 0.40
+
+    freq_mask:
+      r_inner_min: 0.10
+      r_outer_max: 0.95
+      band_width_min: 0.20
+      band_width_max: 0.50
+      mask_ratio: 0.75
+      use_alp_bias: false
+      perturb_phase: false
+      phase_perturb_sigma: 0.10
+      n_bands: 1
+
+curriculum:
+  total_training_steps: 20
+  image_samples_per_epoch: 32
+  video_samples_per_epoch: 16
+
+model:
+  image_backbone: dinov3_s
+  video_backbone: vjepa2_l
+  frozen_teacher: null       # skip 7B teacher for smoke tests
+  ema_momentum: 0.9995
+  n_prototypes: 64
+  align_dim: 256
+  dtype: float32
+  hf_cache_dir: null
+
+anatomy_weights:
+  cardiac: 1.0
+  breast: 1.0
+  lung: 1.0
+

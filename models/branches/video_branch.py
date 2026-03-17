@@ -61,7 +61,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from image_branch import ema_update   # shared EMA utility
+from .shared import ema_update   # shared EMA utility
 
 log = logging.getLogger(__name__)
 
@@ -69,64 +69,88 @@ VJEPA2_L_HF = "facebook/vjepa2-vitl-fpc64-256"
 
 
 # ── Mask index builders ───────────────────────────────────────────────────────
+#
+# NOTE: An identical implementation lives in models/video_backbones/vjepa2.py
+# (_tube_mask_to_indices).  Both are kept independent to avoid a cross-package
+# import cycle between branches/ and video_backbones/ at module load time.
+# If the logic ever needs to change, update both copies.
+# TODO: extract to a shared models/mask_utils.py and import from both files.
 
 def _tube_mask_to_indices(
-    tube_mask: torch.Tensor,       # (B, T, ph, pw) bool  True=masked
-    padding_mask: Optional[torch.Tensor],  # (B, ph, pw) bool  True=real
-    valid_frames: Optional[torch.Tensor],  # (B, T) bool  True=real
-) -> tuple[torch.Tensor, torch.Tensor]:
+    tube_mask: torch.Tensor,                  # (B, T, ph, pw) bool  True=masked
+    padding_mask: Optional[torch.Tensor],     # (B, ph, pw) bool     True=real
+    valid_frames: Optional[torch.Tensor],     # (B, T) bool          True=real
+    tubelet_size: int = 2,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """
-    Convert tube_mask to context_mask and target_mask index tensors
-    as expected by HuggingFace VJEPA2Model.
+    Convert a frame-level tube_mask to context_mask / target_mask index lists
+    as required by HuggingFace VJEPA2Model.
 
-    context_mask : (B, N_ctx, 1) LongTensor  — visible patch indices
-    target_mask  : (B, N_tgt, 1) LongTensor  — masked patch indices
+    VJEPA2 tokenises video with tubelet_size-frame 3D patch embeddings, so
+    the encoded sequence length is T_enc = T // tubelet_size — NOT T.
+    All indices must be in [0, T_enc * ph * pw).
 
-    Indices are into the flattened spatiotemporal sequence of length T*ph*pw.
-    Padding patches (padding_mask=False) and padding frames (valid_frames=False)
-    are excluded from both sets.
-
-    Because N_ctx and N_tgt vary per sample, we pad the shorter sequences to
-    the batch maximum with a sentinel value (= sequence length) and let the
-    model ignore out-of-range indices.  In practice, since all samples in a
-    batch are cropped to the same resolution (by the collator's max-pooling),
-    N_ctx and N_tgt are constant within a batch.
+    Returns:
+        context_mask : list of one Tensor(B, N_ctx)  — visible tubelet indices
+        target_mask  : list of one Tensor(B, N_tgt)  — masked  tubelet indices
     """
     B, T, ph, pw = tube_mask.shape
-    N = T * ph * pw
 
-    # Build a real-token mask: real frame AND real patch AND not tube-masked
-    # (B, T, ph, pw)
-    real = torch.ones(B, T, ph, pw, dtype=torch.bool, device=tube_mask.device)
+    # ── 1. Collapse frame-level masks into tubelet-level ─────────────────────
+    T_enc   = max(1, T // tubelet_size)
+    T_in    = T_enc * tubelet_size   # trim to a multiple of tubelet_size
+    N_enc   = T_enc * ph * pw        # encoded sequence length (what VJEPA2 sees)
+
+    # tube_mask → tubelet_mask: a tubelet is masked if ALL its frames are masked
+    tm      = tube_mask[:, :T_in].view(B, T_enc, tubelet_size, ph, pw)
+    tube_enc = tm.all(dim=2)                                  # (B, T_enc, ph, pw)
+
+    # valid_frames → valid_enc: a tubelet is valid if ANY of its frames is valid
     if valid_frames is not None:
-        real = real & valid_frames.unsqueeze(-1).unsqueeze(-1)   # (B,T,1,1)
+        vf_trim = valid_frames[:, :T_in].view(B, T_enc, tubelet_size)
+        vf_enc  = vf_trim.any(-1)                             # (B, T_enc)
+    else:
+        vf_enc  = torch.ones(B, T_enc, dtype=torch.bool,
+                             device=tube_mask.device)
+
+    # ── 2. Build (B, T_enc, ph, pw) real-token mask ──────────────────────────
+    real = vf_enc.unsqueeze(-1).unsqueeze(-1).expand_as(tube_enc)
     if padding_mask is not None:
-        real = real & padding_mask.unsqueeze(1)                  # (B,1,ph,pw)
+        real = real & padding_mask.unsqueeze(1)               # (B,1,ph,pw)
 
-    real_flat    = real.flatten(1)       # (B, N)
-    masked_flat  = tube_mask.flatten(1)  # (B, N)
+    real_flat    = real.flatten(1)        # (B, N_enc)
+    masked_flat  = tube_enc.flatten(1)    # (B, N_enc)
 
-    context_flat = real_flat & ~masked_flat   # (B, N) visible real patches
-    target_flat  = real_flat & masked_flat    # (B, N) masked real patches
+    context_flat = real_flat & ~masked_flat
+    target_flat  = real_flat &  masked_flat
 
-    # Collect indices for each sample; pad to max_len within batch
+    # ── 3. Convert to index tensors padded to batch-max length ───────────────
     ctx_indices, tgt_indices = [], []
     for b in range(B):
-        ctx = context_flat[b].nonzero(as_tuple=False).squeeze(1)   # (N_ctx,)
-        tgt = target_flat[b].nonzero(as_tuple=False).squeeze(1)    # (N_tgt,)
+        ctx = context_flat[b].nonzero(as_tuple=False).squeeze(1)
+        tgt = target_flat[b].nonzero(as_tuple=False).squeeze(1)
+        # Ensure at least one index in each set (fallback: all tokens)
+        if ctx.numel() == 0:
+            ctx = torch.arange(N_enc, device=tube_mask.device)
+        if tgt.numel() == 0:
+            tgt = torch.arange(N_enc, device=tube_mask.device)
         ctx_indices.append(ctx)
         tgt_indices.append(tgt)
 
     max_ctx = max(x.shape[0] for x in ctx_indices)
     max_tgt = max(x.shape[0] for x in tgt_indices)
 
-    ctx_padded = torch.full((B, max_ctx), N, dtype=torch.long, device=tube_mask.device)
-    tgt_padded = torch.full((B, max_tgt), N, dtype=torch.long, device=tube_mask.device)
+    # Sentinel = N_enc − 1 (last valid index) so out-of-range gathers are safe
+    ctx_padded = torch.full((B, max_ctx), N_enc - 1, dtype=torch.long,
+                            device=tube_mask.device)
+    tgt_padded = torch.full((B, max_tgt), N_enc - 1, dtype=torch.long,
+                            device=tube_mask.device)
     for b in range(B):
         ctx_padded[b, :ctx_indices[b].shape[0]] = ctx_indices[b]
         tgt_padded[b, :tgt_indices[b].shape[0]] = tgt_indices[b]
 
-    return ctx_padded.unsqueeze(-1), tgt_padded.unsqueeze(-1)
+    # VJEPA2Model expects list[Tensor(B, N)] — one element per mask group.
+    return [ctx_padded], [tgt_padded]
 
 
 # ── V-JEPA2 encoder wrapper ───────────────────────────────────────────────────
@@ -145,8 +169,19 @@ class VJEPA2Encoder(nn.Module):
 
     def __init__(self, hf_model):
         super().__init__()
-        self.model       = hf_model
-        self.hidden_size = hf_model.config.hidden_size
+        self.model = hf_model
+        # Support both HuggingFace model (has .config) and our VJEPA2VideoBackbone (has .hidden_size)
+        if hasattr(hf_model, "config"):
+            self.hidden_size = hf_model.config.hidden_size
+            self.tubelet_size = getattr(hf_model.config, "tubelet_size", 2)
+        else:
+            self.hidden_size = getattr(hf_model, "hidden_size", None)
+            if self.hidden_size is None:
+                raise AttributeError("Video encoder model must have config.hidden_size or hidden_size")
+            inner = getattr(hf_model, "_model", hf_model)
+            cfg = getattr(inner, "config", None)
+            self.tubelet_size = getattr(cfg, "tubelet_size", 2) if cfg else 2
+        self._is_backbone = hasattr(hf_model, "_model")  # VJEPA2VideoBackbone
 
     def forward(
         self,
@@ -155,9 +190,17 @@ class VJEPA2Encoder(nn.Module):
         padding_mask: Optional[torch.Tensor] = None, # (B, ph, pw)
         valid_frames: Optional[torch.Tensor] = None, # (B, T)
     ) -> dict:
+        if self._is_backbone:
+            return self.model(
+                pixel_values,
+                tube_mask=tube_mask,
+                padding_mask=padding_mask,
+                valid_frames=valid_frames,
+            )
         if tube_mask is not None:
             context_mask, target_mask = _tube_mask_to_indices(
-                tube_mask, padding_mask, valid_frames
+                tube_mask, padding_mask, valid_frames,
+                tubelet_size=self.tubelet_size,
             )
         else:
             context_mask = target_mask = None
@@ -169,19 +212,43 @@ class VJEPA2Encoder(nn.Module):
             output_hidden_states=False,
         )
 
-        # last_hidden_state: (B, T*ph*pw, D)  — all spatiotemporal tokens
+        # last_hidden_state: (B, T_enc*ph*pw, D)
+        # T_enc = T_input // tubelet_size  (the model temporally compresses frames)
         tube_tokens = out.last_hidden_state
 
         # clip_cls: mean over all real (non-padding) tokens
-        if padding_mask is not None and valid_frames is not None:
+        if padding_mask is not None:
+            B_out, N_enc, _ = tube_tokens.shape
+            ph, pw = padding_mask.shape[-2], padding_mask.shape[-1]
+            T_enc = N_enc // (ph * pw) if (ph * pw) > 0 else 1
+
+            if valid_frames is not None:
+                # valid_frames is in input-frame time; map it to tubelet time.
+                T_in = valid_frames.shape[1]
+                if T_enc == T_in:
+                    vf_enc = valid_frames                        # no compression
+                elif T_in >= T_enc and T_in % T_enc == 0:
+                    # Group consecutive frames into tubelets; tubelet is valid
+                    # if any of its constituent frames is valid.
+                    ratio  = T_in // T_enc
+                    vf_enc = valid_frames[:, :T_enc * ratio].view(
+                        B_out, T_enc, ratio).any(-1)             # (B, T_enc)
+                else:
+                    # Fallback: interpolate validity at T_enc
+                    vf_enc = valid_frames[:, :T_enc]             # (B, T_enc)
+            else:
+                vf_enc = torch.ones(B_out, T_enc,
+                                    dtype=torch.bool,
+                                    device=tube_tokens.device)
+
             real_flat = (
-                valid_frames.unsqueeze(-1).unsqueeze(-1) &
+                vf_enc.unsqueeze(-1).unsqueeze(-1) &
                 padding_mask.unsqueeze(1)
-            ).flatten(1).float()   # (B, T*ph*pw)
-            denom     = real_flat.sum(1, keepdim=True).clamp(min=1)
-            clip_cls  = (tube_tokens * real_flat.unsqueeze(-1)).sum(1) / denom
+            ).flatten(1).float()                                 # (B, T_enc*ph*pw)
+            denom    = real_flat.sum(1, keepdim=True).clamp(min=1)
+            clip_cls = (tube_tokens * real_flat.unsqueeze(-1)).sum(1) / denom
         else:
-            clip_cls = tube_tokens.mean(1)   # (B, D)
+            clip_cls = tube_tokens.mean(1)                       # (B, D)
 
         result = {
             "clip_cls":    clip_cls,
@@ -216,6 +283,7 @@ class VideoBranch(nn.Module):
         super().__init__()
         self.student = VJEPA2Encoder(student_model)
         self.teacher = VJEPA2Encoder(teacher_model)
+        self.embed_dim = self.student.hidden_size
         for p in self.teacher.parameters():
             p.requires_grad_(False)
         self.teacher.eval()
@@ -348,7 +416,7 @@ def build_video_branch(
     log.info(f"Loading V-JEPA2-L from {VJEPA2_L_HF} ...")
     student_hf = AutoModel.from_pretrained(
         VJEPA2_L_HF,
-        torch_dtype=dtype,
+        dtype=dtype,
         cache_dir=hf_cache_dir,
     )
 

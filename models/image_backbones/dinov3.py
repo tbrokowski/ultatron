@@ -26,17 +26,26 @@ is performed in this file.
 
 Padding mask injection
 ----------------------
-DINOv3 uses PyTorch SDPA attention.  We inject an additive -inf bias via a
-forward pre-hook on each attention layer so that padding patch tokens are
-masked from all attention computations.  The hook is registered once at
-construction time and removed cleanly when the backbone is discarded.
+DINOv3 uses the `attention_mask` parameter in DINOv3ViTAttention.forward to
+apply an additive (-inf) bias over padding patch tokens.  We register a
+forward pre-hook on every DINOv3ViTAttention module so that the bias is
+injected at exactly the right level — NOT on child Linear projections which
+don't accept extra kwargs.
 
 The bias has shape (B, n_heads, seq, seq) where seq = 1 + n_reg + N.
 Padding positions are -inf in both key and query dimensions.
+
+Note on API change from earlier design
+---------------------------------------
+The original code injected `attn_bias` (custom kwarg) via hooks registered
+on every module whose *path* contained the word "attention".  That approach
+broke on nn.Linear layers (q_proj, k_proj, …) because they don't accept
+unknown kwargs.  The current design:
+  • targets isinstance(mod, DINOv3ViTAttention) only
+  • injects `attention_mask`, the documented parameter DINOv3 actually reads
 """
 from __future__ import annotations
 
-import copy
 import logging
 from typing import Optional
 
@@ -59,17 +68,17 @@ _DINOV3_HF_IDS = {
 }
 
 
-# ── Padding mask injection ────────────────────────────────────────────────────
+# ── Padding mask helpers ──────────────────────────────────────────────────────
 
 def _make_attn_bias(
-    padding_mask: torch.Tensor,   # (B, ph, pw)
+    padding_mask: torch.Tensor,   # (B, ph, pw) — True = valid patch
     n_heads: int,
     n_reg: int,
 ) -> torch.Tensor:
     """
     Build (B, n_heads, seq, seq) additive attention bias.
-    seq = 1 (CLS) + n_reg (registers) + N (patches).
-    Padding token positions get -inf in both key and query dims.
+    seq = 1 (CLS) + n_reg (register tokens) + N (patches).
+    Padding token positions receive -inf so they are ignored in softmax.
     """
     B, ph, pw = padding_mask.shape
     N   = ph * pw
@@ -77,8 +86,8 @@ def _make_attn_bias(
 
     bias = torch.zeros(B, 1, seq, seq,
                        device=padding_mask.device, dtype=torch.float32)
-    is_pad  = ~padding_mask.flatten(1)          # (B, N)  True=padding
-    p_start = 1 + n_reg                         # index where patches start
+    is_pad  = ~padding_mask.flatten(1)          # (B, N)  True = padding
+    p_start = 1 + n_reg                         # index where patch tokens start
 
     # Key dimension: padding patches contribute nothing (columns → -inf)
     bias[:, 0, :, p_start:].masked_fill_(
@@ -88,27 +97,32 @@ def _make_attn_bias(
     bias[:, 0, p_start:, :].masked_fill_(
         is_pad.unsqueeze(2).expand(-1, -1, seq), float("-inf")
     )
-    return bias.expand(-1, n_heads, -1, -1)
+    return bias.expand(-1, n_heads, -1, -1)     # (B, n_heads, seq, seq)
 
 
-class _AttnBiasHook:
+class _AttentionMaskHook:
     """
-    Forward pre-hook that injects an additive attention bias into every
-    attention layer call.  Stored as a plain object (not nn.Module) so
-    it doesn't appear in module parameters/buffers.
+    Forward pre-hook registered on each DINOv3ViTAttention module.
+
+    DINOv3ViTAttention.forward signature:
+        forward(hidden_states, attention_mask=None, position_embeddings=None, **kwargs)
+
+    The hook injects `attention_mask` into kwargs so that the attention
+    interface (eager / SDPA / Flash) receives our additive padding bias.
+    The hook is a plain callable (not nn.Module) to stay out of the parameter
+    and buffer lists.
     """
+
     def __init__(self):
-        self._bias: Optional[torch.Tensor] = None
+        self._mask: Optional[torch.Tensor] = None
 
-    def set_bias(self, bias: Optional[torch.Tensor]):
-        self._bias = bias
+    def set_mask(self, mask: Optional[torch.Tensor]) -> None:
+        self._mask = mask
 
     def __call__(self, module, args, kwargs):
-        if self._bias is not None:
-            kwargs["attn_bias"] = self._bias
+        if self._mask is not None:
+            kwargs["attention_mask"] = self._mask
         return args, kwargs
-
-
 
 
 # ── DINOv3 backbone wrapper ───────────────────────────────────────────────────
@@ -117,39 +131,49 @@ class DINOv3ImageBackbone(ImageBackboneBase):
     """
     Wraps any DINOv3 ViT variant as an ImageBackboneBase.
 
-    Output dict keys: cls, patch_tokens, register_tokens (optional)
+    Output dict keys: cls, patch_tokens, register_tokens (when n_reg > 0)
     """
 
     def __init__(self, hf_model, variant_key: str):
         super().__init__()
-        self._vit       = hf_model
+        self._vit        = hf_model
         self.hidden_size = hf_model.config.hidden_size
-        self._n_heads   = hf_model.config.num_attention_heads
-        self._n_reg     = getattr(hf_model.config, "num_register_tokens", 0)
+        self._n_heads    = hf_model.config.num_attention_heads
+        self._n_reg      = getattr(hf_model.config, "num_register_tokens", 0)
         self.variant_key = variant_key
 
-        # Register attention bias hook on every attention layer
-        self._hook          = _AttnBiasHook()
-        self._hook_handles  = []
+        # Import the concrete attention class so we can target it precisely.
+        # Lazy import keeps the top-level module importable without transformers.
+        from transformers.models.dinov3_vit.modeling_dinov3_vit import (
+            DINOv3ViTAttention,
+        )
+
+        self._hook         = _AttentionMaskHook()
+        self._hook_handles = []
         for name, mod in self._vit.named_modules():
-            if "attention" in name.lower() and hasattr(mod, "forward"):
+            if isinstance(mod, DINOv3ViTAttention):
                 h = mod.register_forward_pre_hook(self._hook, with_kwargs=True)
                 self._hook_handles.append(h)
 
+        log.debug(
+            "DINOv3ImageBackbone: registered attention-mask hooks on "
+            "%d DINOv3ViTAttention modules.", len(self._hook_handles)
+        )
+
     def forward(
         self,
-        pixel_values: torch.Tensor,            # (B, 3, H, W)
-        padding_mask: Optional[torch.Tensor] = None,   # (B, ph, pw)
+        pixel_values: torch.Tensor,              # (B, 3, H, W)
+        padding_mask: Optional[torch.Tensor] = None,  # (B, ph, pw)
         **kwargs,
     ) -> dict:
         if padding_mask is not None:
             bias = _make_attn_bias(padding_mask, self._n_heads, self._n_reg)
-            self._hook.set_bias(bias.to(pixel_values.device))
+            self._hook.set_mask(bias.to(pixel_values.device))
         else:
-            self._hook.set_bias(None)
+            self._hook.set_mask(None)
 
         out = self._vit(pixel_values=pixel_values, output_hidden_states=False)
-        self._hook.set_bias(None)   # always clear after forward
+        self._hook.set_mask(None)   # always clear — even if forward raised
 
         hs = out.last_hidden_state  # (B, 1 + n_reg + N, D)
         result = {
@@ -181,9 +205,9 @@ class DINOv3FrozenTeacher(FrozenTeacherBase):
 
     def __init__(self, hf_model):
         super().__init__()
-        self._vit       = hf_model
+        self._vit        = hf_model
         self.hidden_size = hf_model.config.hidden_size
-        self._n_reg     = getattr(hf_model.config, "num_register_tokens", 0)
+        self._n_reg      = getattr(hf_model.config, "num_register_tokens", 0)
 
         for p in self._vit.parameters():
             p.requires_grad_(False)
@@ -213,7 +237,7 @@ def _make_dinov3_factory(variant_key: str):
         from transformers import AutoModel
         log.info(f"Loading {variant_key} ({hf_id}) ...")
         hf_model = AutoModel.from_pretrained(
-            hf_id, torch_dtype=dtype, cache_dir=hf_cache_dir
+            hf_id, dtype=dtype, cache_dir=hf_cache_dir
         )
         backbone = DINOv3ImageBackbone(hf_model, variant_key=variant_key)
         log.info(f"  {backbone}")

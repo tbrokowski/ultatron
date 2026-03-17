@@ -17,7 +17,19 @@ ANATOMY_FINE_BY_FAMILY: Dict[str,list] = {
     "thyroid": ["nodule_benign","nodule_malignant","nodule_unknown","whole_thyroid"],
     "fetal":   ["fetal_head","fetal_brain","head_circumference","fetal_abdomen",
                 "fetal_femur","fetal_heart","maternal_cervix","pubic_symphysis"],
-    "lung":    ["b_line","a_line","consolidation","pleural_effusion","pleural_line","whole_lung"],
+    "lung":    [
+        "b_line",
+        "a_line",
+        "consolidation",
+        "pleural_effusion",
+        "pleural_line",
+        "whole_lung",
+        "confluent_b_line",
+        "large_consolidation",
+        "small_consolidation",
+        "pneumothorax",
+        "not_measured",
+    ],
     "liver":   ["whole_liver","liver_lesion","fatty_liver"],
     "kidney":  ["whole_kidney"],
     "prostate":["whole_prostate","prostate_cancer","peripheral_zone"],
@@ -54,6 +66,10 @@ _add(["fetal abdomen","fetal_abdomen"],"fetal","fetal_abdomen")
 _add(["maternal cervix","cervix"],"fetal","maternal_cervix")
 _add(["b-line","b_line","bline","vertical_artifact"],"lung","b_line")
 _add(["consolidation","covid","pneumonia"],"lung","consolidation")
+_add(["confluent b-lines","confluent_b_lines","confluent_b_line"],"lung","confluent_b_line")
+_add(["large consolidations","large_consolidation","large consolidation"],"lung","large_consolidation")
+_add(["small consolidations or nodules","small_consolidation","small consolidation"],"lung","small_consolidation")
+_add(["pattern a' (pneumothorax)","pneumothorax"],"lung","pneumothorax")
 _add(["lung","whole_lung"],"lung","whole_lung")
 _add(["liver","whole_liver"],"liver","whole_liver")
 _add(["fatty_liver","nafld"],"liver","fatty_liver")
@@ -68,6 +84,7 @@ _add(["carotid","carotid_artery","cca"],"vascular","carotid_intima_media")
 _add(["brachial_plexus","plexus"],"nerve","brachial_plexus")
 _add(["brain_tumor","tumor"],"brain","tumor_boundary")
 _add(["phantom","phantom_structure"],"phantom","phantom_structure")
+_add(["not measured","not_measured"],"lung","not_measured")
 
 def normalize_label(raw:str)->Tuple[str,str]:
     key=raw.lower().strip().replace("-","_").replace(" ","_")

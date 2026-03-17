@@ -1,0 +1,26 @@
+# configs/run1/minimal_run1.yaml
+# 50-step DDP smoke run — inherits full run1 config, overrides only timing.
+# Use with: bash scripts/submit_job.sh -minimalrun
+
+_base_:
+  - configs/run1/data_run1.yaml
+  - configs/train/train_config.yaml
+
+experiment_name: minimal_run1_ddp_smoke
+seed: 42
+
+# Override curriculum to 50 steps (just enough to hit all 3 SSL phases)
+curriculum:
+  total_training_steps: 50
+  image_samples_per_epoch: 500
+  video_samples_per_epoch: 500
+
+# Tighter checkpoint/log cadence so we see output quickly
+train:
+  checkpoint_every: 25
+  log_every: 5
+  warmup_steps_p1: 5
+  warmup_steps_p2: 5
+  warmup_steps_p3: 5
+  res_step_1: 999999
+  res_step_2: 999999

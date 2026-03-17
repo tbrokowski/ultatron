@@ -1,0 +1,27 @@
+# configs/finetune/lus_patient.yaml
+# Benin/RSA patient-level TB, pneumonia, COVID prediction heads
+# =============================================================================
+
+image_backbone:  dinov3_s
+video_backbone:  vjepa2_l
+frozen_teacher:  null
+
+lr:              1e-4
+weight_decay:    0.01
+max_epochs:      30
+batch_size:      8
+
+head_type:       linear
+freeze_backbone: true
+max_frames:      4
+
+monitor:         val_auc
+mode:            max
+
+heads:
+  - id: lus_patient_tb
+  - id: lus_patient_pneumonia
+  - id: lus_patient_covid
+
+dataset_root_benin: "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
+dataset_root_rsa:   "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"

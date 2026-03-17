@@ -1,0 +1,107 @@
+# configs/run1/data_run1.yaml
+# First run: BUSI + EchoNet-Dynamic + Benin-LUS + RSA-LUS
+# Single-node (4 GPUs), 20k steps, dinov3_s + vjepa2_l
+# =============================================================================
+
+manifest:
+  # Use local path for run1 manifest (built by build_manifest.py).
+  # On CSCS, copy to scratch and set path to /capstor/scratch/cscs/$USER/ultrasound/manifests/run1_train.jsonl
+  path: "dataset_exploration_outputs/run1/run1_train.jsonl"
+  val_path: null
+  root_remap: {}
+
+loaders:
+  image_batch_size: 16
+  video_batch_size: 4
+  num_workers: 8
+  pin_memory: true
+
+transforms:
+  patch_size: 16
+  image:
+    n_global_crops: 2
+    global_crop_scale: [0.4, 1.0]
+    n_local_crops: 4
+    local_crop_scale: [0.05, 0.4]
+    patch_size: 16
+    mask_ratio: 0.40
+    max_global_crop_px: 224
+    min_crop_px: 32
+    brightness: 0.4
+    contrast: 0.4
+    apply_speckle: true
+    speckle_sigma: 0.10
+    apply_blur: true
+    blur_sigma: [0.1, 2.0]
+    apply_solarize: true
+    solarize_thresh: 0.5
+    allow_hflip: false
+    allow_vflip: false
+    max_rotation_deg: 15.0
+    freq_mask:
+      r_inner_min: 0.10
+      r_outer_max: 0.95
+      band_width_min: 0.15
+      band_width_max: 0.40
+      mask_ratio: 0.40
+      use_alp_bias: true
+      perturb_phase: false
+      phase_perturb_sigma: 0.10
+      n_bands: 1
+  video:
+    n_frames: 8
+    max_n_frames: 16
+    temporal_stride: 2
+    tube_mask_ratio: 0.75
+    min_mask_ratio: 0.40
+    max_mask_ratio: 0.80
+    max_crop_px: 224
+    min_crop_px: 64
+    crop_scale: [0.5, 1.0]
+    allow_hflip: false
+    apply_speckle: true
+    speckle_sigma: 0.08
+    mask_strategy: "both"
+    tube_size: 2
+    spatial_mask_ratio: 0.40
+    freq_mask:
+      r_inner_min: 0.10
+      r_outer_max: 0.95
+      band_width_min: 0.20
+      band_width_max: 0.50
+      mask_ratio: 0.75
+      use_alp_bias: false
+      perturb_phase: false
+      phase_perturb_sigma: 0.10
+      n_bands: 1
+
+curriculum:
+  total_training_steps: 20000
+  image_samples_per_epoch: 10000
+  video_samples_per_epoch: 14000
+
+gram_anchoring:
+  start_step: 999999
+  refresh_interval: 50000
+  lambda: 0.0
+
+anatomy_weights:
+  cardiac: 1.0
+  breast:  1.2
+  lung:    1.5
+
+datasets:
+  BUSI:            "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
+  EchoNet-Dynamic: "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-Dynamic"
+  Benin-LUS:       "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
+  RSA-LUS:         "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
+
+model:
+  image_backbone:  dinov3_s
+  video_backbone:  vjepa2_l
+  frozen_teacher:  null
+  ema_momentum:    0.999
+  n_prototypes:    128
+  align_dim:       256
+  dtype:           bfloat16
+  hf_cache_dir:    null

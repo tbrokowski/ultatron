@@ -151,13 +151,18 @@ class VideoSSLTransformConfig:
     speckle_sigma: float = 0.08
 
     # ── Masking strategy ──────────────────────────────────────────────────────
-    mask_strategy: str = MASK_STRATEGY_FREQ
+    # "freq"    : frequency-domain band masking per temporal group (tube_size frames)
+    # "spatial" : spatial block masking per temporal group
+    # "both"    : freq + spatial applied independently, union tube mask (default)
+    mask_strategy: str = MASK_STRATEGY_BOTH
 
     freq_mask: FreqMaskConfig = field(default_factory=lambda: FreqMaskConfig(
         mask_ratio=0.75,
     ))
 
-    # Additional spatial tube mask ratio for "both" mode
+    # Spatial block mask ratio for the spatial component in "spatial" and "both" modes.
+    # In "both" mode this is INDEPENDENT of tube_mask_ratio — the spatial component
+    # samples its own block regions; the union of both becomes the final tube_mask.
     spatial_mask_ratio: float = 0.40
 
     def __post_init__(self):
@@ -480,58 +485,91 @@ def freq_mask_video(
     cfg: FreqMaskConfig,
     patch_size: int = 16,
     mask_ratio_override: Optional[float] = None,
+    tube_size: Optional[int] = None,
 ) -> Tuple[Tensor, Tensor]:
     """
     Frequency-domain tube masking for a (T, C, H, W) clip.
-    Band selection is shared across frames and channels.
+
+    tube_size controls temporal grouping for band selection:
+
+      None or >= T  A single frequency band is chosen from a central reference
+                    frame and applied to all T frames uniformly (same spatial
+                    mask across the entire clip).
+
+      < T           Frames are divided into temporal groups of tube_size.
+                    Each group selects its own frequency band independently
+                    from its representative frame, yielding per-group spatial
+                    masks with temporal diversity between groups.  This matches
+                    the spatiotemporal tubelet structure used in V-JEPA.
+
+    Returns
+    -------
+    visible_clip : (T, C, H, W)  spectrally degraded clip
+    tube_mask    : (T, ph, pw)   bool  True = high-energy-loss patch
     """
-    T, C, H, W  = clip.shape
-    ph, pw      = H // patch_size, W // patch_size
-    mask_ratio  = mask_ratio_override if mask_ratio_override is not None else cfg.mask_ratio
+    T, C, H, W = clip.shape
+    ph, pw     = H // patch_size, W // patch_size
+    mask_ratio = mask_ratio_override if mask_ratio_override is not None else cfg.mask_ratio
+    radii      = _make_radial_grid(H, W)
 
-    # Choose representative frame for band selection
-    ref_t  = random.randint(max(0, T // 3), max(0, min(T - 1, 2 * T // 3)))
-    # Use first channel of reference frame for band selection
-    X_ref  = torch.fft.fftshift(torch.fft.fft2(clip[ref_t, 0]))
-    radii  = _make_radial_grid(H, W)
+    effective_tube = tube_size if (tube_size is not None and tube_size < T) else T
+    n_groups       = math.ceil(T / effective_tube)
 
-    band_mask = torch.zeros(H, W, dtype=torch.bool)
-    for _ in range(cfg.n_bands):
-        half_w = random.uniform(cfg.band_width_min, cfg.band_width_max) / 2.0
-        r_c    = _sample_band_centre(cfg, half_w, X_ref.abs(), alp_weights=None)
-        ring   = (radii >= (r_c - half_w)) & (radii <= (r_c + half_w))
-        ring   = ring & (radii >= cfg.r_inner_min)
-        band_mask = band_mask | ring
+    visible_frames: List[Tensor] = []
+    spatial_per_frame: List[Tensor] = []
 
-    visible_frames = []
-    total_energy   = torch.zeros(ph, pw)
+    for g in range(n_groups):
+        t_start = g * effective_tube
+        t_end   = min(T, t_start + effective_tube)
+        n_t     = t_end - t_start
 
-    for t in range(T):
-        masked_chs = []
-        for c in range(C):
-            X_shift = torch.fft.fftshift(torch.fft.fft2(clip[t, c])).clone()
-            total_energy += (X_shift.abs()**2 * band_mask.float()
-                             ).unfold(0, patch_size, patch_size
-                             ).unfold(1, patch_size, patch_size
-                             ).sum(dim=(-1, -2))
-            X_shift[band_mask] = 0.0
-            if cfg.perturb_phase:
-                phasor  = torch.polar(torch.ones(H, W),
-                                      torch.randn(H, W) * cfg.phase_perturb_sigma)
-                X_shift = X_shift * phasor
-            frame_ch = torch.fft.ifft2(torch.fft.ifftshift(X_shift)).real.clamp(0.0, 1.0)
-            masked_chs.append(frame_ch)
-        visible_frames.append(torch.stack(masked_chs, dim=0))   # (C, H, W)
+        # Representative frame for band selection (middle of this group)
+        ref_t  = t_start + (n_t - 1) // 2
+        X_ref  = torch.fft.fftshift(torch.fft.fft2(clip[ref_t, 0]))
 
-    visible_clip = torch.stack(visible_frames, dim=0)   # (T, C, H, W)
+        band_mask = torch.zeros(H, W, dtype=torch.bool)
+        for _ in range(cfg.n_bands):
+            half_w = random.uniform(cfg.band_width_min, cfg.band_width_max) / 2.0
+            r_c    = _sample_band_centre(cfg, half_w, X_ref.abs(), alp_weights=None)
+            ring   = (radii >= (r_c - half_w)) & (radii <= (r_c + half_w))
+            ring   = ring & (radii >= cfg.r_inner_min)
+            band_mask = band_mask | ring
 
-    total_energy = total_energy / (T * C)
-    if total_energy.max() > 0:
-        total_energy = total_energy / total_energy.max()
-    n_mask    = max(1, int(ph * pw * mask_ratio))
-    threshold = total_energy.flatten().topk(n_mask).values[-1]
-    spatial   = total_energy >= threshold
-    return visible_clip, spatial.unsqueeze(0).expand(T, -1, -1).contiguous()
+        group_energy = torch.zeros(ph, pw)
+
+        for t in range(t_start, t_end):
+            masked_chs = []
+            for c in range(C):
+                X_shift = torch.fft.fftshift(torch.fft.fft2(clip[t, c])).clone()
+                group_energy += (
+                    X_shift.abs()**2 * band_mask.float()
+                ).unfold(0, patch_size, patch_size
+                ).unfold(1, patch_size, patch_size
+                ).sum(dim=(-1, -2))
+                X_shift[band_mask] = 0.0
+                if cfg.perturb_phase:
+                    phasor  = torch.polar(
+                        torch.ones(H, W),
+                        torch.randn(H, W) * cfg.phase_perturb_sigma,
+                    )
+                    X_shift = X_shift * phasor
+                masked_chs.append(
+                    torch.fft.ifft2(torch.fft.ifftshift(X_shift)).real.clamp(0.0, 1.0)
+                )
+            visible_frames.append(torch.stack(masked_chs, dim=0))   # (C, H, W)
+
+        # Derive spatial mask from mean energy loss for this group
+        group_energy = group_energy / (n_t * C)
+        if group_energy.max() > 0:
+            group_energy = group_energy / group_energy.max()
+        n_mask    = max(1, int(ph * pw * mask_ratio))
+        threshold = group_energy.flatten().topk(n_mask).values[-1]
+        spatial   = group_energy >= threshold   # (ph, pw)
+        spatial_per_frame.extend([spatial] * n_t)
+
+    visible_clip = torch.stack(visible_frames, dim=0)           # (T, C, H, W)
+    tube_mask    = torch.stack(spatial_per_frame, dim=0)        # (T, ph, pw)
+    return visible_clip, tube_mask
 
 
 def freq_mask_image_alp(
@@ -603,33 +641,58 @@ def spatial_patch_mask(
 
 
 def spatial_tube_mask(
-    clip: Tensor,           # (T, C, H, W)
+    clip: Tensor,                  # (T, C, H, W)
     patch_size: int,
     mask_ratio: float,
+    tube_size: Optional[int] = None,
 ) -> Tuple[Tensor, Tensor]:
     """
-    Zero out a spatially consistent random block across all frames.
+    Spatiotemporal tube masking for a (T, C, H, W) clip.
+
+    tube_size controls the temporal granularity of masking:
+
+      None or >= T  Classic V-JEPA tube: a single spatial block is sampled once
+                    and applied identically across all T frames.  This is the
+                    most aggressive temporal consistency but least diverse.
+
+      < T           V-JEPA spatiotemporal tubelet masking: frames are divided
+                    into consecutive groups of tube_size frames.  Each group
+                    gets its own independently sampled spatial block, giving
+                    temporal diversity across groups while maintaining spatial
+                    consistency within each tube_size window.  This is the
+                    recommended setting (tube_size=2 in VideoSSLTransformConfig).
 
     Returns
     -------
-    visible_clip : (T, C, H, W)
-    tube_mask    : (T, ph, pw) bool
+    visible_clip : (T, C, H, W)  pixels zeroed at masked patch positions
+    tube_mask    : (T, ph, pw)   bool  True = masked
     """
     T, C, H, W = clip.shape
     ph, pw     = H // patch_size, W // patch_size
     n_mask     = max(1, int(ph * pw * mask_ratio))
-    mask_2d    = _random_block_mask(ph, pw, n_mask)   # (ph, pw)
 
-    visible = clip.clone()
-    for pi in range(ph):
-        for pj in range(pw):
-            if mask_2d[pi, pj]:
-                r0 = pi * patch_size
-                c0 = pj * patch_size
-                visible[:, :, r0:r0 + patch_size, c0:c0 + patch_size] = 0.0
+    if tube_size is None or tube_size >= T:
+        # Classic all-frames tube: one spatial block for all T frames
+        mask_2d   = _random_block_mask(ph, pw, n_mask)
+        tube_mask = mask_2d.unsqueeze(0).expand(T, -1, -1).contiguous()
+    else:
+        # Spatiotemporal tubelets: independent spatial block per temporal group
+        n_groups  = math.ceil(T / tube_size)
+        tube_mask = torch.zeros(T, ph, pw, dtype=torch.bool)
+        for g in range(n_groups):
+            t_start = g * tube_size
+            t_end   = min(T, t_start + tube_size)
+            tube_mask[t_start:t_end] = _random_block_mask(ph, pw, n_mask).unsqueeze(0)
 
-    tube_mask = mask_2d.unsqueeze(0).expand(T, -1, -1).contiguous()
+    # Vectorised pixel zeroing — avoids nested Python loops over patch positions
+    mask_px = (
+        tube_mask
+        .repeat_interleave(patch_size, dim=1)   # (T, H, pw)
+        .repeat_interleave(patch_size, dim=2)   # (T, H, W)
+    )
+    visible = clip * (~mask_px.unsqueeze(1)).float()   # (T, C, H, W)
     return visible, tube_mask
+
 
 def random_patch_mask(h: int, w: int, patch_size: int, mask_ratio: float) -> Tensor:
     ph, pw = h // patch_size, w // patch_size
@@ -661,10 +724,26 @@ def priority_weighted_mask(
     return mask.reshape(ph, pw)
 
 
-def random_tube_mask(n_frames, ph, pw, patch_size, mask_ratio) -> Tensor:
-    n_mask  = int(ph * pw * mask_ratio)
-    mask_2d = _random_block_mask(ph, pw, n_mask)
-    return mask_2d.unsqueeze(0).expand(n_frames, -1, -1).contiguous()
+def random_tube_mask(
+    n_frames: int,
+    ph: int,
+    pw: int,
+    patch_size: int,
+    mask_ratio: float,
+    tube_size: Optional[int] = None,
+) -> Tensor:
+    """Return a (n_frames, ph, pw) bool tube mask.  See spatial_tube_mask for tube_size semantics."""
+    n_mask = int(ph * pw * mask_ratio)
+    if tube_size is None or tube_size >= n_frames:
+        mask_2d = _random_block_mask(ph, pw, n_mask)
+        return mask_2d.unsqueeze(0).expand(n_frames, -1, -1).contiguous()
+    n_groups  = math.ceil(n_frames / tube_size)
+    tube_mask = torch.zeros(n_frames, ph, pw, dtype=torch.bool)
+    for g in range(n_groups):
+        t_start = g * tube_size
+        t_end   = min(n_frames, t_start + tube_size)
+        tube_mask[t_start:t_end] = _random_block_mask(ph, pw, n_mask).unsqueeze(0)
+    return tube_mask
 
 
 def _random_block_mask(ph: int, pw: int, n_mask: int) -> Tensor:
@@ -741,32 +820,91 @@ def _apply_video_mask(
     """
     Apply the configured masking strategy to a video clip.
 
+    Strategies
+    ----------
+    "freq"    Frequency-domain tubelet masking.
+              A frequency band is zeroed in Fourier space per temporal group
+              of tube_size frames.  The spatial tube mask is derived from
+              which patches lost the most spectral energy.
+              Student sees a spectrally degraded clip; teacher sees the clean
+              original.  Physics-motivated for ultrasound: the model learns
+              tissue structure from residual low-frequency content.
+
+    "spatial" Spatial block tubelet masking.
+              A contiguous 2D rectangular block is sampled per temporal group
+              of tube_size frames and zeroed in pixel space.  Classic V-JEPA
+              approach: the model must predict completely occluded regions.
+
+    "both"    Combined freq + spatial tubelet masking (recommended for V-JEPA).
+              Both strategies are applied INDEPENDENTLY to the same clip:
+                • Freq masking degrades spectral content at freq_tube positions.
+                • Spatial masking independently samples spatial block positions.
+                • Combined visible = freq-degraded clip with spatial blocks zeroed.
+                • Tube mask = union of both masks.
+              Two distinct pretext signals coexist:
+                1. Recover spectral content from freq-only masked patches.
+                2. Predict completely occluded spatial tube patches.
+
+    cfg.tube_size controls temporal granularity for both masking functions:
+    each group of tube_size consecutive frames shares the same spatial mask,
+    but adjacent groups are independently sampled (spatiotemporal tubelets).
+
     Returns
     -------
     visible_clip : (T, C, H, W)
-    tube_mask    : (T, ph, pw) bool
+    tube_mask    : (T, ph, pw) bool  True = masked (target position)
     """
-    strategy = cfg.mask_strategy
+    strategy  = cfg.mask_strategy
+    tube_size = cfg.tube_size   # propagate temporal granularity to all masking functions
 
     if strategy == MASK_STRATEGY_FREQ:
-        return freq_mask_video(clip, cfg.freq_mask, patch_size,
-                               mask_ratio_override=mask_ratio)
+        return freq_mask_video(
+            clip, cfg.freq_mask, patch_size,
+            mask_ratio_override=mask_ratio,
+            tube_size=tube_size,
+        )
 
     elif strategy == MASK_STRATEGY_SPATIAL:
-        return spatial_tube_mask(clip, patch_size, mask_ratio)
+        return spatial_tube_mask(clip, patch_size, mask_ratio, tube_size=tube_size)
 
     elif strategy == MASK_STRATEGY_BOTH:
-        # Step 1: frequency masking
+        # Frequency and spatial masking are applied independently, then layered:
+        #
+        #   Step 1 — freq masking on the ORIGINAL clip
+        #     → freq_visible:  all frames spectrally degraded at freq_tube positions
+        #     → freq_tube:     (T, ph, pw) bool — high-energy-loss patches
+        #
+        #   Step 2 — spatial block masking on the ORIGINAL clip
+        #     → spatial_tube:  (T, ph, pw) bool — contiguous spatial block per group
+        #     (we only need the mask; the zeroing is applied below)
+        #
+        #   Combined visible:
+        #     spatial_tube positions → 0  (completely invisible to student)
+        #     freq_tube only positions → spectrally degraded (partially visible)
+        #     neither-masked positions → original context
+        #
+        #   This layering gives two distinct prediction targets:
+        #     • recover spectral content from freq-degraded non-zero patches
+        #     • predict completely occluded spatial tube regions
         freq_visible, freq_tube = freq_mask_video(
-            clip, cfg.freq_mask, patch_size, mask_ratio_override=mask_ratio
+            clip, cfg.freq_mask, patch_size,
+            mask_ratio_override=mask_ratio,
+            tube_size=tube_size,
         )
-        # Step 2: additional spatial tube masking
-        spatial_visible, spatial_tube = spatial_tube_mask(
-            freq_visible, patch_size, cfg.spatial_mask_ratio
+        # Derive spatial tube mask from the original clip geometry (not freq_visible)
+        # so the two masking patterns are fully independent.
+        _, spatial_tube = spatial_tube_mask(
+            clip, patch_size, cfg.spatial_mask_ratio, tube_size=tube_size
         )
-        # Union tube mask
-        combined_tube = freq_tube | spatial_tube
-        return spatial_visible, combined_tube
+        # Zero spatial tube positions in the freq-degraded clip
+        mask_px = (
+            spatial_tube
+            .repeat_interleave(patch_size, dim=1)
+            .repeat_interleave(patch_size, dim=2)
+        )   # (T, H, W)
+        combined_visible = freq_visible * (~mask_px.unsqueeze(1)).float()
+        combined_tube    = freq_tube | spatial_tube
+        return combined_visible, combined_tube
 
     raise ValueError(f"Unknown mask_strategy: {strategy!r}")
 
@@ -880,26 +1018,49 @@ class ImageSSLTransform:
 
 class VideoSSLTransform:
     """
-    Native-resolution V-JEPA tube masking.
+    Native-resolution V-JEPA spatiotemporal tubelet masking.
 
     Channel handling
     ----------------
     Frames are converted with to_canonical_tensor() to (3, H, W) RGB.
     Greyscale frames are channel-repeated to R=G=B.
 
-    Masking strategy
-    ----------------
-    Controlled by cfg.mask_strategy:
-      "freq"    Frequency-domain tube masking (default)
-      "spatial" Random spatial block tube masking
-      "both"    Frequency tube masking + spatial tube masking, union mask
+    Masking strategy  (cfg.mask_strategy)
+    --------------------------------------
+    "freq"    Frequency-domain tubelet masking.
+              Per temporal group of cfg.tube_size frames, an independent
+              frequency band is removed in Fourier space.  The tube_mask marks
+              patches with the highest spectral energy loss.  Physics-motivated
+              for ultrasound speckle — the model learns from low-frequency
+              tissue structure.
+
+    "spatial" Spatial block tubelet masking.
+              Per temporal group, an independent random rectangular block is
+              sampled and zeroed in pixel space.  Classic V-JEPA approach.
+
+    "both"    Combined (default).
+              Freq and spatial masking are applied INDEPENDENTLY:
+                - Freq degrades spectral content everywhere in the clip.
+                - Spatial sampling independently selects block regions.
+                - Combined visible = freq-degraded clip with spatial blocks
+                  zeroed to 0 on top.
+                - tube_mask = freq_tube | spatial_tube (union).
+              Two complementary pretext objectives:
+                1. Predict spectral content from freq-degraded but visible patches.
+                2. Predict completely occluded spatial tube regions.
+
+    Temporal grouping
+    -----------------
+    cfg.tube_size defines the temporal granularity of all masking.  Every group
+    of tube_size consecutive frames shares the same spatial mask; adjacent groups
+    are independently sampled (true V-JEPA spatiotemporal tubelets).
 
     Output dict
     -----------
-    out["full"]          (T, C, H, W)  clean clip
-    out["visible"]       (T, C, H, W)  masked clip
-    out["tube_mask"]     (T, ph, pw)   bool
-    out["padding_mask"]  (ph, pw)      bool  True=real patch
+    out["full"]          (T, C, H, W)  clean original clip (teacher input)
+    out["visible"]       (T, C, H, W)  masked clip (student input)
+    out["tube_mask"]     (T, ph, pw)   bool  True = masked target position
+    out["padding_mask"]  (ph, pw)      bool  True = real (non-padded) patch
     """
 
     def __init__(self, cfg: VideoSSLTransformConfig, patch_size: int = 16):

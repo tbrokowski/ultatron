@@ -87,6 +87,25 @@ transforms:
     apply_speckle: true
     speckle_sigma: 0.08
 
+    # ── Tubelet masking ────────────────────────────────────────────────────────
+    #
+    # mask_strategy: "both" applies frequency-domain AND spatial block tubelet
+    #   masking independently per temporal group of tube_size frames (V-JEPA).
+    #   Use "freq" for frequency-only or "spatial" for spatial-only ablations.
+    #
+    # tube_size: temporal extent of each tubelet in frames.
+    #   Frames are divided into consecutive groups of tube_size; each group
+    #   gets its own independently sampled mask (spatial consistency within
+    #   the group, temporal diversity across groups).
+    #   tube_size=2 with n_frames=8 gives 4 independent spatial masks per clip.
+    #
+    # spatial_mask_ratio: fraction of spatial patches to zero in the spatial
+    #   component (used by "spatial" and "both" strategies).  This is sampled
+    #   independently from tube_mask_ratio (the freq component ratio).
+    mask_strategy: "both"
+    tube_size: 2
+    spatial_mask_ratio: 0.40
+
     freq_mask:
       r_inner_min: 0.10
       r_outer_max: 0.95

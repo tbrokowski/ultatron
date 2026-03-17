@@ -183,7 +183,7 @@ def build_video_branch(
     log.info("  Copying student to EMA teacher ...")
     teacher = copy.deepcopy(student)
 
-    branch = VideoBranch(student=student, teacher=teacher)
+    branch = VideoBranch(student, teacher)
     branch = branch.to(device=device, dtype=dtype)
 
     n_student = sum(p.numel() for p in branch.student.parameters())

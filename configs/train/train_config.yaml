@@ -1,0 +1,46 @@
+# configs/train/train_config.yaml
+# Base training hyperparameters (run1-scaled: 20k steps, single-node)
+# =============================================================================
+
+train:
+  phase1_frac: 0.10
+  phase2_frac: 0.20
+  phase3_frac: 0.90
+
+  base_lr:          1e-4
+  weight_decay:     0.04
+  beta1:            0.90
+  beta2:            0.95
+  grad_clip:        1.0
+  warmup_steps_p1:  500
+  warmup_steps_p2:  300
+  warmup_steps_p3:  200
+
+  ema_momentum:     0.999
+
+  lam1:      1.0
+  lam2:      1.0
+  lam3:      0.5
+  lam4:      1.0
+  lam5:      1.0
+  lam6:      1.0
+  lam7:      0.5
+  lam_7b:    0.0
+  lam_gram:  0.0
+  lam_koleo: 0.1
+
+  gram_start_step:       999999
+  gram_refresh_interval: 50000
+
+  res_step_1:  4000
+  res_step_2:  12000
+  res_px_1:    224
+  res_px_2:    336
+  res_px_3:    448
+
+  checkpoint_every: 1000
+  log_every:        25
+
+  phase4_lr:           1e-4
+  phase4_weight_decay: 0.01
+  use_koleo:           false

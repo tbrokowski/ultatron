@@ -71,7 +71,6 @@ class EchoNetDynamicAdapter(BaseAdapter):
                     label_ontology = "lv_segmentation",
                     anatomy_family = "cardiac",
                     is_promptable  = True,
-                    regression_target = ef,
                 ))
 
             yield self._make_entry(

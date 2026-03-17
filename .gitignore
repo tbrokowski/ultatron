@@ -1,0 +1,77 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env
+
+# ── Build / packaging ─────────────────────────────────────────────────────────
+*.egg-info/
+dist/
+build/
+*.egg
+MANIFEST
+
+# ── Testing & coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.cover
+.hypothesis/
+
+# ── Type checking / linting ───────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Exploration & generated outputs ──────────────────────────────────────────
+dataset_exploration_outputs/
+echonet_exploration_outputs/
+
+# ── Checkpoints / model weights ───────────────────────────────────────────────
+checkpoints/
+runs/
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+*.bin
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+tensorboard_logs/
+tb_logs/
+
+# ── Data files (keep manifests/configs, ignore raw data) ──────────────────────
+*.dcm
+*.mhd
+*.mha
+*.nii
+*.nii.gz
+*.avi
+*.mp4
+*.mov
+*.mkv
+
+# ── HuggingFace cache ─────────────────────────────────────────────────────────
+.cache/

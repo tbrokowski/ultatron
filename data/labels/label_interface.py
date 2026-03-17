@@ -516,6 +516,70 @@ def _register_default_heads():
         dataset_ids=["COVIDx-US", "LUS-multicenter-2025"],
     ))
 
+    # ── Benin / RSA LUS: video-level + patient-level heads ─────────────────────
+    R.register(HeadSpec(
+        head_id="lus_video_multilabel",
+        head_type=HeadType.MULTILABEL_CLS,
+        loss_type=LossType.BCE_WITH_LOGITS,
+        anatomy_family="lung",
+        label_key="lus_video_labels",
+        n_classes=7,
+        class_names=[
+            "a_line",
+            "b_line",
+            "confluent_b_line",
+            "pleural_effusion",
+            "large_consolidation",
+            "small_consolidation",
+            "pneumothorax",
+        ],
+        dataset_ids=["Benin-LUS", "RSA-LUS"],
+    ))
+    R.register(HeadSpec(
+        head_id="lus_patient_tb",
+        head_type=HeadType.PATIENT_CLS,
+        loss_type=LossType.BCE_WITH_LOGITS,
+        anatomy_family="lung",
+        label_key="patient_tb_label",
+        n_classes=1,
+        class_names=["tb"],
+        aggregation="mean",
+        dataset_ids=["Benin-LUS", "RSA-LUS"],
+    ))
+    R.register(HeadSpec(
+        head_id="lus_patient_pneumonia",
+        head_type=HeadType.PATIENT_CLS,
+        loss_type=LossType.BCE_WITH_LOGITS,
+        anatomy_family="lung",
+        label_key="patient_pneumonia_label",
+        n_classes=1,
+        class_names=["pneumonia"],
+        aggregation="mean",
+        dataset_ids=["Benin-LUS", "RSA-LUS"],
+    ))
+    R.register(HeadSpec(
+        head_id="lus_patient_covid",
+        head_type=HeadType.PATIENT_CLS,
+        loss_type=LossType.BCE_WITH_LOGITS,
+        anatomy_family="lung",
+        label_key="patient_covid_label",
+        n_classes=1,
+        class_names=["covid"],
+        aggregation="mean",
+        dataset_ids=["Benin-LUS", "RSA-LUS"],
+    ))
+    R.register(HeadSpec(
+        head_id="lus_site_severity",
+        head_type=HeadType.REGRESSION,
+        loss_type=LossType.SMOOTH_L1,
+        anatomy_family="lung",
+        label_key="lus_severity",
+        n_classes=1,
+        target_min=1.0,
+        target_max=7.0,
+        dataset_ids=["RSA-LUS"],
+    ))
+
     # ── Breast ────────────────────────────────────────────────────────────────
     R.register(HeadSpec(
         head_id="breast_lesion_seg",

@@ -399,13 +399,14 @@ def phase2_step(
 
         loss_cls = cosine_loss(s_out["clip_cls"], t_out["clip_cls"])
 
-        # Tube prediction: predict at masked real positions
-        tube_flat = batch["tube_masks"].flatten(1, -1)   # (B, T*ph*pw)
+        # Tube prediction: predict at masked AND real (non-padding, valid-frame) positions
+        tube_masks = batch["tube_masks"]                          # (B, T, ph, pw)
+        real = torch.ones_like(tube_masks)                        # (B, T, ph, pw)
         if v_pmask is not None:
-            real_flat = v_pmask.unsqueeze(1).expand_as(batch["tube_masks"]).flatten(1, -1)
-            active    = tube_flat & real_flat
-        else:
-            active = tube_flat
+            real = real & v_pmask[:, None, :, :]                  # exclude spatial padding
+        if valid is not None:
+            real = real & valid[:, :, None, None]                 # exclude padding frames
+        active = tube_masks.flatten(1) & real.flatten(1)          # (B, T*ph*pw)
 
         if "predicted" in s_out and active.any():
             loss_tube = patch_prediction_loss(
@@ -478,12 +479,13 @@ def phase3_step(
             padding_mask=v_pmask, valid_frames=valid
         )
         loss_cls_vid = cosine_loss(s_vid["clip_cls"], t_vid["clip_cls"])
-        tube_flat = vid_b["tube_masks"].flatten(1, -1)
+        vid_tube_masks = vid_b["tube_masks"]                       # (B, T, ph, pw)
+        real_v = torch.ones_like(vid_tube_masks)
         if v_pmask is not None:
-            real_v = v_pmask.unsqueeze(1).expand_as(vid_b["tube_masks"]).flatten(1, -1)
-            active_v = tube_flat & real_v
-        else:
-            active_v = tube_flat
+            real_v = real_v & v_pmask[:, None, :, :]              # exclude spatial padding
+        if valid is not None:
+            real_v = real_v & valid[:, :, None, None]             # exclude padding frames
+        active_v = vid_tube_masks.flatten(1) & real_v.flatten(1)  # (B, T*ph*pw)
         if "predicted" in s_vid and active_v.any():
             loss_tube = patch_prediction_loss(
                 s_vid["predicted"], t_vid["tube_tokens"], active_v

@@ -37,7 +37,11 @@ from torch.utils.data import Dataset
 
 from data.schema.manifest import USManifestEntry, Instance, load_manifest
 from data.pipeline.dataset import USFoundationDataset, load_image, load_mask, load_video_frames
-from data.pipeline.transforms import ImageSSLTransform, ImageSSLTransformConfig
+from data.pipeline.transforms import (
+    ImageSSLTransform, ImageSSLTransformConfig,
+    VideoSSLTransform, VideoSSLTransformConfig,
+    to_canonical_tensor,
+)
 from data.labels.label_interface import (
     LabelTarget, HeadSpec, HeadType, LossType,
     HEAD_REGISTRY,
@@ -141,10 +145,12 @@ class DownstreamDataset(USFoundationDataset):
 
         if self.return_aug:
             views = self.transform(img)
-            image_tensor = views["global"][0]  # (1, H, W)
+            image_tensor = views["global"][0]  # (C, H, W)
         else:
             from data.pipeline.transforms import to_canonical_tensor
-            image_tensor = to_canonical_tensor(img, size=self.cfg.global_crop_size)
+            # Latest to_canonical_tensor signature does not take a size argument;
+            # rely on native resolution here for smoke tests / simple usage.
+            image_tensor = to_canonical_tensor(img)
 
         # ── Build label targets ───────────────────────────────────────────────
         targets: List[LabelTarget] = []
@@ -252,6 +258,23 @@ class DownstreamDataset(USFoundationDataset):
         self, e: USManifestEntry, spec: HeadSpec
     ) -> Optional[LabelTarget]:
         """Extract classification label from instance or source_meta."""
+        # Benin/RSA LUS: video-level multilabel vector packed in source_meta
+        if spec.head_id == "lus_video_multilabel":
+            vec = e.source_meta.get("video_labels")
+            if vec is None:
+                return None
+            try:
+                t = torch.tensor(vec, dtype=torch.float32)
+            except Exception:
+                return None
+            return LabelTarget(
+                head_id=spec.head_id,
+                head_type=spec.head_type,
+                loss_type=spec.loss_type,
+                anatomy=e.anatomy_family,
+                value=t,
+                is_valid=True,
+            )
         # Try instance-level classification labels
         for inst in e.instances:
             if inst.classification_label is not None:
@@ -308,6 +331,16 @@ class DownstreamDataset(USFoundationDataset):
                 return build_regression_target(float(ef_raw), spec.head_id, e.anatomy_family)
             except (TypeError, ValueError):
                 pass
+        # RSA LUS per-site severity (1-7, -1 = not measured)
+        if spec.head_id == "lus_site_severity":
+            sev_raw = e.source_meta.get("severity")
+            try:
+                sev = float(sev_raw)
+            except (TypeError, ValueError):
+                return None
+            if sev < 0:
+                return None
+            return build_regression_target(sev, spec.head_id, e.anatomy_family)
         return None
 
     def _build_clip_target(self, e: USManifestEntry) -> Optional[LabelTarget]:
@@ -431,8 +464,11 @@ class PatientLevelDataset(Dataset):
         root_remap: Optional[Dict[str, str]] = None,
         max_frames: int = 32,
         active_head_ids: Optional[List[str]] = None,
+        video_cfg: Optional[VideoSSLTransformConfig] = None,
     ):
         self.cfg = cfg or ImageSSLTransformConfig()
+        self.video_cfg = video_cfg
+        self._video_transform = VideoSSLTransform(video_cfg) if video_cfg is not None else None
         self.root_remap = root_remap or {}
         self.max_frames = max_frames
         self.active_head_ids = set(active_head_ids) if active_head_ids else None
@@ -457,35 +493,78 @@ class PatientLevelDataset(Dataset):
         # Sort by frame index if available
         entries = sorted(entries, key=lambda e: e.frame_indices[0] if e.frame_indices else 0)
 
-        frames = []
-        for e in entries[:self.max_frames]:
+        frames: List[Tensor] = []
+        tube_masks_list: List[Tensor] = []
+
+        for e in entries:
+            if len(frames) >= self.max_frames:
+                break
             try:
-                if e.modality_type in ("video", "pseudo_video"):
+                if e.modality_type in ("video", "pseudo_video") and self._video_transform is not None:
+                    raw_frames = self._base_ds._load_clip(
+                        e, max_frames=self.video_cfg.max_n_frames
+                    )
+                    if not raw_frames:
+                        continue
+                    out = self._video_transform(raw_frames)
+                    vis: Tensor  = out["visible"]    # (T, C, H, W)
+                    tmask: Tensor = out["tube_mask"]  # (T, ph, pw)
+                    remaining = self.max_frames - len(frames)
+                    n_add = min(vis.shape[0], remaining)
+                    for fi in range(n_add):
+                        frames.append(vis[fi])
+                    tube_masks_list.append(tmask[:n_add])
+                elif e.modality_type in ("video", "pseudo_video"):
                     clips = self._base_ds._load_clip(e, max_frames=4)
-                    arr = clips[0]
+                    if not clips:
+                        continue
+                    arr = clips[len(clips) // 2]
+                    frames.append(to_canonical_tensor(arr))
                 else:
                     arr = self._base_ds._load_frame(e, 0)
-                from data.pipeline.transforms import to_canonical_tensor
-                t = to_canonical_tensor(arr, size=self.cfg.global_crop_size)
-                frames.append(t)
+                    frames.append(to_canonical_tensor(arr))
             except Exception as ex:
                 log.warning(f"Frame load error in patient dataset {study_key}: {ex}")
 
         n_valid = len(frames)
         if n_valid == 0:
-            # Return a zeroed placeholder
-            H = self.cfg.global_crop_size
-            frames = [torch.zeros(1, H, H)]
-            n_valid = 0
+            frames = [torch.zeros(3, 224, 224)]
 
-        # Pad to max_frames
-        H = frames[0].shape[-1]
-        while len(frames) < self.max_frames:
-            frames.append(torch.zeros(1, H, H))
+        C = frames[0].shape[0]
 
-        frame_stack = torch.stack(frames, dim=0)    # (max_frames, 1, H, W)
+        # Pad all real frames to the study-max (H, W) preserving native resolution
+        max_h = max(f.shape[-2] for f in frames)
+        max_w = max(f.shape[-1] for f in frames)
+        padded: List[Tensor] = []
+        for f in frames:
+            if f.shape[-2] == max_h and f.shape[-1] == max_w:
+                padded.append(f)
+            else:
+                p = torch.zeros(C, max_h, max_w, dtype=f.dtype)
+                p[:, :f.shape[-2], :f.shape[-1]] = f
+                padded.append(p)
+
+        while len(padded) < self.max_frames:
+            padded.append(torch.zeros(C, max_h, max_w))
+
+        frame_stack = torch.stack(padded, dim=0)    # (max_frames, C, H, W)
         frame_mask = torch.zeros(self.max_frames, dtype=torch.bool)
         frame_mask[:n_valid] = True
+
+        # Combine per-clip tube masks into a single (max_frames, ph, pw) tensor
+        tube_mask_out: Optional[Tensor] = None
+        if tube_masks_list:
+            try:
+                combined = torch.cat(tube_masks_list, dim=0)  # (n_masked, ph, pw)
+                _, ph, pw = combined.shape
+                if combined.shape[0] < self.max_frames:
+                    pad = torch.zeros(
+                        self.max_frames - combined.shape[0], ph, pw, dtype=torch.bool
+                    )
+                    combined = torch.cat([combined, pad], dim=0)
+                tube_mask_out = combined[:self.max_frames]
+            except Exception as ex:
+                log.warning(f"tube_mask concat failed for {study_key}: {ex}")
 
         # Study-level label targets from first valid entry with labels
         targets: List[LabelTarget] = []
@@ -499,7 +578,7 @@ class PatientLevelDataset(Dataset):
                     continue
                 if self.active_head_ids and spec.head_id not in self.active_head_ids:
                     continue
-                # Try EF from source_meta
+                # EF regression from echo
                 if spec.head_type == HeadType.PATIENT_REGRESSION:
                     ef_raw = e.source_meta.get("ef")
                     if ef_raw:
@@ -510,10 +589,33 @@ class PatientLevelDataset(Dataset):
                                 break
                         except (TypeError, ValueError):
                             pass
+                # Benin/RSA LUS patient-level classification
+                if spec.head_type == HeadType.PATIENT_CLS:
+                    pl = e.source_meta.get("patient_labels") or {}
+                    key_map = {
+                        "lus_patient_tb": "tb",
+                        "lus_patient_pneumonia": "pneumonia",
+                        "lus_patient_covid": "covid",
+                    }
+                    field = key_map.get(spec.head_id)
+                    if field is None or field not in pl:
+                        continue
+                    val = int(pl[field])
+                    t = LabelTarget(
+                        head_id=spec.head_id,
+                        head_type=spec.head_type,
+                        loss_type=spec.loss_type,
+                        anatomy=anatomy,
+                        value=torch.tensor(float(val), dtype=torch.float32),
+                        is_valid=True,
+                    )
+                    targets.append(t)
+                    break
 
         return {
             "frames":        frame_stack,
             "frame_mask":    frame_mask,
+            "tube_mask":     tube_mask_out,   # (max_frames, ph, pw) bool or None
             "study_id":      study_key,
             "dataset_id":    dataset_id,
             "anatomy":       anatomy,

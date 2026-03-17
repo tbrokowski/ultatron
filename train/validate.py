@@ -2,35 +2,25 @@
 validate.py  ·  Validation and linear probe evaluation for Ultatron
 ===============================================================
 
-Usage:
-    # Run full validation on a checkpoint
-    python validate.py --config configs/data_config.yaml \\
-                       --checkpoint $SCRATCH/checkpoints/current_run/phase3_end.pt
+Usage (from repo root):
+    python train/validate.py --config configs/experiments/run1.yaml \\
+                             --checkpoint /path/to/latest.pt
 
-    # Anatomy-stratified linear probe only
-    python validate.py --config configs/data_config.yaml \\
-                       --checkpoint ... --mode linear_probe
-
-    # Compute val loss only (fast, run during training)
-    python validate.py --config configs/data_config.yaml \\
-                       --checkpoint ... --mode val_loss
+    # Modes: val_loss | linear_probe | full (default)
+    python train/validate.py --config configs/experiments/run1.yaml \\
+                             --checkpoint ... --mode linear_probe
 
 Modes
 -----
-  val_loss       : forward pass on val set; reports image CLS cosine loss + 7B alignment
+  val_loss       : forward pass on val set; reports image CLS cosine loss
   linear_probe   : train a linear head on frozen features; report AUC per anatomy family
   full           : val_loss + linear_probe (default)
 
 Linear probe protocol
 ---------------------
-  1. Extract frozen teacher CLS tokens from the val set (one pass, no grad).
+  1. Extract frozen teacher CLS tokens (one pass, no grad).
   2. Train a LogisticRegression (scikit-learn) on the labelled subset.
   3. Report AUC per anatomy family and macro-average.
-  
-Output
-------
-  Prints a JSON summary to stdout.
-  Writes results/validation_step_{step}.json to the log directory.
 """
 from __future__ import annotations
 
@@ -44,19 +34,60 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
+import yaml
 
-sys.path.insert(0, str(Path(__file__).parent))
+# Repo root for imports
+_repo_root = Path(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
-from image_branch import ImageBranch, build_image_branch
-from video_branch import VideoBranch, build_video_branch
-from train import (
-    load_config, build_datamodule, cosine_loss, CrossBranchDistillation,
-    PrototypeHead, to_device,
+from models import ModelConfig, build_image_branch, build_video_branch
+from models.branches.image_branch import ImageBranch
+from models.branches.shared import CrossBranchDistillation
+from data.pipeline.datamodule import USFoundationDataModule
+from data.pipeline.transforms import (
+    ImageSSLTransformConfig, VideoSSLTransformConfig, FreqMaskConfig,
 )
-from cscs_paths import CSCSConfig
-from training_integration import _get_padding_mask
+from data.infra.cscs_paths import CSCSConfig
 
 log = logging.getLogger(__name__)
+
+
+def _load_config(path: str) -> dict:
+    """Load YAML config with _base_ inheritance (same as scripts/train.py)."""
+    path = Path(path)
+    if not path.is_absolute():
+        path = _repo_root / path
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+    bases = cfg.pop("_base_", [])
+    merged = {}
+    for base_path in bases:
+        base_cfg = _load_config(str(_repo_root / base_path))
+        _deep_merge(merged, base_cfg)
+    _deep_merge(merged, cfg)
+    return merged
+
+
+def _deep_merge(base: dict, override: dict) -> None:
+    for k, v in override.items():
+        if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
+
+
+def _get_padding_mask(batch: dict, crop_idx: int = 0) -> Optional[torch.Tensor]:
+    """Extract (B, ph, pw) padding mask for a specific global crop index."""
+    pm = batch.get("global_pmasks")
+    return pm[:, crop_idx] if pm is not None else None
+
+
+def _cosine_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Symmetric cosine distance: mean(1 - cos(a,b))."""
+    a_n = F.normalize(a.float(), dim=-1)
+    b_n = F.normalize(b.float(), dim=-1)
+    return (1 - (a_n * b_n).sum(-1)).mean()
 
 
 # ── Val loss ───────────────────────────────────────────────────────────────────
@@ -95,15 +126,7 @@ def compute_val_loss(
             batch["global_crops"][:, 0], padding_mask=s_pmask,
         )
 
-        total_cls += cosine_loss(s_out["cls"], t_out["cls"]).item()
-
-        if img_branch.teacher7b is not None:
-            t7b = img_branch.forward_teacher7b(batch["global_crops"][:, 1])
-            if t7b is not None:
-                proj = img_branch.proj_7b
-                t_proj = proj(t7b["cls"].float().to(device))
-                total_7b += cosine_loss(s_out["cls"], t_proj).item()
-
+        total_cls += _cosine_loss(s_out["cls"], t_out["cls"]).item()
         n_batches += 1
 
     img_branch.student.train()
@@ -262,7 +285,7 @@ def to_device(batch: dict, device: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config",     default="configs/data_config.yaml")
+    parser.add_argument("--config",     default="configs/experiments/run1.yaml")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--mode",       default="full",
                         choices=["val_loss", "linear_probe", "full"])
@@ -275,31 +298,61 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
 
     device   = "cuda" if torch.cuda.is_available() else "cpu"
-    cfg      = load_config(args.config)
+    cfg      = _load_config(args.config)
     cscs     = CSCSConfig.from_env()
     hf_cache = str(cscs.store_path("hf_cache"))
 
     log.info(f"Loading checkpoint: {args.checkpoint}")
-    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     step = ckpt.get("global_step", 0)
     log.info(f"  Step: {step}")
 
-    # Build models
-    img_branch = build_image_branch(
-        load_7b_teacher=not args.no_7b,
-        dtype=torch.bfloat16, device=device, hf_cache_dir=hf_cache
-    )
-    vid_branch = build_video_branch(
-        dtype=torch.bfloat16, device=device, hf_cache_dir=hf_cache
-    )
-
-    # Load weights
-    img_branch.student.vit.load_state_dict(ckpt["img_student"])
-    img_branch.teacher.vit.load_state_dict(ckpt["img_teacher"])
-    vid_branch.student.model.load_state_dict(ckpt["vid_student"])
+    model_cfg = ModelConfig.from_dict(cfg.get("model", {}))
+    model_cfg.hf_cache_dir = hf_cache
+    if args.no_7b:
+        model_cfg.frozen_teacher = None
+    img_branch = build_image_branch(model_cfg, device=device)
+    vid_branch = build_video_branch(model_cfg, device=device)
     img_branch = img_branch.to(device)
+    vid_branch = vid_branch.to(device)
+    img_branch.student.load_state_dict(ckpt["img_student"], strict=True)
+    img_branch.teacher.load_state_dict(ckpt["img_teacher"], strict=True)
+    vid_branch.student.load_state_dict(ckpt["vid_student"], strict=True)
+    vid_branch.teacher.load_state_dict(ckpt["vid_teacher"], strict=True)
 
-    dm = build_datamodule(cfg, cscs)
+    _mp = Path(cfg["manifest"]["path"])
+    if not _mp.is_absolute():
+        _mp = _repo_root / _mp
+    manifest_path = str(_mp) if _mp.exists() else str(cscs.manifest_path(_mp.name))
+    root_remap = cfg["manifest"].get("root_remap")
+    if root_remap is None:
+        root_remap = cscs.remap_dict()
+    total_steps = cfg.get("curriculum", {}).get("total_training_steps", 20_000)
+    img_raw = dict(cfg["transforms"]["image"])
+    vid_raw = dict(cfg["transforms"]["video"])
+    img_freq = img_raw.pop("freq_mask", {})
+    vid_freq = vid_raw.pop("freq_mask", {})
+    img_tcfg = ImageSSLTransformConfig(
+        **img_raw, freq_mask=FreqMaskConfig(**img_freq) if img_freq else FreqMaskConfig()
+    )
+    vid_tcfg = VideoSSLTransformConfig(
+        **vid_raw, freq_mask=FreqMaskConfig(**vid_freq) if vid_freq else FreqMaskConfig()
+    )
+    dm = USFoundationDataModule(
+        manifest_path=manifest_path,
+        image_batch_size=cfg["loaders"]["image_batch_size"],
+        video_batch_size=cfg["loaders"]["video_batch_size"],
+        num_workers=cfg["loaders"]["num_workers"],
+        pin_memory=cfg["loaders"]["pin_memory"],
+        patch_size=cfg["transforms"]["patch_size"],
+        total_training_steps=total_steps,
+        image_samples_per_epoch=cfg["curriculum"]["image_samples_per_epoch"],
+        video_samples_per_epoch=cfg["curriculum"]["video_samples_per_epoch"],
+        anatomy_weights=cfg.get("anatomy_weights", {}),
+        root_remap=root_remap,
+        image_cfg=img_tcfg,
+        video_cfg=vid_tcfg,
+    )
     dm.setup()
 
     results = {"step": step, "checkpoint": args.checkpoint}
