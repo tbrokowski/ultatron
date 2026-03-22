@@ -1,27 +1,45 @@
 # configs/finetune/lus_patient.yaml
-# Benin/RSA patient-level TB, pneumonia, COVID prediction heads
-# =============================================================================
-
-image_backbone:  dinov3_s
-video_backbone:  vjepa2_l
-frozen_teacher:  null
-
-lr:              1e-4
-weight_decay:    0.01
-max_epochs:      30
-batch_size:      8
-
-head_type:       linear
-freeze_backbone: true
-max_frames:      4
-
-monitor:         val_auc
-mode:            max
-
-heads:
-  - id: lus_patient_tb
-  - id: lus_patient_pneumonia
-  - id: lus_patient_covid
+# ============================================================
+# Finetune hyperparameters for LUS patient-level classification.
+# Tasks: TB, Pneumonia, COVID (binary per task, multi-label head)
+# Datasets: Benin-LUS + RSA-LUS (pooled, patient-level split)
+# Branch: video branch (vid_branch frozen teacher, clip_cls token)
+# ============================================================
 
 dataset_root_benin: "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
 dataset_root_rsa:   "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
+
+# Model backbone (which checkpoint to load from)
+model:
+  image_backbone: dinov3_l
+  video_backbone: vjepa2_l
+  frozen_teacher: null
+  dtype: bfloat16
+
+finetune:
+  # ── Optimiser ──────────────────────────────────────────────────────────────
+  lr:           5.0e-5
+  weight_decay: 0.01
+  max_epochs:   40
+  batch_size:   8
+  num_workers:  4
+
+  # ── Head architecture ──────────────────────────────────────────────────────
+  # multi-label linear head: clip_cls → 3-way sigmoid (tb/pneumonia/covid)
+  head_type:  linear
+
+  # ── Early stopping ─────────────────────────────────────────────────────────
+  patience:      8
+  monitor:       val_auc_macro   # patient-level macro AUC across 3 tasks
+  monitor_mode:  max
+
+  # ── Backbone ───────────────────────────────────────────────────────────────
+  freeze_backbone: true
+
+  # ── Video ──────────────────────────────────────────────────────────────────
+  n_frames:  8       # frames per clip sampled for classification
+  img_size:  224
+
+  # ── Logging / checkpointing ────────────────────────────────────────────────
+  log_every:       5
+  checkpoint_best: true

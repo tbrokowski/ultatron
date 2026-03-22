@@ -1,9 +1,11 @@
 # configs/finetune/echonet.yaml
 # ============================================================
 # Finetune hyperparameters for EchoNet-Dynamic.
-# Loaded by oura.finetune.echonet.EchoNetFinetune
-# Usage: python -m oura.finetune.echonet --config configs/finetune/echonet.yaml ...
+# Loaded by finetune.experiments.echonet.EchoNetFinetune
+# Usage: python scripts/finetune.py --checkpoint ... --config configs/experiments/run1.yaml
 # ============================================================
+
+dataset_root: "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-Dynamic"
 
 # Model backbone (which checkpoint to load from)
 model:

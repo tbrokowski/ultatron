@@ -29,7 +29,7 @@ from typing import Dict, List, Optional
 from torch.utils.data import DataLoader
 
 from data.schema.manifest import USManifestEntry, load_manifest, manifest_stats
-from data.pipeline.dataset import ImageSSLDataset, VideoSSLDataset
+from data.pipeline.dataset import ImageSSLDataset, VideoSSLDataset, PairedSSLDataset
 from data.pipeline.collators import ImageSSLCollator, VideoSSLCollator, DualStreamBatch
 from data.pipeline.samplers import CombinedSampler
 from data.pipeline.transforms import ImageSSLTransformConfig, VideoSSLTransformConfig
@@ -77,10 +77,13 @@ class USFoundationDataModule:
 
         self._image_entries: List[USManifestEntry] = []
         self._video_entries: List[USManifestEntry] = []
+        self._paired_entries: List[USManifestEntry] = []
         self._image_sampler: Optional[CombinedSampler] = None
         self._video_sampler: Optional[CombinedSampler] = None
+        self._paired_sampler: Optional[CombinedSampler] = None
         self._image_dataset: Optional[ImageSSLDataset] = None
         self._video_dataset: Optional[VideoSSLDataset] = None
+        self._paired_dataset: Optional[PairedSSLDataset] = None
 
         self._setup_done = False
 
@@ -95,15 +98,19 @@ class USFoundationDataModule:
         stats = manifest_stats(all_entries)
         log.info(f"Dataset stats: {stats}")
 
-        # Split into two streams
+        # Split into two streams + paired stream (Phase 3)
         self._image_entries = [
             e for e in all_entries if e.ssl_stream in ("image", "both")
         ]
         self._video_entries = [
             e for e in all_entries if e.ssl_stream in ("video", "both")
         ]
+        self._paired_entries = [
+            e for e in all_entries if e.ssl_stream == "both"
+        ]
         log.info(f"Image stream: {len(self._image_entries)} | "
-                 f"Video stream: {len(self._video_entries)}")
+                 f"Video stream: {len(self._video_entries)} | "
+                 f"Paired stream: {len(self._paired_entries)}")
 
         # Datasets
         self._image_dataset = ImageSSLDataset(
@@ -114,6 +121,13 @@ class USFoundationDataModule:
         self._video_dataset = VideoSSLDataset(
             self._video_entries,
             cfg=self.video_cfg,
+            patch_size=self.patch_size,
+            root_remap=self.root_remap,
+        )
+        self._paired_dataset = PairedSSLDataset(
+            self._paired_entries,
+            img_cfg=self.image_cfg,
+            vid_cfg=self.video_cfg,
             patch_size=self.patch_size,
             root_remap=self.root_remap,
         )
@@ -131,6 +145,12 @@ class USFoundationDataModule:
             samples_per_epoch=self.video_samples,
             anatomy_weights=self.anatomy_weights,
         )
+        self._paired_sampler = CombinedSampler(
+            self._paired_entries,
+            total_steps=self.total_steps,
+            samples_per_epoch=self.video_samples,
+            anatomy_weights=self.anatomy_weights,
+        )
         self._setup_done = True
 
     # ── Curriculum interface ──────────────────────────────────────────────────
@@ -138,13 +158,17 @@ class USFoundationDataModule:
     def update_step(self, global_step: int):
         if self._image_sampler: self._image_sampler.update_step(global_step)
         if self._video_sampler: self._video_sampler.update_step(global_step)
+        if self._paired_sampler: self._paired_sampler.update_step(global_step)
         # Push current alpha and mask_ratio into datasets
         if self._image_dataset:
             self._image_dataset.alpha = self.current_alpha()
         if self._video_dataset:
             self._video_dataset.mask_ratio = self.current_mask_ratio()
-            # Update n_frames in transform config
             self._video_dataset.transform.cfg.n_frames = self.current_n_frames()
+        if self._paired_dataset:
+            self._paired_dataset.img_alpha = self.current_alpha()
+            self._paired_dataset.vid_mask_ratio = self.current_mask_ratio()
+            self._paired_dataset.vid_transform.cfg.n_frames = self.current_n_frames()
 
     def current_alpha(self) -> float:
         return self._image_sampler.current_alpha() if self._image_sampler else 1.0
@@ -192,16 +216,44 @@ class USFoundationDataModule:
             persistent_workers=self.num_workers > 0,
         )
 
+    def paired_loader(self) -> DataLoader:
+        """
+        Phase 3 paired stream.
+
+        Each batch is an AlignedDualStreamBatch where image_batch[i] and
+        video_batch[i] are drawn from the *same* source clip entry
+        (ssl_stream='both'), so alignment_pairs contains exactly
+        ``video_batch_size`` pairs, all with weight=1.0.
+
+        This replaces the zip(image_loader, video_loader) approach in Phase 3,
+        guaranteeing n_align_pairs == batch_size every step.
+        """
+        from data.pipeline.collators_extended import PairedSSLCollator
+        self.setup()
+        return DataLoader(
+            self._paired_dataset,
+            sampler=self._paired_sampler,
+            batch_size=self.video_batch_size,
+            num_workers=self.num_workers,
+            collate_fn=PairedSSLCollator(),
+            pin_memory=self.pin_memory,
+            drop_last=True,
+            persistent_workers=self.num_workers > 0,
+        )
+
     def combined_loader(self):
         """
-        Phase 3: yields DualStreamBatch objects by zipping both loaders.
+        Phase 3: yields AlignedDualStreamBatch objects by zipping both loaders.
+        Alignment pairs link image/video samples sharing the same study_id and
+        overlapping frame ranges (see collators_extended.build_alignment_pairs).
         The shorter loader determines epoch length.
         """
+        from data.pipeline.collators_extended import make_aligned_dual_stream
         self.setup()
         img_loader = self.image_loader()
         vid_loader = self.video_loader()
         for img_batch, vid_batch in zip(img_loader, vid_loader):
-            yield DualStreamBatch(image_batch=img_batch, video_batch=vid_batch)
+            yield make_aligned_dual_stream(img_batch, vid_batch)
 
     def fine_tune_loader(
         self,

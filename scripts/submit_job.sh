@@ -10,7 +10,7 @@
 #   bash scripts/submit_job.sh -run1 --resume /path/to/latest.pt
 #
 # Run modes
-#   -smoke        Single-GPU smoke test (~10 min). Validates the full pipeline
+#   -smoke        Single-GPU smoke test (~20 min). Validates the full pipeline
 #                 (data adapters, model builds, all 4 phase steps) without DDP.
 #   -minimalrun   4-GPU DDP run, 50 training steps. Verifies the distributed
 #                 training loop end-to-end before committing to a full run.
@@ -19,6 +19,13 @@
 # Optional flags (all modes except -smoke):
 #   --resume <path>   Resume from checkpoint (auto-detects latest.pt if absent)
 #   --no-7b           Skip frozen 7B teacher (already default for run1)
+#
+# Architecture:
+#   sbatch submits a thin "outer" script (no --environment on sbatch itself,
+#   as CSCS marks --environment on sbatch as experimental and unreliable for
+#   GPU access). The outer script writes a compute "inner" script to a shared
+#   path, then runs ONE srun --environment call to execute it inside the
+#   container. A single srun = a single container instance = no GPU contention.
 # =============================================================================
 
 set -euo pipefail
@@ -40,15 +47,6 @@ RSA_ROOT="${STORE}/lung/RSA_Videos"
 # ── Helpers ──────────────────────────────────────────────────────────────────
 die()  { echo "[ERROR] $*" >&2; exit 1; }
 info() { echo "[INFO]  $*"; }
-
-# Try venv torchrun, fall back to python -m torch.distributed.run
-_launcher() {
-    if [[ -x "${REPO_DIR}/.venv/bin/torchrun" ]]; then
-        echo "${REPO_DIR}/.venv/bin/torchrun"
-    else
-        echo "python -m torch.distributed.run"
-    fi
-}
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 MODE=""
@@ -77,8 +75,8 @@ smoke)
     JOB_NAME="ultatron_smoke"
     TIME="00:20:00"
     NODES=1
-    GPUS=1
-    CPUS=8
+    GPUS=4        # request all 4 GH200 GPUs; NVLink fabric requires all GPUs
+    CPUS=32
     LOG_DIR="${LOG_ROOT}/smoke"
     ;;
 minimalrun)
@@ -88,6 +86,7 @@ minimalrun)
     GPUS=4
     CPUS=32
     LOG_DIR="${LOG_ROOT}/minimalrun"
+    CKPT_DIR="${CKPT_ROOT}/minimalrun"
     ;;
 run1)
     JOB_NAME="ultatron_run1"
@@ -107,132 +106,203 @@ esac
 
 mkdir -p "${LOG_DIR}"
 
-# ── Build the job body ────────────────────────────────────────────────────────
-COMMON_HEADER='
+# ── Inner compute script (runs inside the container via srun) ──────────────────
+# Written to a shared path accessible on the compute node through the mounts
+# defined in ultatron.toml (/users is mounted).
+INNERSCRIPT="${LOG_DIR}/.inner_${MODE}.sh"
+
+# ── Outer wrapper script (submitted to sbatch, no --environment) ───────────────
+OUTERSCRIPT=$(mktemp /tmp/ultatron_outer_${MODE}_XXXXX.sh)
+trap "rm -f ${OUTERSCRIPT}" EXIT
+
+# ── Generate the compute inner script ─────────────────────────────────────────
+case "$MODE" in
+
+# ─────────────────────────────────────────────────────── Smoke ────────────────
+smoke)
+cat > "${INNERSCRIPT}" << INNER_EOF
+#!/bin/bash
 set -euo pipefail
-cd '"${REPO_DIR}"'
-source .venv/bin/activate
+cd ${REPO_DIR}
+export PYTHONPATH="${REPO_DIR}:\${PYTHONPATH:-}"
 
 echo "================================================================"
-echo " Ultatron — '"${JOB_NAME}"'"
-echo " Job    : ${SLURM_JOB_ID:-local}"
-echo " Node   : $(hostname)"
-echo " Start  : $(date)"
-python -c "import torch; print(f\" PyTorch : {torch.__version__}\")"
-python -c "import torch; print(f\" CUDA    : {torch.version.cuda}\")"
-python -c "import torch; print(f\" GPUs    : {torch.cuda.device_count()} visible\")"
+echo " Ultatron — ${JOB_NAME}"
+echo " Job    : \${SLURM_JOB_ID:-local}"
+echo " Node   : \$(hostname)"
+echo " Start  : \$(date)"
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null \
+    | awk '{print " GPU     :", \$0}' || echo " GPU     : nvidia-smi unavailable"
 echo "================================================================"
 echo ""
-'
 
-case "$MODE" in
-# ── Smoke ─────────────────────────────────────────────────────────────────────
-smoke)
-JOB_BODY="${COMMON_HEADER}
 export US_BUSI_ROOT=${BUSI_ROOT}
 export US_ECHONET_ROOT=${ECHONET_ROOT}
 export US_BENIN_ROOT=${BENIN_ROOT}
 
-echo \"Running: python -m tests.dataset_adapters.training_smoke\"
-echo \"Dataset roots:\"
-echo \"  BUSI    : \${US_BUSI_ROOT}\"
-echo \"  EchoNet : \${US_ECHONET_ROOT}\"
-echo \"  Benin   : \${US_BENIN_ROOT}\"
-echo \"\"
+echo "Running: python3 -m tests.dataset_adapters.training_smoke"
+echo "Dataset roots:"
+echo "  BUSI    : ${BUSI_ROOT}"
+echo "  EchoNet : ${ECHONET_ROOT}"
+echo "  Benin   : ${BENIN_ROOT}"
+echo ""
 
-python -m tests.dataset_adapters.training_smoke
+python3 -m tests.dataset_adapters.training_smoke
 
-echo \"\"
-echo \"================================================================\"
-echo \" SMOKE PASSED  — $(date)\"
-echo \"================================================================\"
-"
+echo ""
+echo "================================================================"
+echo " SMOKE PASSED  -- \$(date)"
+echo "================================================================"
+INNER_EOF
 ;;
 
-# ── Minimal run ───────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────── Minimal run ──────────────
 minimalrun)
-LAUNCHER=$(_launcher)
-JOB_BODY="${COMMON_HEADER}
-export NCCL_SOCKET_IFNAME=hsn0,hsn1
-export NCCL_NET_GDR_LEVEL=PIX
+mkdir -p "${CKPT_DIR}"
+cat > "${INNERSCRIPT}" << INNER_EOF
+#!/bin/bash
+set -euo pipefail
+cd ${REPO_DIR}
+export PYTHONPATH="${REPO_DIR}:\${PYTHONPATH:-}"
+
+# Single-node 4×GH200: use NVLink for P2P + TCP socket for coordination.
+# The container toml forces NCCL_NET=AWS Libfabric via LD_LIBRARY_PATH, but
+# the CXI/EFA device is not accessible for sbatch-launched containers, so the
+# plugin fails. Strip it from LD_LIBRARY_PATH and force Socket transport so
+# NCCL uses its built-in TCP rendezvous while still using NVLink for P2P data.
+export LD_LIBRARY_PATH=\$(echo "\${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v 'aws-ofi-nccl' | paste -sd ':' -)
+export NCCL_NET=Socket
+export NCCL_P2P_LEVEL=NVL
+export NCCL_SHM_DISABLE=0
 export NCCL_DEBUG=WARN
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,expandable_segments:True
 export OMP_NUM_THREADS=4
 
-echo \"Running 50-step DDP smoke run (4 GPUs)...\"
-echo \"\"
+echo "================================================================"
+echo " Ultatron — ${JOB_NAME}"
+echo " Job    : \${SLURM_JOB_ID:-local}"
+echo " Node   : \$(hostname)"
+echo " Start  : \$(date)"
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null \
+    | awk '{print " GPU     :", \$0}' || echo " GPU     : nvidia-smi unavailable"
+echo "================================================================"
+echo ""
 
-${LAUNCHER} \\
-    --nproc_per_node=4 \\
-    scripts/train.py \\
-    --config configs/run1/minimal_run1.yaml \\
+echo "Running 50-step DDP minimal run (4 GPUs)..."
+echo ""
+
+# For initial testing, force a clean start (no auto-resume).
+# scripts/train.py will load --ckpt-dir/latest.pt if it exists.
+rm -f "${CKPT_DIR}/latest.pt" "${CKPT_DIR}/phase1_end.pt" "${CKPT_DIR}/phase2_end.pt" "${CKPT_DIR}/phase3_end.pt" "${CKPT_DIR}/best.pt" || true
+
+python3 -m torch.distributed.run \
+    --nproc_per_node=4 \
+    scripts/train.py \
+    --config configs/run1/minimal_run1.yaml \
+    --ckpt-dir ${CKPT_DIR} \
     ${NO_7B_ARG}
 
-echo \"\"
-echo \"================================================================\"
-echo \" MINIMAL RUN PASSED  — \$(date)\"
-echo \"================================================================\"
-"
+echo ""
+echo "================================================================"
+echo " MINIMAL RUN PASSED  -- \$(date)"
+echo "================================================================"
+INNER_EOF
 ;;
 
-# ── Full run1 ─────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────── Full run1 ───────────
 run1)
-LAUNCHER=$(_launcher)
 mkdir -p "${CKPT_DIR}"
-JOB_BODY="${COMMON_HEADER}
-export NCCL_SOCKET_IFNAME=hsn0,hsn1
-export NCCL_NET_GDR_LEVEL=PIX
+cat > "${INNERSCRIPT}" << INNER_EOF
+#!/bin/bash
+set -euo pipefail
+cd ${REPO_DIR}
+export PYTHONPATH="${REPO_DIR}:\${PYTHONPATH:-}"
+
+# Single-node 4×GH200: use NVLink for P2P + TCP socket for coordination.
+# The container toml forces NCCL_NET=AWS Libfabric via LD_LIBRARY_PATH, but
+# the CXI/EFA device is not accessible for sbatch-launched containers, so the
+# plugin fails. Strip it from LD_LIBRARY_PATH and force Socket transport so
+# NCCL uses its built-in TCP rendezvous while still using NVLink for P2P data.
+export LD_LIBRARY_PATH=\$(echo "\${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v 'aws-ofi-nccl' | paste -sd ':' -)
+export NCCL_NET=Socket
+export NCCL_P2P_LEVEL=NVL
+export NCCL_SHM_DISABLE=0
 export NCCL_DEBUG=WARN
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,expandable_segments:True
 export OMP_NUM_THREADS=4
 
-# SIGUSR1 → checkpoint + requeue (SLURM pre-emption)
+echo "================================================================"
+echo " Ultatron — ${JOB_NAME}"
+echo " Job    : \${SLURM_JOB_ID:-local}"
+echo " Node   : \$(hostname)"
+echo " Start  : \$(date)"
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null \
+    | awk '{print " GPU     :", \$0}' || echo " GPU     : nvidia-smi unavailable"
+echo "================================================================"
+echo ""
+
+# SIGUSR1 -> checkpoint + requeue on SLURM pre-emption
 _checkpoint_and_requeue() {
-    echo \"[\$(date)] SIGUSR1: pre-emption signal — checkpointing...\"
+    echo "[\$(date)] SIGUSR1: pre-emption — checkpointing..."
     touch ${CKPT_DIR}/.checkpoint_now
     sleep 60
-    scontrol requeue \"\${SLURM_JOB_ID}\"
-    echo \"[\$(date)] Job requeued.\"
+    scontrol requeue "\${SLURM_JOB_ID}"
+    echo "[\$(date)] Job requeued."
 }
 trap _checkpoint_and_requeue SIGUSR1
 
-echo \"Checkpoint dir : ${CKPT_DIR}\"
-echo \"Resume         : ${RESUME_ARG:-none}\"
-echo \"\"
+echo "Checkpoint dir : ${CKPT_DIR}"
+echo "Resume         : ${RESUME_ARG:-none}"
+echo ""
 
-${LAUNCHER} \\
-    --nproc_per_node=4 \\
-    scripts/train.py \\
-    --config configs/experiments/run1.yaml \\
-    ${NO_7B_ARG} \\
+python3 -m torch.distributed.run \
+    --nproc_per_node=4 \
+    scripts/train.py \
+    --config configs/experiments/run1.yaml \
+    --ckpt-dir ${CKPT_DIR} \
+    ${NO_7B_ARG} \
     ${RESUME_ARG}
 
 TRAIN_EXIT=\$?
 
 if [[ \${TRAIN_EXIT} -eq 0 ]]; then
-    echo \"\"
-    echo \"--- Post-training validation ---\"
-    python train/validate.py \\
-        --config configs/experiments/run1.yaml \\
-        --checkpoint ${CKPT_DIR}/latest.pt \\
-        --mode full \\
-        --no-7b \\
-        --output ${LOG_DIR}/validation_\${SLURM_JOB_ID}.json \\
-    && echo \"Validation → ${LOG_DIR}/validation_\${SLURM_JOB_ID}.json\" \\
-    || echo \"Validation failed (non-fatal)\"
+    echo ""
+    echo "--- Post-training validation ---"
+    python3 train/validate.py \
+        --config configs/experiments/run1.yaml \
+        --checkpoint ${CKPT_DIR}/latest.pt \
+        --mode full \
+        --no-7b \
+        --output ${LOG_DIR}/validation_\${SLURM_JOB_ID}.json \
+    && echo "Validation -> ${LOG_DIR}/validation_\${SLURM_JOB_ID}.json" \
+    || echo "Validation failed (non-fatal)"
 fi
 
-echo \"\"
-echo \"================================================================\"
-echo \" RUN1 COMPLETE  exit=\${TRAIN_EXIT}  \$(date)\"
-if [[ \${TRAIN_EXIT} -ne 0 ]]; then
-    echo \" Resume with: bash scripts/submit_job.sh -run1 --resume ${CKPT_DIR}/latest.pt\"
-fi
-echo \"================================================================\"
+echo ""
+echo "================================================================"
+echo " RUN1 COMPLETE  exit=\${TRAIN_EXIT}  \$(date)"
+[[ \${TRAIN_EXIT} -ne 0 ]] && echo " Resume: bash scripts/submit_job.sh -run1 --resume ${CKPT_DIR}/latest.pt"
+echo "================================================================"
 exit \${TRAIN_EXIT}
-"
+INNER_EOF
 ;;
 esac
+
+chmod +x "${INNERSCRIPT}"
+
+# ── Generate the outer wrapper (no --environment on sbatch) ───────────────────
+cat > "${OUTERSCRIPT}" << OUTER_EOF
+#!/bin/bash
+# Auto-generated by submit_job.sh — mode=${MODE}
+# Thin wrapper: just calls srun once with --environment to enter the container
+set -euo pipefail
+
+srun --ntasks-per-node=1 \
+     --environment=${EDF_ENV} \
+     bash ${INNERSCRIPT}
+OUTER_EOF
+
+chmod +x "${OUTERSCRIPT}"
 
 # ── Submit ────────────────────────────────────────────────────────────────────
 info "Submitting: ${JOB_NAME}  (mode=${MODE}, nodes=${NODES}, gpus=${GPUS}, time=${TIME})"
@@ -249,15 +319,24 @@ JOB_ID=$(sbatch \
     --time="${TIME}" \
     --partition="${PARTITION}" \
     --account="${ACCOUNT}" \
-    --environment="${EDF_ENV}" \
     --output="${LOG_DIR}/${JOB_NAME}_%j.out" \
     --error="${LOG_DIR}/${JOB_NAME}_%j.err" \
     --parsable \
     ${EXTRA_FLAGS} \
-    --wrap="${JOB_BODY}")
+    "${OUTERSCRIPT}")
 
 echo ""
 echo "  Job ID   : ${JOB_ID}"
 echo "  Log      : ${LOG_DIR}/${JOB_NAME}_${JOB_ID}.out"
 echo "  Watch    : tail -f ${LOG_DIR}/${JOB_NAME}_${JOB_ID}.out"
 echo "  Queue    : squeue -u \$USER -j ${JOB_ID}"
+
+# For run1: print one-liner to chain finetune job after training completes
+if [[ "$MODE" == "run1" ]]; then
+    echo ""
+    echo "  ── Phase 4 finetune ──────────────────────────────────────────────────"
+    echo "  Chain finetune after this job:"
+    echo "    bash scripts/submit_finetune.sh --after-job ${JOB_ID}"
+    echo "  Or run immediately on a saved checkpoint:"
+    echo "    bash scripts/submit_finetune.sh --checkpoint ${CKPT_DIR}/phase3_end.pt"
+fi

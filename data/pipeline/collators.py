@@ -190,19 +190,21 @@ class ImageSSLCollator:
             seg_masks = None
 
         return {
-            "global_crops":     global_crops,     # B × n_g × 1 × H_max × W_max
-            "global_pmasks":    global_pmasks,     # B × n_g × ph_max × pw_max
-            "local_crops":      local_crops,       # B × n_l × 1 × h_max × w_max
-            "local_pmasks":     local_pmasks,      # B × n_l × ph_max_l × pw_max_l
-            "patch_masks":      patch_masks,       # B × ph_max × pw_max  (freq mask)
-            "dataset_ids":      [s["dataset_id"]       for s in samples],
-            "anatomy_families": [s["anatomy_family"]   for s in samples],
-            "tiers":            torch.tensor([s["tier"]          for s in samples], dtype=torch.long),
-            "sample_ids":       [s["sample_id"]        for s in samples],
-            "seg_masks":        seg_masks,
-            "cls_labels":       torch.tensor([s.get("cls_label", -1) for s in samples], dtype=torch.long),
-            "task_types":       [s["task_type"]        for s in samples],
-            "is_promptable":    torch.tensor([s.get("is_promptable", False) for s in samples]),
+            "global_crops":      global_crops,     # B × n_g × 1 × H_max × W_max
+            "global_pmasks":     global_pmasks,     # B × n_g × ph_max × pw_max
+            "local_crops":       local_crops,       # B × n_l × 1 × h_max × w_max
+            "local_pmasks":      local_pmasks,      # B × n_l × ph_max_l × pw_max_l
+            "patch_masks":       patch_masks,       # B × ph_max × pw_max  (freq mask)
+            "dataset_ids":       [s["dataset_id"]       for s in samples],
+            "anatomy_families":  [s["anatomy_family"]   for s in samples],
+            "tiers":             torch.tensor([s["tier"]          for s in samples], dtype=torch.long),
+            "sample_ids":        [s["sample_id"]        for s in samples],
+            "study_ids":         [s.get("study_id", "") for s in samples],
+            "source_frame_idxs": [s.get("source_frame_idx", -1) for s in samples],
+            "seg_masks":         seg_masks,
+            "cls_labels":        torch.tensor([s.get("cls_label", -1) for s in samples], dtype=torch.long),
+            "task_types":        [s["task_type"]        for s in samples],
+            "is_promptable":     torch.tensor([s.get("is_promptable", False) for s in samples]),
         }
 
 
@@ -264,19 +266,28 @@ class VideoSSLCollator:
             else:
                 padding_masks[i, :ph, :pw] = True   # whole frame is real
 
+        # Build source_frame_indices tensor: (B, max_T) — zero-padded
+        src_idx_lists = [s.get("source_frame_indices", []) for s in samples]
+        source_frame_indices = torch.zeros(B, max_T, dtype=torch.long)
+        for i, idxs in enumerate(src_idx_lists):
+            for t, v in enumerate(idxs[:max_T]):
+                source_frame_indices[i, t] = int(v)
+
         return {
-            "full_clips":       full_clips,
-            "visible_clips":    visible_clips,
-            "tube_masks":       tube_masks,
-            "padding_masks":    padding_masks,
-            "valid_frames":     valid_frames,
-            "dataset_ids":      [s["dataset_id"]       for s in samples],
-            "anatomy_families": [s["anatomy_family"]   for s in samples],
-            "tiers":            torch.tensor([s["tier"]     for s in samples], dtype=torch.long),
-            "sample_ids":       [s["sample_id"]        for s in samples],
-            "fps":              torch.tensor([s.get("fps", 25.0)   for s in samples]),
-            "is_cine":          torch.tensor([s.get("is_cine", False) for s in samples]),
-            "task_types":       [s["task_type"]        for s in samples],
+            "full_clips":            full_clips,
+            "visible_clips":         visible_clips,
+            "tube_masks":            tube_masks,
+            "padding_masks":         padding_masks,
+            "valid_frames":          valid_frames,
+            "dataset_ids":           [s["dataset_id"]       for s in samples],
+            "anatomy_families":      [s["anatomy_family"]   for s in samples],
+            "tiers":                 torch.tensor([s["tier"]     for s in samples], dtype=torch.long),
+            "sample_ids":            [s["sample_id"]        for s in samples],
+            "study_ids":             [s.get("study_id", "") for s in samples],
+            "source_frame_indices":  source_frame_indices,   # (B, max_T) original frame positions
+            "fps":                   torch.tensor([s.get("fps", 25.0)   for s in samples]),
+            "is_cine":               torch.tensor([s.get("is_cine", False) for s in samples]),
+            "task_types":            [s["task_type"]        for s in samples],
         }
 
 

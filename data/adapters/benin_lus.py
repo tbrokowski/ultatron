@@ -240,7 +240,9 @@ class BeninLUSAdapter(BaseAdapter):
                 is_cine=True,
                 has_temporal_order=True,
                 task_type=task_type,
-                ssl_stream="video",
+                # Include Benin videos in BOTH streams so Phase 3 can sample
+                # frames (image stream) paired with clips (video stream).
+                ssl_stream="both",
                 is_promptable=False,
                 source_meta=source_meta,
             )

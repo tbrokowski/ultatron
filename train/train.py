@@ -747,7 +747,7 @@ def _legacy_main():
     img_dim = img_branch.embed_dim
     vid_dim = vid_branch.embed_dim
     cross_distill = CrossBranchDistillation(img_dim, vid_dim, model_cfg.align_dim).to(device=device, dtype=model_cfg.torch_dtype)
-    proto_head    = PrototypeHead(img_dim, model_cfg.n_prototypes).to(device=device, dtype=model_cfg.torch_dtype)
+    proto_head    = PrototypeHead(model_cfg.align_dim, model_cfg.n_prototypes).to(device=device, dtype=model_cfg.torch_dtype)
     seg_n  = cfg.get("head", {}).get("seg", {}).get("n_classes", 1)
     cls_n  = cfg.get("head", {}).get("cls", {}).get("n_classes", 256)
     seg_head = build_seg_head(img_dim, n_classes=seg_n, head_type="linear").to(device=device, dtype=torch.bfloat16)
@@ -829,6 +829,10 @@ def _legacy_main():
                 for k, v in batch.items()}
 
     def to_device_dual(dual):
+        # Use .to(device) on AlignedDualStreamBatch which preserves alignment_pairs correctly.
+        # Falls back gracefully for plain DualStreamBatch.
+        if hasattr(dual, "to"):
+            return dual.to(device)
         return type(dual)(
             image_batch=to_device(dual.image_batch),
             video_batch=to_device(dual.video_batch),

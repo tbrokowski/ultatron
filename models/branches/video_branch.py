@@ -289,7 +289,9 @@ class VideoBranch(nn.Module):
         self.teacher.eval()
 
     def update_teacher(self, momentum: float = 0.9995):
-        ema_update(self.student.model, self.teacher.model, momentum)
+        # self.student may be DDP-wrapped; unwrap to access the underlying encoder
+        student_enc = self.student.module if hasattr(self.student, "module") else self.student
+        ema_update(student_enc.model, self.teacher.model, momentum)
 
     def forward_student(
         self,

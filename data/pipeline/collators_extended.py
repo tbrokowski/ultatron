@@ -377,6 +377,45 @@ def build_alignment_pairs(
 # 4. Aligned combined loader helper
 # ─────────────────────────────────────────────────────────────────────────────
 
+class PairedSSLCollator:
+    """
+    Collates output from PairedSSLDataset into an AlignedDualStreamBatch.
+
+    Each sample in `samples` is ``{"image": img_dict, "video": vid_dict,
+    "frame_offset": int}``.  Because both views come from the same source
+    clip, alignment_pairs is pre-built trivially:
+        pair_i = AlignmentPair(img_batch_idx=i, vid_batch_idx=i,
+                               frame_offset=samples[i]["frame_offset"],
+                               weight=1.0)
+
+    The image and video sub-dicts are collated with the standard
+    ImageSSLCollator and VideoSSLCollator respectively.
+    """
+
+    def __init__(self):
+        from data.pipeline.collators import ImageSSLCollator, VideoSSLCollator
+        self._img_col = ImageSSLCollator()
+        self._vid_col = VideoSSLCollator()
+
+    def __call__(self, samples: List[Dict]) -> "AlignedDualStreamBatch":
+        image_batch = self._img_col([s["image"] for s in samples])
+        video_batch = self._vid_col([s["video"] for s in samples])
+        alignment_pairs = [
+            AlignmentPair(
+                img_batch_idx=i,
+                vid_batch_idx=i,
+                frame_offset=s["frame_offset"],
+                weight=1.0,
+            )
+            for i, s in enumerate(samples)
+        ]
+        return AlignedDualStreamBatch(
+            image_batch=image_batch,
+            video_batch=video_batch,
+            alignment_pairs=alignment_pairs,
+        )
+
+
 def make_aligned_dual_stream(
     image_batch: Dict[str, Any],
     video_batch: Dict[str, Any],

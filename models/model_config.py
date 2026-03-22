@@ -76,7 +76,7 @@ class ModelConfig:
     video_backbone:  str   = "vjepa2_l"
     frozen_teacher:  Optional[str] = "dinov3_7b"
     ema_momentum:    float = 0.9995
-    n_prototypes:    int   = 256
+    n_prototypes:    int   = 1024
     align_dim:       int   = 256
     dtype:           str   = "bfloat16"
     hf_cache_dir:    Optional[str] = None
@@ -214,5 +214,5 @@ def build_heads(
 
     dtype = cfg.torch_dtype
     cross = CrossBranchDistillation(img_dim, vid_dim, cfg.align_dim).to(device=device, dtype=dtype)
-    proto = PrototypeHead(img_dim, cfg.n_prototypes).to(device=device, dtype=dtype)
+    proto = PrototypeHead(cfg.align_dim, cfg.n_prototypes).to(device=device, dtype=dtype)
     return {"cross_distill": cross, "proto_head": proto}

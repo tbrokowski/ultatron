@@ -57,11 +57,14 @@ def _tube_mask_to_indices(
     Convert bool tube_mask to (context_mask, target_mask) index tensors
     as expected by HuggingFace VJEPA2Model.
 
-    context_mask : (B, N_ctx, 1) — indices of visible (unmasked) real tokens
-    target_mask  : (B, N_tgt, 1) — indices of masked real tokens
+    context_mask : (B, N_ctx) — indices of visible (unmasked) real tokens
+    target_mask  : (B, N_tgt) — indices of masked real tokens
 
     Padding frames (valid_frames=False) and padding patches (padding_mask=False)
     are excluded from both sets.
+
+    The HF apply_masks function expects masks as List[Tensor(B, N)], so callers
+    should wrap the returned tensors in a list: [context_mask], [target_mask].
     """
     B, T, ph, pw = tube_mask.shape
     N = T * ph * pw
@@ -86,15 +89,19 @@ def _tube_mask_to_indices(
     max_ctx = max(x.shape[0] for x in ctx_lists) if ctx_lists else 1
     max_tgt = max(x.shape[0] for x in tgt_lists) if tgt_lists else 1
 
-    ctx_out = torch.full((B, max_ctx), N, dtype=torch.long, device=tube_mask.device)
-    tgt_out = torch.full((B, max_tgt), N, dtype=torch.long, device=tube_mask.device)
+    # Fill with sentinel = N-1 (last valid index) so torch.gather never goes
+    # out of bounds.  Padding slots will gather from the last token; that token's
+    # value is wrong but these positions are rare and don't affect mean pooling
+    # since the clip_cls fold already excludes invalid slots.
+    ctx_out = torch.full((B, max_ctx), N - 1, dtype=torch.long, device=tube_mask.device)
+    tgt_out = torch.full((B, max_tgt), N - 1, dtype=torch.long, device=tube_mask.device)
     for b in range(B):
         nc = ctx_lists[b].shape[0]
         nt = tgt_lists[b].shape[0]
         if nc > 0: ctx_out[b, :nc] = ctx_lists[b]
         if nt > 0: tgt_out[b, :nt] = tgt_lists[b]
 
-    return ctx_out.unsqueeze(-1), tgt_out.unsqueeze(-1)
+    return ctx_out, tgt_out
 
 
 # ── V-JEPA2 backbone wrapper ──────────────────────────────────────────────────
@@ -114,6 +121,8 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
         self._model      = hf_model
         self.hidden_size = hf_model.config.hidden_size
         self.variant_key = variant_key
+        # tubelet_size: how many frames per temporal patch token
+        self.tubelet_size = getattr(hf_model.config, "tubelet_size", 2)
 
 
     def forward(
@@ -126,9 +135,22 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
     ) -> dict:
         context_mask = target_mask = None
         if tube_mask is not None:
-            context_mask, target_mask = _tube_mask_to_indices(
-                tube_mask, padding_mask, valid_frames
+            # The HF V-JEPA2 model operates at tubelet level (groups of
+            # tubelet_size frames → 1 token).  Convert frame-level inputs to
+            # tubelet level before building the index masks.
+            ts = self.tubelet_size
+            B, T, ph, pw = tube_mask.shape
+            T_t = T // ts
+            # A tubelet is masked if ANY of its constituent frames is masked
+            tube_mask_t = tube_mask.view(B, T_t, ts, ph, pw).any(dim=2)
+            vf_t = (
+                valid_frames.view(B, T_t, ts).any(dim=2)
+                if valid_frames is not None else None
             )
+            ctx, tgt = _tube_mask_to_indices(tube_mask_t, padding_mask, vf_t)
+            # HF apply_masks expects List[Tensor(B, N_ctx)] — wrap in a list
+            context_mask = [ctx]
+            target_mask  = [tgt]
 
         out = self._model(
             pixel_values_videos=pixel_values,
@@ -137,13 +159,30 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
             output_hidden_states=False,
         )
 
-        tube_tokens = out.last_hidden_state   # (B, T*ph*pw, D)
+        tube_tokens = out.last_hidden_state   # (B, N_out, D)
 
-        # clip_cls: mean over real (non-padding, non-invalid) tokens
-        if padding_mask is not None and valid_frames is not None:
+        # clip_cls: mean pooling over output tokens.
+        #
+        # Teacher path (tube_mask=None): model outputs ALL tubelet tokens.
+        # We weight by a real-token mask (excludes padding/invalid frames).
+        # real_flat is built at frame level but the model emits at tubelet level
+        # (T/tubelet_size), so we OR-pool frame slots into tubelet slots.
+        #
+        # Student path (tube_mask set): the HF model already applied context_mask
+        # so tube_tokens contains only the visible/context tokens, which are by
+        # construction already real (see _tube_mask_to_indices).  Plain mean is correct.
+        if tube_mask is None and padding_mask is not None and valid_frames is not None:
             real_flat = (
                 valid_frames[:, :, None, None] & padding_mask[:, None, :, :]
-            ).flatten(1).float()   # (B, T*ph*pw)
+            ).flatten(1).float()   # (B, T*ph*pw) — frame level
+            N_tok  = tube_tokens.shape[1]
+            N_real = real_flat.shape[1]
+            if N_tok != N_real:
+                fold = N_real // N_tok
+                real_flat = (
+                    real_flat.view(real_flat.shape[0], N_tok, fold)
+                    .any(dim=-1).float()
+                )
             denom    = real_flat.sum(1, keepdim=True).clamp(min=1.0)
             clip_cls = (tube_tokens * real_flat.unsqueeze(-1)).sum(1) / denom
         else:
@@ -156,6 +195,10 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
 
         if hasattr(out, "predictor_output") and out.predictor_output is not None:
             result["predicted"] = out.predictor_output.last_hidden_state
+            # Also expose target indices so phase2_step can gather teacher tokens
+            # at the exact target positions (tubelet-level, shape (B, N_tgt))
+            if tube_mask is not None:
+                result["tgt_indices"] = tgt   # tgt defined in the tube_mask branch above
 
         return result
 

@@ -180,8 +180,16 @@ class MetricLogger:
             self._fh.write(json.dumps(row) + "\n")
             self._fh.flush()
         if self.rank == 0 and step % log_every == 0:
-            parts = [f"{k}={v:.4f}" for k, v in row.items()
-                     if isinstance(v, float) and k not in ("ts",)]
+            parts = []
+            # Always include integer debug fields when present (useful for Phase 3).
+            for k in ("stage", "n_align_pairs"):
+                if isinstance(row.get(k), int):
+                    parts.append(f"{k}={row[k]}")
+            # Then include float metrics.
+            parts.extend(
+                f"{k}={v:.4f}" for k, v in row.items()
+                if isinstance(v, float) and k not in ("ts",)
+            )
             log.info(f"[step {step:7d} P{phase}] " + "  ".join(parts))
 
     def close(self):
@@ -365,10 +373,17 @@ class Trainer:
         _unwrap(self.img_branch).teacher.load_state_dict(state["img_teacher"])
         _unwrap(self.vid_branch).student.load_state_dict(state["vid_student"])
         _unwrap(self.vid_branch).teacher.load_state_dict(state["vid_teacher"])
-        _unwrap(self.cross_distill).load_state_dict(state["cross_distill"])
+        # Allow non-breaking evolution of the cross-modal head (e.g. adding
+        # predictor_vid) without invalidating older checkpoints.
+        _unwrap(self.cross_distill).load_state_dict(state["cross_distill"], strict=False)
         _unwrap(self.proto_head).load_state_dict(state["proto_head"])
-        self.optimizer.load_state_dict(state["optimizer"])
-        self.scaler.load_state_dict(state["scaler"])
+        # Optimizer/scaler state may become incompatible when param groups change
+        # (e.g. adding new parameters). In that case, resume weights but reset opt.
+        try:
+            self.optimizer.load_state_dict(state["optimizer"])
+            self.scaler.load_state_dict(state["scaler"])
+        except Exception as e:
+            log.warning(f"Skipping optimizer/scaler state restore: {e}")
 
         self.global_step   = state["global_step"]
         self.current_phase = state["current_phase"]
@@ -451,6 +466,18 @@ class Trainer:
 
     # ── Main training loop ────────────────────────────────────────────────────
 
+    @staticmethod
+    def _cycled(loader_fn):
+        """
+        Yields batches from loader_fn() in an infinite loop.
+        loader_fn is called fresh each cycle so the DataLoader and its sampler
+        re-shuffle indices, enabling true epoch-level data diversity.
+        Used to prevent short-dataset streams from terminating a phase early.
+        """
+        while True:
+            for batch in loader_fn():
+                yield batch
+
     def train(self):
         log.info(f"[rank {self.rank}] Starting training from step {self.global_step}")
 
@@ -459,7 +486,9 @@ class Trainer:
             self.current_phase = 1
             lr_fn = lambda s: _get_lr(s, self.phase1_end, self.cfg.base_lr,
                                        self.cfg.warmup_steps_p1)
-            for batch in self.dm.image_loader():
+            # Cycle image loader so small datasets (e.g. 780 BUSI images) don't
+            # exhaust the iterator before reaching phase1_end.
+            for batch in self._cycled(self.dm.image_loader):
                 if self.global_step >= self.phase1_end:
                     break
                 batch = self._to_device(batch)
@@ -482,7 +511,8 @@ class Trainer:
             self.current_phase = 2
             lr_fn = lambda s: _get_lr(s, self.phase2_end, self.cfg.base_lr,
                                        self.cfg.warmup_steps_p2)
-            for batch in self.dm.video_loader():
+            # Cycle video loader in case it exhausts before phase2_end.
+            for batch in self._cycled(self.dm.video_loader):
                 if self.global_step >= self.phase2_end:
                     break
                 batch = self._to_device(batch)
@@ -502,22 +532,28 @@ class Trainer:
             self.current_phase = 3
             lr_fn = lambda s: _get_lr(s, self.phase3_end, self.cfg.base_lr,
                                        self.cfg.warmup_steps_p3)
-            for dual in self.dm.combined_loader():
+            # Use the paired loader: each batch item is ONE clip that produces
+            # both an image view AND a video view, guaranteeing n_align_pairs
+            # == batch_size every step (no more hoping for study_id collisions
+            # across independently-shuffled image and video loaders).
+            for dual_raw in self._cycled(self.dm.paired_loader):
                 if self.global_step >= self.phase3_end:
                     break
-                img_b = self._to_device(dual.image_batch)
-                vid_b = self._to_device(dual.video_batch)
+                dual = dual_raw.to(self.device)
                 for g in self.optimizer.param_groups:
                     g["lr"] = lr_fn(self.global_step)
                 stage = self.dm.current_stage()
 
+                _cd = self.cross_distill.module if isinstance(self.cross_distill, DDP) else self.cross_distill
+                _ph = self.proto_head.module    if isinstance(self.proto_head,    DDP) else self.proto_head
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     losses = phase3_step(
-                        img_b, vid_b,
+                        dual.image_batch, dual.video_batch,
                         self.img_branch, self.vid_branch,
-                        self.cross_distill, self.proto_head,
+                        _cd, _ph,
                         self.gram_teacher, self.lam,
                         self.global_step, stage,
+                        alignment_pairs=dual.alignment_pairs,
                     )
                 self._step_update(losses, phase=3)
 

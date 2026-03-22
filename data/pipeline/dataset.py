@@ -208,14 +208,20 @@ class ImageSSLDataset(USFoundationDataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         e = self.entries[idx]
 
+        source_frame_idx = -1  # -1 for static images; actual index for frames sampled from video
         if e.modality_type in ("video", "pseudo_video", "volume"):
             if len(e.image_paths) == 1 and \
                     Path(self._remap_path(e.image_paths[0])).suffix.lower() \
                     in (".avi", ".mp4", ".mov", ".mkv", ".gif"):
-                frames = self._load_clip(e, max_frames=64)
-                img    = frames[torch.randint(len(frames), (1,)).item()]
+                # For Phase 3 alignment, we need frame indices to be compatible
+                # with the video stream's temporal sampling indices. Avoid
+                # subsampling here; sample from the full decoded frame list.
+                frames = self._load_clip(e, max_frames=None)
+                source_frame_idx = torch.randint(len(frames), (1,)).item()
+                img    = frames[source_frame_idx]
             else:
-                img = self._load_frame(e, torch.randint(max(1, len(e.image_paths)), (1,)).item())
+                source_frame_idx = torch.randint(max(1, len(e.image_paths)), (1,)).item()
+                img = self._load_frame(e, source_frame_idx)
         else:
             img = self._load_frame(e, 0)
 
@@ -230,19 +236,21 @@ class ImageSSLDataset(USFoundationDataset):
                 cls_label = inst.classification_label
 
         return {
-            "global_crops":   views["global"],        # list of (3,H_i,W_i)
-            "global_pmasks":  views["global_pmask"],  # list of (ph_i,pw_i)
-            "local_crops":    views["local"],         # list of (3,h_j,w_j)
-            "local_pmasks":   views["local_pmask"],   # list of (ph_j,pw_j)
-            "patch_mask":     views["mask"],          # (ph_0,pw_0) freq mask
-            "dataset_id":     e.dataset_id,
-            "anatomy_family": e.anatomy_family,
-            "tier":           e.curriculum_tier,
-            "sample_id":      e.sample_id,
-            "seg_mask":       seg_mask,
-            "cls_label":      cls_label,
-            "task_type":      e.task_type,
-            "is_promptable":  e.is_promptable,
+            "global_crops":    views["global"],        # list of (3,H_i,W_i)
+            "global_pmasks":   views["global_pmask"],  # list of (ph_i,pw_i)
+            "local_crops":     views["local"],         # list of (3,h_j,w_j)
+            "local_pmasks":    views["local_pmask"],   # list of (ph_j,pw_j)
+            "patch_mask":      views["mask"],          # (ph_0,pw_0) freq mask
+            "dataset_id":      e.dataset_id,
+            "anatomy_family":  e.anatomy_family,
+            "tier":            e.curriculum_tier,
+            "sample_id":       e.sample_id,
+            "study_id":        e.study_id or "",
+            "source_frame_idx": source_frame_idx,
+            "seg_mask":        seg_mask,
+            "cls_label":       cls_label,
+            "task_type":       e.task_type,
+            "is_promptable":   e.is_promptable,
         }
 
 
@@ -280,16 +288,109 @@ class VideoSSLDataset(USFoundationDataset):
         views  = self.transform(frames, mask_ratio=self.mask_ratio)
 
         return {
-            "full_clip":     views["full"],
-            "visible_clip":  views["visible"],
-            "tube_mask":     views["tube_mask"],
-            "padding_mask":  views["padding_mask"],
-            "dataset_id":    e.dataset_id,
-            "anatomy_family":e.anatomy_family,
-            "tier":          e.curriculum_tier,
-            "sample_id":     e.sample_id,
-            "n_frames":      views["full"].shape[0],
-            "task_type":     e.task_type,
-            "fps":           e.fps or 25.0,
-            "is_cine":       e.is_cine,
+            "full_clip":             views["full"],
+            "visible_clip":          views["visible"],
+            "tube_mask":             views["tube_mask"],
+            "padding_mask":          views["padding_mask"],
+            "dataset_id":            e.dataset_id,
+            "anatomy_family":        e.anatomy_family,
+            "tier":                  e.curriculum_tier,
+            "sample_id":             e.sample_id,
+            "study_id":              e.study_id or "",
+            "source_frame_indices":  views["sampled_frame_indices"],  # List[int] into loaded frames
+            "n_frames":              views["full"].shape[0],
+            "task_type":             e.task_type,
+            "fps":                   e.fps or 25.0,
+            "is_cine":               e.is_cine,
+        }
+
+
+# ── Paired SSL Dataset (Phase 3) ──────────────────────────────────────────────
+
+class PairedSSLDataset(USFoundationDataset):
+    """
+    Phase 3 paired stream: each __getitem__ returns BOTH an image view
+    and a video view from the *same* clip entry (ssl_stream='both').
+
+    Because both views originate from the same source, the image frame is
+    guaranteed to be one of the temporally-sampled video frames, giving an
+    exact frame_offset=t with weight=1.0 for every sample in the batch.
+
+    Return dict keys
+    ----------------
+    image        : dict  — compatible with ImageSSLCollator
+    video        : dict  — compatible with VideoSSLCollator
+    frame_offset : int   — temporal slot index in the video clip that the
+                           image frame was drawn from
+    """
+
+    def __init__(
+        self,
+        entries: List[USManifestEntry],
+        img_cfg: ImageSSLTransformConfig = ImageSSLTransformConfig(),
+        vid_cfg: VideoSSLTransformConfig = VideoSSLTransformConfig(),
+        patch_size: int = 16,
+        root_remap: Optional[Dict] = None,
+        img_alpha: float = 1.0,
+        vid_mask_ratio: Optional[float] = None,
+    ):
+        super().__init__(entries, root_remap)
+        self.img_transform  = ImageSSLTransform(img_cfg)
+        self.vid_transform  = VideoSSLTransform(vid_cfg, patch_size)
+        self.img_alpha      = img_alpha
+        self.vid_mask_ratio = vid_mask_ratio
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        e = self.entries[idx]
+
+        # Load the full clip once for both modalities.
+        frames = self._load_clip(e, max_frames=None)
+
+        # ── Video view ────────────────────────────────────────────────────────
+        vid_views = self.vid_transform(frames, mask_ratio=self.vid_mask_ratio)
+        sampled_indices: List[int] = vid_views["sampled_frame_indices"]
+        T = vid_views["full"].shape[0]
+
+        # ── Image view: draw from one of the video's temporal slots ──────────
+        # This guarantees exact frame overlap for the alignment pair.
+        t = int(torch.randint(T, (1,)).item())
+        source_frame_idx = sampled_indices[t]
+        img = frames[source_frame_idx]
+        img_views = self.img_transform(img, alpha=self.img_alpha)
+
+        return {
+            "image": {
+                "global_crops":    img_views["global"],
+                "global_pmasks":   img_views["global_pmask"],
+                "local_crops":     img_views["local"],
+                "local_pmasks":    img_views["local_pmask"],
+                "patch_mask":      img_views["mask"],
+                "dataset_id":      e.dataset_id,
+                "anatomy_family":  e.anatomy_family,
+                "tier":            e.curriculum_tier,
+                "sample_id":       e.sample_id,
+                "study_id":        e.study_id or "",
+                "source_frame_idx": source_frame_idx,
+                "seg_mask":        None,
+                "cls_label":       -1,
+                "task_type":       e.task_type,
+                "is_promptable":   e.is_promptable,
+            },
+            "video": {
+                "full_clip":            vid_views["full"],
+                "visible_clip":         vid_views["visible"],
+                "tube_mask":            vid_views["tube_mask"],
+                "padding_mask":         vid_views["padding_mask"],
+                "n_frames":             T,
+                "dataset_id":           e.dataset_id,
+                "anatomy_family":       e.anatomy_family,
+                "tier":                 e.curriculum_tier,
+                "sample_id":            e.sample_id,
+                "study_id":             e.study_id or "",
+                "source_frame_indices": sampled_indices,
+                "fps":                  e.fps or 25.0,
+                "is_cine":              e.is_cine,
+                "task_type":            e.task_type,
+            },
+            "frame_offset": t,
         }

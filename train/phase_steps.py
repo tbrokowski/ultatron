@@ -38,7 +38,7 @@ Loss weights (lam dict)
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -52,8 +52,15 @@ from models.losses.image_losses import (
     koleo_loss,
 )
 from models.losses.video_losses import jepa_tube_loss, clip_cls_loss
-from models.losses.cross_branch import cross_branch_loss_from_tokens
-from models.losses.proto_loss import proto_loss_from_tokens
+from models.losses.cross_branch import (
+    cross_branch_loss_from_tokens,
+    filip_cross_loss_from_pairs,
+    infonce_cross_loss_from_pairs,
+)
+from models.losses.proto_loss import (
+    proto_loss_from_tokens,
+    swav_proto_loss_from_tokens,
+)
 from .gram import GramTeacher, gram_loss
 
 
@@ -205,15 +212,24 @@ def phase2_step(
 
     loss_cls = clip_cls_loss(s_out["clip_cls"], t_out["clip_cls"])
 
-    tube_flat = batch["tube_masks"].flatten(1, -1)
-    if v_pmask is not None:
-        real_flat = v_pmask.unsqueeze(1).expand_as(batch["tube_masks"]).flatten(1, -1)
-        active    = tube_flat & real_flat
-    else:
-        active = tube_flat
-
-    if "predicted" in s_out and active.any():
-        loss_tube = jepa_tube_loss(s_out["predicted"], t_out["tube_tokens"], active)
+    # Tube loss: compare student predictor output at target positions with
+    # the teacher's tokens at those same positions.
+    # s_out["predicted"] has shape (B, N_tgt, D) — already at target positions.
+    # s_out["tgt_indices"] has shape (B, N_tgt) — tubelet-level target indices.
+    # We gather teacher tokens at those indices and compute cosine loss.
+    if "predicted" in s_out and "tgt_indices" in s_out:
+        tgt_idx = s_out["tgt_indices"]                           # (B, N_tgt)
+        D       = t_out["tube_tokens"].shape[-1]
+        N_tok   = t_out["tube_tokens"].shape[1]
+        # Expand index for gather and clamp to valid range
+        idx_exp = tgt_idx.unsqueeze(-1).expand(-1, -1, D).clamp(0, N_tok - 1)
+        teacher_at_tgt = torch.gather(t_out["tube_tokens"], 1, idx_exp)  # (B, N_tgt, D)
+        loss_tube = jepa_tube_loss(
+            s_out["predicted"],
+            teacher_at_tgt,
+            torch.ones(s_out["predicted"].shape[:2], dtype=torch.bool,
+                       device=s_out["predicted"].device),
+        )
     else:
         loss_tube = t_out["clip_cls"].new_tensor(0.0)
 
@@ -231,22 +247,31 @@ def phase2_step(
 def phase3_step(
     img_batch: dict,
     vid_batch: dict,
-    img_branch,            # ImageBranch
-    vid_branch,            # VideoBranch
-    cross_distill,         # CrossBranchDistillation
-    proto_head,            # PrototypeHead
+    img_branch,                             # ImageBranch
+    vid_branch,                             # VideoBranch
+    cross_distill,                          # CrossBranchDistillation
+    proto_head,                             # PrototypeHead
     gram_teacher: Optional[GramTeacher],
     lam: dict,
     global_step: int,
-    stage: int,            # 1, 2, or 3 — from dm.current_stage()
+    stage: int,                             # 1, 2, or 3 — from dm.current_stage()
+    alignment_pairs: Optional[List] = None, # List[AlignmentPair] from AlignedDualStreamBatch
 ) -> dict:
     """
     Hybrid joint step: image + video + cross-branch + prototype + gram.
 
-    stage controls loss ramping:
-      stage 1: lam6=0.0, lam7=0.0  (branches warm up independently)
-      stage 2: lam6=lam6*0.5, lam7=lam7  (cross-branch introduced at half weight)
-      stage 3: lam6=lam6, lam7=lam7  (full)
+    Cross-modal losses (stage 2+)
+    ------------------------------
+    lam6        FILIP per-pair token-level loss (ramped: ×0.5 stage 2, ×1.0 stage 3)
+    lam6_nce    InfoNCE contrastive loss (stage 3 only, ≥2 pairs required)
+    lam7        SwAV prototype loss — Sinkhorn on teacher, softmax on student
+    lam_koleo_cross  KoLeo uniformity on projected img/vid features (stage 2+)
+
+    Fallback behaviour
+    ------------------
+    When alignment_pairs is empty (disjoint-study batch or stage 1), FILIP and
+    InfoNCE return 0 gracefully. SwAV and KoLeo use global mean-pooled features
+    and still provide useful uniformity/diversity signal.
     """
     t_pmask = _get_pmask(img_batch, 1)
     s_pmask = _get_pmask(img_batch, 0)
@@ -282,39 +307,105 @@ def phase3_step(
     )
 
     loss_cls_vid = clip_cls_loss(s_vid["clip_cls"], t_vid["clip_cls"])
-    tube_flat = vid_batch["tube_masks"].flatten(1, -1)
-    if v_pmask is not None:
-        real_v   = v_pmask.unsqueeze(1).expand_as(vid_batch["tube_masks"]).flatten(1, -1)
-        active_v = tube_flat & real_v
-    else:
-        active_v = tube_flat
 
-    if "predicted" in s_vid and active_v.any():
-        loss_tube = jepa_tube_loss(s_vid["predicted"], t_vid["tube_tokens"], active_v)
+    if "predicted" in s_vid and "tgt_indices" in s_vid:
+        tgt_idx = s_vid["tgt_indices"]                           # (B, N_tgt)
+        D       = t_vid["tube_tokens"].shape[-1]
+        N_tok   = t_vid["tube_tokens"].shape[1]
+        idx_exp = tgt_idx.unsqueeze(-1).expand(-1, -1, D).clamp(0, N_tok - 1)
+        teacher_at_tgt = torch.gather(t_vid["tube_tokens"], 1, idx_exp)
+        loss_tube = jepa_tube_loss(
+            s_vid["predicted"],
+            teacher_at_tgt,
+            torch.ones(s_vid["predicted"].shape[:2], dtype=torch.bool,
+                       device=s_vid["predicted"].device),
+        )
     else:
         loss_tube = t_vid["clip_cls"].new_tensor(0.0)
 
     loss_vid = lam.get("lam4", 1.0) * loss_cls_vid + lam.get("lam5", 1.0) * loss_tube
 
-    # ── Cross-branch distillation ─────────────────────────────────────────────
+    # ── Infer patch-grid spatial dimensions (ph, pw) from tube_tokens shape ──
+    # tube_tokens: (B, T*ph*pw, D_vid).  We need ph*pw to slice per frame.
+    # Derive from the spatial padding mask when available, else approximate.
+    if v_pmask is not None:
+        ph_vid = v_pmask.shape[1]   # (B, ph, pw) — ph from mask
+        pw_vid = v_pmask.shape[2]
+    else:
+        # Fall back: assume square spatial grid from the tube token count and
+        # the number of frames in the video batch.
+        T_vid   = vid_batch["full_clips"].shape[1]
+        N_total = s_vid["tube_tokens"].shape[1]
+        n_spat  = max(1, N_total // max(1, T_vid))
+        side    = max(1, int(n_spat ** 0.5))
+        ph_vid  = side
+        pw_vid  = max(1, n_spat // side)
+
+    pairs = alignment_pairs or []
+
+    # ── FILIP token-level cross-branch loss ───────────────────────────────────
     lam6_eff = lam.get("lam6", 1.0) * (0.5 if stage == 2 else 1.0) if stage >= 2 else 0.0
     if lam6_eff > 0:
-        loss_cross = cross_branch_loss_from_tokens(
+        loss_filip = filip_cross_loss_from_pairs(
             t_img["patch_tokens"], s_vid["tube_tokens"],
             cross_distill.proj_img, cross_distill.proj_vid,
+            getattr(cross_distill, "predictor_vid", None),
+            pairs, ph_vid, pw_vid,
+        )
+        if not pairs:
+            # Fallback when no aligned pairs: global mean-pool cosine loss
+            loss_filip = cross_branch_loss_from_tokens(
+                t_img["patch_tokens"], s_vid["tube_tokens"],
+                cross_distill.proj_img, cross_distill.proj_vid,
+                getattr(cross_distill, "predictor_vid", None),
+            )
+    else:
+        loss_filip = s_img["cls"].new_tensor(0.0)
+
+    # ── InfoNCE contrastive loss (Stage 3 only, ≥2 pairs) ────────────────────
+    lam6_nce = lam.get("lam6_nce", 0.5) if stage >= 3 else 0.0
+    if lam6_nce > 0 and len(pairs) >= 2:
+        loss_nce = infonce_cross_loss_from_pairs(
+            t_img["patch_tokens"], s_vid["tube_tokens"],
+            cross_distill.proj_img, cross_distill.proj_vid,
+            getattr(cross_distill, "predictor_vid", None),
+            pairs, ph_vid, pw_vid,
+            temperature=lam.get("lam6_nce_temp", 0.07),
         )
     else:
-        loss_cross = s_img["cls"].new_tensor(0.0)
+        loss_nce = s_img["cls"].new_tensor(0.0)
 
-    # ── Prototype consistency ─────────────────────────────────────────────────
+    # ── SwAV prototype loss ───────────────────────────────────────────────────
     lam7_eff = lam.get("lam7", 0.5) if stage >= 2 else 0.0
     if lam7_eff > 0:
-        loss_proto = proto_loss_from_tokens(
-            t_img["patch_tokens"], s_vid["tube_tokens"],
+        dt = cross_distill.proj_img.weight.dtype
+        # Project both modalities to align_dim; teacher tokens fed with no_grad above
+        img_proj_mean = cross_distill.proj_img(
+            t_img["patch_tokens"].float().mean(1).to(dt)
+        )  # (B_img, align_dim)
+        vid_proj_mean = cross_distill.proj_vid(
+            s_vid["tube_tokens"].float().mean(1).to(dt)
+        )  # (B_vid, align_dim)
+        loss_proto = swav_proto_loss_from_tokens(
+            img_proj_mean.unsqueeze(1), vid_proj_mean.unsqueeze(1),
             proto_head.prototypes, proto_head.temperature,
         )
     else:
         loss_proto = s_img["cls"].new_tensor(0.0)
+
+    # ── KoLeo uniformity in align_dim space (Stage 2+) ───────────────────────
+    lam_koleo_cross = lam.get("lam_koleo_cross", 0.1) if stage >= 2 else 0.0
+    if lam_koleo_cross > 0:
+        dt = cross_distill.proj_img.weight.dtype
+        img_proj_kl = F.normalize(
+            cross_distill.proj_img(t_img["patch_tokens"].float().mean(1).to(dt)), dim=-1
+        )
+        vid_proj_kl = F.normalize(
+            cross_distill.proj_vid(s_vid["tube_tokens"].float().mean(1).to(dt)), dim=-1
+        )
+        loss_koleo_cross = koleo_loss(img_proj_kl) + koleo_loss(vid_proj_kl)
+    else:
+        loss_koleo_cross = s_img["cls"].new_tensor(0.0)
 
     # ── 7B distillation ───────────────────────────────────────────────────────
     loss_7b = s_img["cls"].new_tensor(0.0)
@@ -335,24 +426,30 @@ def phase3_step(
         X_G = gram_teacher.forward(img_batch["global_crops"][:, 0], padding_mask=s_pmask)
         loss_gram = gram_loss(X_S, X_G, padding_mask=s_pmask)
 
+    # ── Total loss ────────────────────────────────────────────────────────────
     loss = (
         loss_img
         + loss_vid
-        + lam6_eff * loss_cross
-        + lam7_eff * loss_proto
-        + lam.get("lam_7b", 0.0) * loss_7b
+        + lam6_eff         * loss_filip
+        + lam6_nce         * loss_nce
+        + lam7_eff         * loss_proto
+        + lam_koleo_cross  * loss_koleo_cross
+        + lam.get("lam_7b",   0.0) * loss_7b
         + lam.get("lam_gram", 1.0) * loss_gram
     )
 
     return {
-        "loss":        loss,
-        "loss_img":    loss_img.item(),
-        "loss_vid":    loss_vid.item(),
-        "loss_cross":  loss_cross.item(),
-        "loss_proto":  loss_proto.item(),
-        "loss_7b":     loss_7b.item(),
-        "loss_gram":   loss_gram.item(),
-        "stage":       stage,
+        "loss":              loss,
+        "loss_img":          loss_img.item(),
+        "loss_vid":          loss_vid.item(),
+        "loss_filip":        loss_filip.item(),
+        "loss_nce":          loss_nce.item(),
+        "loss_proto":        loss_proto.item(),
+        "loss_koleo_cross":  loss_koleo_cross.item(),
+        "loss_7b":           loss_7b.item(),
+        "loss_gram":         loss_gram.item(),
+        "n_align_pairs":     len(pairs),
+        "stage":             stage,
     }
 
 

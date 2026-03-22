@@ -499,8 +499,7 @@ def freq_mask_video(
       < T           Frames are divided into temporal groups of tube_size.
                     Each group selects its own frequency band independently
                     from its representative frame, yielding per-group spatial
-                    masks with temporal diversity between groups.  This matches
-                    the spatiotemporal tubelet structure used in V-JEPA.
+                    masks with temporal diversity between groups. 
 
     Returns
     -------
@@ -1078,7 +1077,7 @@ class VideoSSLTransform:
         if mask_ratio is None:
             mask_ratio = c.tube_mask_ratio
 
-        frames = self._temporal_sample(frames, c.n_frames)
+        frames, sampled_frame_indices = self._temporal_sample(frames, c.n_frames)
 
         # Preserve channel count per frame
         clip = torch.stack([to_canonical_tensor(f) for f in frames])  # (T, C, H, W)
@@ -1093,19 +1092,31 @@ class VideoSSLTransform:
         )
 
         return {
-            "full":         clip,
-            "visible":      visible_clip,
-            "tube_mask":    tube_mask,
-            "padding_mask": padding_mask,
+            "full":                 clip,
+            "visible":              visible_clip,
+            "tube_mask":            tube_mask,
+            "padding_mask":         padding_mask,
+            "sampled_frame_indices": sampled_frame_indices,  # List[int] — indices into loaded frames
         }
 
-    def _temporal_sample(self, frames: List, n: int) -> List:
+    def _temporal_sample(self, frames: List, n: int):
+        """Returns (sampled_frames, sampled_indices_into_frames_list)."""
         total = len(frames)
         if total <= n:
-            return frames + [frames[-1]] * (n - total)
-        start   = random.randint(0, total - n * self.cfg.temporal_stride)
+            indices = list(range(total)) + [total - 1] * (n - total)
+            return [frames[i] for i in indices], indices
+
+        # If the clip is shorter than the requested temporal window under stride,
+        # we cannot pick a valid random start. Fall back to start=0 and clamp.
+        stride = max(1, int(self.cfg.temporal_stride))
+        max_start = total - (n - 1) * stride - 1
+        if max_start <= 0:
+            start = 0
+        else:
+            start = random.randint(0, max_start)
+
         indices = [min(start + i * self.cfg.temporal_stride, total - 1) for i in range(n)]
-        return [frames[i] for i in indices]
+        return [frames[i] for i in indices], indices
 
     def _native_spatial_crop(self, clip: Tensor) -> Tuple[Tensor, Tensor]:
         nT, C, H, W = clip.shape

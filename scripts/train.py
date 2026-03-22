@@ -77,16 +77,108 @@ def _deep_merge(base: dict, override: dict):
             base[k] = v
 
 
+def _build_finetune_experiments(cfg: dict, ckpt_dir: Path, log) -> list:
+    """
+    Instantiate Phase 4 finetune experiments from configs/finetune/*.yaml.
+    Returns a (potentially empty) list.  Experiments that are missing a
+    valid dataset_root are silently skipped with a warning.
+    """
+    import yaml
+    repo = Path(__file__).resolve().parent.parent
+    ft_cfg_dir = repo / "configs" / "finetune"
+    results_dir = ckpt_dir.parent / "finetune"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    experiments = []
+
+    def _load_ft_yaml(name: str) -> dict:
+        p = ft_cfg_dir / name
+        if not p.exists():
+            return {}
+        with open(p) as f:
+            return yaml.safe_load(f)
+
+    # ── BUSI ─────────────────────────────────────────────────────────────────
+    try:
+        from finetune.experiments.busi import BUSIFinetune
+        from finetune.base import FinetuneConfig
+        raw = _load_ft_yaml("busi.yaml")
+        root = raw.get("dataset_root", "")
+        if root and Path(root).exists():
+            exp = BUSIFinetune(
+                data_root  = root,
+                output_dir = str(results_dir / "busi"),
+                cfg        = FinetuneConfig.from_dict(raw.get("finetune", raw)),
+            )
+            experiments.append(exp)
+            log.info(f"[Phase4] BUSI experiment ready: {root}")
+        else:
+            log.warning(f"[Phase4] BUSI root not found ({root!r}), skipping.")
+    except Exception as e:
+        log.warning(f"[Phase4] BUSI experiment failed to load: {e}")
+
+    # ── EchoNet ───────────────────────────────────────────────────────────────
+    try:
+        from finetune.experiments.echonet import EchoNetFinetune
+        from finetune.base import FinetuneConfig
+        raw = _load_ft_yaml("echonet.yaml")
+        root = raw.get("dataset_root", "")
+        if root and Path(root).exists():
+            exp = EchoNetFinetune(
+                data_root  = root,
+                output_dir = str(results_dir / "echonet"),
+                cfg        = FinetuneConfig.from_dict(raw.get("finetune", raw)),
+            )
+            experiments.append(exp)
+            log.info(f"[Phase4] EchoNet experiment ready: {root}")
+        else:
+            log.warning(f"[Phase4] EchoNet root not found ({root!r}), skipping.")
+    except Exception as e:
+        log.warning(f"[Phase4] EchoNet experiment failed to load: {e}")
+
+    # ── LUS patient ───────────────────────────────────────────────────────────
+    try:
+        from finetune.experiments.lus_patient import LUSPatientFinetune
+        from finetune.base import FinetuneConfig
+        raw    = _load_ft_yaml("lus_patient.yaml")
+        ft_raw = raw.get("finetune", raw)
+        benin  = raw.get("dataset_root_benin", "")
+        rsa    = raw.get("dataset_root_rsa",   "")
+        if (benin and Path(benin).exists()) or (rsa and Path(rsa).exists()):
+            exp = LUSPatientFinetune(
+                data_root_benin = benin,
+                data_root_rsa   = rsa,
+                output_dir      = str(results_dir / "lus_patient"),
+                cfg             = FinetuneConfig.from_dict(ft_raw),
+                n_frames        = ft_raw.get("n_frames", 8),
+                img_size        = ft_raw.get("img_size",  224),
+            )
+            experiments.append(exp)
+            log.info(f"[Phase4] LUS-patient experiment ready")
+        else:
+            log.warning(f"[Phase4] LUS roots not found, skipping.")
+    except Exception as e:
+        log.warning(f"[Phase4] LUS experiment failed to load: {e}")
+
+    return experiments
+
+
 def main():
     parser = argparse.ArgumentParser(description="Oura foundation model training")
     parser.add_argument("--config",  required=True,
                         help="Experiment config YAML (supports _base_ inheritance)")
-    parser.add_argument("--resume",  default=None,
+    parser.add_argument("--resume",   default=None,
                         help="Checkpoint .pt to resume from")
-    parser.add_argument("--phase",   type=int, default=None,
+    parser.add_argument("--ckpt-dir", default=None,
+                        help="Directory to save checkpoints (overrides default current_run/)")
+    parser.add_argument("--phase",    type=int, default=None,
                         help="Force-start at phase number (1–4)")
-    parser.add_argument("--no-7b",   action="store_true",
+    parser.add_argument("--no-7b",    action="store_true",
                         help="Skip DINOv3-7B frozen teacher")
+    parser.add_argument("--finetune", action="store_true",
+                        help="Run Phase 4 finetune experiments (BUSI, EchoNet, LUS) "
+                             "after Phase 3 on rank 0. Requires dataset roots in "
+                             "configs/finetune/*.yaml")
     args = parser.parse_args()
 
     rank, world_size, local_rank = _setup_distributed()
@@ -115,8 +207,11 @@ def main():
     torch.backends.cudnn.allow_tf32       = True
 
     cscs     = CSCSConfig.from_env()
-    hf_cache = str(cscs.store_path("hf_cache"))
-    ckpt_dir = cscs.checkpoints_dir(phase=1).parent / "current_run"
+    # Prefer scratch HF cache (no store quota issues); fall back to store
+    _scratch_hf = cscs.scratch_path("hf_cache")
+    _store_hf   = cscs.store_path("hf_cache")
+    hf_cache = str(_scratch_hf if _scratch_hf.exists() else _store_hf)
+    ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else cscs.checkpoints_dir(phase=1).parent / "current_run"
     log_dir  = cscs.scratch_path("logs") / "current_run"
 
     # ── Build models ──────────────────────────────────────────────────────────
@@ -136,7 +231,7 @@ def main():
         img_dim, vid_dim, model_cfg.align_dim
     ).to(device=device, dtype=dtype)
     proto_head = PrototypeHead(
-        img_dim, model_cfg.n_prototypes
+        model_cfg.align_dim, model_cfg.n_prototypes
     ).to(device=device, dtype=dtype)
 
     # ── DDP wrap ──────────────────────────────────────────────────────────────
@@ -209,6 +304,11 @@ def main():
     )
     dm.setup()
 
+    # ── Phase 4 finetune experiments (optional, rank-0 only) ─────────────────
+    finetune_experiments = []
+    if args.finetune and rank == 0:
+        finetune_experiments = _build_finetune_experiments(cfg, ckpt_dir, log)
+
     # ── Build trainer and run ─────────────────────────────────────────────────
     # Disable AMP GradScaler for bfloat16 (not implemented for bf16 on some CUDA; bf16 doesn't need scaling).
     use_amp_scaler = model_cfg.dtype != "bfloat16"
@@ -221,7 +321,7 @@ def main():
         dm                    = dm,
         ckpt_dir              = ckpt_dir,
         log_dir               = log_dir,
-        finetune_experiments  = [],
+        finetune_experiments  = finetune_experiments,
         rank                  = rank,
         local_rank            = local_rank,
         total_steps           = total_steps,

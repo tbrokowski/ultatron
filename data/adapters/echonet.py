@@ -83,7 +83,9 @@ class EchoNetDynamicAdapter(BaseAdapter):
                 has_temporal_order = True,
                 fps                = fps,
                 task_type          = "regression",
-                ssl_stream         = "video",
+                # Include EchoNet videos in BOTH streams so Phase 3 can sample
+                # frames (image stream) paired with clips (video stream).
+                ssl_stream         = "both",
                 is_promptable      = bool(instances),
                 has_mask           = bool(instances),
                 source_meta        = {

@@ -1,9 +1,11 @@
 # configs/finetune/busi.yaml
 # ============================================================
 # Finetune hyperparameters for BUSI.
-# Loaded by oura.finetune.busi.BUSIFinetune
-# Usage: python -m oura.finetune.busi --config configs/finetune/busi.yaml ...
+# Loaded by finetune.experiments.busi.BUSIFinetune
+# Usage: python scripts/finetune.py --checkpoint ... --config configs/experiments/run1.yaml
 # ============================================================
+
+dataset_root: "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
 
 # Model backbone (which checkpoint to load from)
 model:

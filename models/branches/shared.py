@@ -38,23 +38,41 @@ def ema_update(student: nn.Module, teacher: nn.Module, momentum: float):
 class CrossBranchDistillation(nn.Module):
     """
     Aligns image teacher patch tokens with video student tube tokens.
-    Linear projection from each space into a shared alignment space,
-    followed by cosine distance loss.
+
+    Two linear projections map each modality into a shared alignment space.
+    A BYOL-style asymmetric predictor is applied to the video side only —
+    this allows the video student to "translate" toward the image teacher's
+    representation without requiring the image side to regress toward noisy
+    video features, preventing collapse without explicit negatives.
+
+    Projections are used by both the FILIP per-token loss and the SwAV
+    prototype loss in phase3_step (train/phase_steps.py).
     """
 
     def __init__(self, img_dim: int = 1024, vid_dim: int = 1024,
                  align_dim: int = 512):
         super().__init__()
-        self.proj_img = nn.Linear(img_dim, align_dim, bias=False)
-        self.proj_vid = nn.Linear(vid_dim, align_dim, bias=False)
+        self.align_dim = align_dim
+        self.proj_img  = nn.Linear(img_dim, align_dim, bias=False)
+        self.proj_vid  = nn.Linear(vid_dim, align_dim, bias=False)
+        # BYOL-style predictor on video side only (asymmetric).
+        # Applied after proj_vid before computing cross-modal loss.
+        # The image teacher side receives no gradient from this head.
+        self.predictor_vid = nn.Sequential(
+            nn.Linear(align_dim, align_dim * 4, bias=False),
+            nn.GELU(),
+            nn.Linear(align_dim * 4, align_dim, bias=False),
+        )
 
     def forward(
         self,
         img_teacher_patches: torch.Tensor,   # (B_img, N, D_img)
         vid_student_tubes: torch.Tensor,     # (B_vid, M, D_vid)
     ) -> torch.Tensor:
+        """Global mean-pool cosine loss (legacy path; per-pair FILIP preferred)."""
         img_feat = F.normalize(self.proj_img(img_teacher_patches.mean(1)), dim=-1)
-        vid_feat = F.normalize(self.proj_vid(vid_student_tubes.mean(1)),   dim=-1)
+        vid_proj = self.proj_vid(vid_student_tubes.mean(1))
+        vid_feat = F.normalize(self.predictor_vid(vid_proj), dim=-1)
         B = min(img_feat.shape[0], vid_feat.shape[0])
         return (1 - (img_feat[:B] * vid_feat[:B]).sum(-1)).mean()
 

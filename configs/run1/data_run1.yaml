@@ -1,6 +1,6 @@
 # configs/run1/data_run1.yaml
 # First run: BUSI + EchoNet-Dynamic + Benin-LUS + RSA-LUS
-# Single-node (4 GPUs), 20k steps, dinov3_s + vjepa2_l
+# Single-node (4 GPUs), 20k steps, dinov3_l + vjepa2_l
 # =============================================================================
 
 manifest:
@@ -97,7 +97,7 @@ datasets:
   RSA-LUS:         "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
 
 model:
-  image_backbone:  dinov3_s
+  image_backbone:  dinov3_l
   video_backbone:  vjepa2_l
   frozen_teacher:  null
   ema_momentum:    0.999
