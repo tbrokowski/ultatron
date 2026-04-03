@@ -1,0 +1,128 @@
+# configs/vlm/base_vlm.yaml
+# ============================================================
+# Base configuration for Ultatron VLM GRPO training.
+# Override specific sections in run-specific configs (e.g. run1_vlm.yaml).
+#
+# Architecture
+# ------------
+#   backbone  : Ultatron run1 phase3_end.pt (DINOv3-L + V-JEPA2-L)
+#   student   : Qwen2.5-VL-7B-Instruct with LoRA (r=64)
+#   projector : MLP 1024 → 3584
+#   tool      : SAM2 (frozen) + SAMTok bridge
+#   teacher   : Med-Gemini (API) or local fallback
+# ============================================================
+
+experiment_name: ultatron_vlm_grpo_base
+
+# ── Ultatron backbone ─────────────────────────────────────────────────────────
+backbone:
+  checkpoint:     null   # override in run-specific config
+  img_branch_key: img_branch
+  vid_branch_key: vid_branch
+  ultatron_dim:   1024
+  dtype:          bfloat16
+
+# ── Projector ─────────────────────────────────────────────────────────────────
+projector:
+  img_dim:  1024
+  vid_dim:  1024
+  qwen_dim: 3584
+  mid_dim:  2048
+
+# ── Student model ──────────────────────────────────────────────────────────────
+student:
+  model_name:      "Qwen/Qwen2.5-VL-7B-Instruct"
+  hf_cache_dir:    null    # set to CSCS scratch HF cache in run config
+  dtype:           bfloat16
+  max_new_tokens:  8192
+  max_sam2_calls:  3
+  temperature:     1.0
+  do_sample:       true
+  lora:
+    r:             64
+    lora_alpha:    128
+    lora_dropout:  0.05
+    target_modules:
+      - q_proj
+      - v_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+# ── SAM2 tool ────────────────────────────────────────────────────────────────
+sam2:
+  model_cfg:   null     # e.g. "sam2_hiera_large"; null = HF auto-download
+  checkpoint:  null     # /path/to/sam2_hiera_large.pt; null = HF
+  hf_cache_dir: null
+  samtok_mode: overlay  # "samtok" (requires weights) | "overlay" (fallback)
+  samtok_ckpt: null     # path to SAMTok pretrained encoder
+
+# ── Reward function ───────────────────────────────────────────────────────────
+reward:
+  weights:
+    w_acc:  1.0
+    w_fmt:  0.1
+    w_tool: 0.2
+    w_seg:  0.3
+  use_cross_dataset_norm: true
+  norm_window: 200
+  # Med-Gemini teacher
+  medgemini:
+    mode:        auto      # "auto" | "api" | "local" | "rule"
+    api_model:   "gemini-2.0-flash"
+    local_model: null      # path or HF ID for local fallback judge
+    local_dtype: bfloat16
+  format:
+    weight: 0.1
+  seg:
+    weight: 0.3
+    use_iou: true
+    min_area_frac: 0.001
+
+# ── GRPO training ─────────────────────────────────────────────────────────────
+grpo:
+  # Core GRPO
+  group_size:      8          # G = rollouts per prompt
+  clip_eps:        0.2        # PPO clip ratio ε
+  kl_coeff:        0.0        # β = 0 initially (no KL, follows DeepEyes)
+  kl_warmup_steps: 5000       # steps to linearly increase β
+  kl_coeff_target: 0.001      # final β
+
+  # Optimization
+  lr:              1.0e-5
+  lr_min:          1.0e-6
+  weight_decay:    0.01
+  grad_clip:       1.0
+  warmup_steps:    200
+  total_steps:     18000      # stage1 3k + stage2 10k + stage3 5k
+
+  # Stage boundaries
+  stage1_steps:    3000       # rule-based only
+  stage2_steps:    10000      # SAM2 tool enabled (3k + 10k = 13k)
+  # stage3 starts at step 13001 (Med-Gemini judge)
+
+  # Training
+  gradient_accumulation_steps: 4
+  max_seq_len:     8192
+
+  # Logging / checkpointing
+  log_every:       10
+  checkpoint_every: 500
+  ckpt_dir:        null       # override in run config
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+data:
+  manifest_path:   null       # override in run config (run1_train.jsonl)
+  batch_size:      4          # samples per step (each → G rollouts)
+  num_workers:     4
+  img_size:        224
+  anatomy_weights:
+    cardiac:         2.0
+    lung:            1.5
+    breast:          1.0
+    cardiac_fetal:   1.0
+    other:           0.5
+
+# ── Distributed ───────────────────────────────────────────────────────────────
+dist:
+  backend: nccl

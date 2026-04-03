@@ -1,0 +1,23 @@
+# configs/finetune/echonet_lvh.yaml
+dataset_root: "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-LVH"
+
+model:
+  image_backbone: dinov3_l
+  video_backbone: vjepa2_l
+  frozen_teacher: null
+  dtype: bfloat16
+
+finetune:
+  lr:           5.0e-5
+  weight_decay: 0.01
+  max_epochs:   50
+  batch_size:   16
+  num_workers:  4
+  head_type:    linear
+  patience:     10
+  monitor:      val_mae
+  monitor_mode: min
+  freeze_backbone: true
+  output_size:  224
+  log_every:    5
+  checkpoint_best: true

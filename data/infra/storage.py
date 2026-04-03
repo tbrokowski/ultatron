@@ -46,14 +46,20 @@ log = logging.getLogger(__name__)
 
 DATASET_STORE_MAP: Dict[str, Tuple[str, str]] = {
     # Cardiac
-    "CAMUS":               ("cardiac",         "CAMUS"),
-    "EchoNet-Dynamic":     ("cardiac",         "EchoNet-Dynamic"),
-    "EchoNet-LVH":         ("cardiac",         "EchoNet-LVH"),
-    "EchoNet-Pediatric":   ("cardiac",         "EchoNet-Pediatric"),
-    "MIMIC-IV-ECHO":       ("cardiac",         "MIMIC-IV-ECHO"),
-    "CardiacUDC":          ("cardiac",         "CardiacUDC"),
-    "CACTUS":              ("cardiac",         "CACTUS"),
-    "MITEA":               ("cardiac",         "MITEA"),
+    "CAMUS":                    ("cardiac", "CAMUS"),
+    "EchoNet-Dynamic":          ("cardiac", "EchoNet-Dynamic"),
+    "EchoNet-LVH":              ("cardiac", "EchoNet-LVH"),
+    "EchoNet-Pediatric":        ("cardiac", "EchoNet-Pediatric"),
+    "MIMIC-IV-ECHO":            ("cardiac", "MIMIC-IV-Echo"),
+    "MIMIC-IV-Echo-LVVol-A4C":  ("cardiac", "MIMIC-IV-Echo-LVVol-A4C"),
+    "MIMIC-EchoQA":             ("cardiac", "MIMIC-EchoQA"),
+    "TED":                      ("cardiac", "TED"),
+    "Unity-Echo":               ("cardiac", "Unity"),
+    "CardiacUDC":               ("cardiac", "CardiacUDC"),
+    "EchoCP":                   ("cardiac", "EchoCP"),
+    "Echocardiogram-UCI":       ("cardiac", "Echocardiogram-UCI"),
+    "CACTUS":                   ("cardiac", "CACTUS"),
+    "MITEA":                    ("cardiac", "MITEA"),
     # Lung
     "COVIDx-US":           ("lung",            "COVIDx-US"),
     "LUS-multicenter-2025":("lung",            "LUS-multicenter-2025"),

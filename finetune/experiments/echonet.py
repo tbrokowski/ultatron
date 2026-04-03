@@ -137,8 +137,9 @@ class EchoNetFinetune(FinetuneExperiment):
             vid_branch.eval()
 
         embed_dim = vid_branch.embed_dim
-        self.head = self.build_head(embed_dim, self.cfg).to(device)
-        log.info(f"[EchoNet] Regression head: {self.head}")
+        backbone_dtype = next(vid_branch.parameters()).dtype
+        self.head = self.build_head(embed_dim, self.cfg).to(device=device, dtype=backbone_dtype)
+        log.info(f"[EchoNet] Regression head: {self.head} (dtype={backbone_dtype})")
 
     def build_dataloader(self, split: str) -> DataLoader:
         split_map = {"train": "TRAIN", "val": "VAL", "test": "TEST"}

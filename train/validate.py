@@ -315,10 +315,15 @@ def main():
     vid_branch = build_video_branch(model_cfg, device=device)
     img_branch = img_branch.to(device)
     vid_branch = vid_branch.to(device)
-    img_branch.student.load_state_dict(ckpt["img_student"], strict=True)
-    img_branch.teacher.load_state_dict(ckpt["img_teacher"], strict=True)
-    vid_branch.student.load_state_dict(ckpt["vid_student"], strict=True)
-    vid_branch.teacher.load_state_dict(ckpt["vid_teacher"], strict=True)
+    def _strip_ddp(sd: dict) -> dict:
+        """Strip 'module.' prefix inserted by DDP wrapping, if present."""
+        return {(k[len("module."):] if k.startswith("module.") else k): v
+                for k, v in sd.items()}
+
+    img_branch.student.load_state_dict(_strip_ddp(ckpt["img_student"]), strict=True)
+    img_branch.teacher.load_state_dict(_strip_ddp(ckpt["img_teacher"]), strict=True)
+    vid_branch.student.load_state_dict(_strip_ddp(ckpt["vid_student"]), strict=True)
+    vid_branch.teacher.load_state_dict(_strip_ddp(ckpt["vid_teacher"]), strict=True)
 
     _mp = Path(cfg["manifest"]["path"])
     if not _mp.is_absolute():

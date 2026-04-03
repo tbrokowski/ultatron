@@ -14,7 +14,7 @@
 #                 (data adapters, model builds, all 4 phase steps) without DDP.
 #   -minimalrun   4-GPU DDP run, 50 training steps. Verifies the distributed
 #                 training loop end-to-end before committing to a full run.
-#   -run1         Full 20k-step run1 training on 4×GH200.
+#   -run1         Full run1 training on multi-node GH200 (see NODES in script).
 #
 # Optional flags (all modes except -smoke):
 #   --resume <path>   Resume from checkpoint (auto-detects latest.pt if absent)
@@ -39,10 +39,26 @@ CKPT_ROOT="/capstor/scratch/cscs/tbrokowski/ultrasound/checkpoints"
 LOG_ROOT="${REPO_DIR}/logs"
 
 STORE="/capstor/store/cscs/swissai/a127/ultrasound/raw"
-BUSI_ROOT="${STORE}/breast/BUSI"
+
+# ── Cardiac dataset roots ─────────────────────────────────────────────────────
+CAMUS_ROOT="${STORE}/cardiac/CAMUS"
 ECHONET_ROOT="${STORE}/cardiac/EchoNet-Dynamic"
+ECHONET_PED_ROOT="${STORE}/cardiac/EchoNet-Pediatric"
+ECHONET_LVH_ROOT="${STORE}/cardiac/EchoNet-LVH"
+MIMIC_ECHO_ROOT="${STORE}/cardiac/MIMIC-IV-Echo"
+MIMIC_LVVOL_ROOT="${STORE}/cardiac/MIMIC-IV-Echo-LVVol-A4C"
+TED_ROOT="${STORE}/cardiac/TED"
+UNITY_ROOT="${STORE}/cardiac/Unity"
+CARDIACUDC_ROOT="${STORE}/cardiac/CardiacUDC"
+ECHOCP_ROOT="${STORE}/cardiac/EchoCP"
+
+# ── Non-cardiac dataset roots ─────────────────────────────────────────────────
+BUSI_ROOT="${STORE}/breast/BUSI"
 BENIN_ROOT="${STORE}/lung/Benin_Videos"
 RSA_ROOT="${STORE}/lung/RSA_Videos"
+
+# ── Manifest / scratch paths ──────────────────────────────────────────────────
+MANIFEST_DIR="${CKPT_ROOT%/*}/manifests"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 die()  { echo "[ERROR] $*" >&2; exit 1; }
@@ -91,11 +107,13 @@ minimalrun)
 run1)
     JOB_NAME="ultatron_run1"
     TIME="12:00:00"
-    NODES=1
-    GPUS=4
-    CPUS=32
+    NODES=8
+    GPUS=4        # per node (4 GH200 per node × NODES = 32 GPUs total)
+    CPUS=64       # 16 per GPU × 4 GPUs per node
     LOG_DIR="${LOG_ROOT}/run1"
     CKPT_DIR="${CKPT_ROOT}/run1"
+    MANIFEST_DIR="${LOG_DIR}"
+    MANIFEST_PATH="${MANIFEST_DIR}/run1_train.jsonl"
     # Auto-resume from latest.pt if no explicit --resume given
     if [[ -z "$RESUME_ARG" && -f "${CKPT_DIR}/latest.pt" ]]; then
         RESUME_ARG="--resume ${CKPT_DIR}/latest.pt"
@@ -136,15 +154,37 @@ nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>
 echo "================================================================"
 echo ""
 
+export US_CAMUS_ROOT="${CAMUS_ROOT}"
+export US_ECHONET_ROOT="${ECHONET_ROOT}"
+export US_ECHONET_PED_ROOT=${ECHONET_PED_ROOT}
+export US_ECHONET_LVH_ROOT=${ECHONET_LVH_ROOT}
+export US_MIMIC_ECHO_ROOT=${MIMIC_ECHO_ROOT}
+export US_MIMIC_LVVOL_ROOT=${MIMIC_LVVOL_ROOT}
+export US_TED_ROOT=${TED_ROOT}
+export US_UNITY_ROOT=${UNITY_ROOT}
+export US_CARDIACUDC_ROOT=${CARDIACUDC_ROOT}
+export US_ECHOCP_ROOT=${ECHOCP_ROOT}
 export US_BUSI_ROOT=${BUSI_ROOT}
-export US_ECHONET_ROOT=${ECHONET_ROOT}
 export US_BENIN_ROOT=${BENIN_ROOT}
+export US_RSA_ROOT=${RSA_ROOT}
+
+pip install --quiet pydicom
 
 echo "Running: python3 -m tests.dataset_adapters.training_smoke"
 echo "Dataset roots:"
-echo "  BUSI    : ${BUSI_ROOT}"
-echo "  EchoNet : ${ECHONET_ROOT}"
-echo "  Benin   : ${BENIN_ROOT}"
+echo "  CAMUS              : ${CAMUS_ROOT}"
+echo "  EchoNet-Dynamic    : ${ECHONET_ROOT}"
+echo "  EchoNet-Pediatric  : ${ECHONET_PED_ROOT}"
+echo "  EchoNet-LVH        : ${ECHONET_LVH_ROOT}"
+echo "  MIMIC-IV-ECHO      : ${MIMIC_ECHO_ROOT}"
+echo "  MIMIC-IV-LVVol-A4C : ${MIMIC_LVVOL_ROOT}"
+echo "  TED                : ${TED_ROOT}"
+echo "  Unity-Echo         : ${UNITY_ROOT}"
+echo "  CardiacUDC         : ${CARDIACUDC_ROOT}"
+echo "  EchoCP             : ${ECHOCP_ROOT}"
+echo "  BUSI               : ${BUSI_ROOT}"
+echo "  Benin-LUS          : ${BENIN_ROOT}"
+echo "  RSA-LUS            : ${RSA_ROOT}"
 echo ""
 
 python3 -m tests.dataset_adapters.training_smoke
@@ -175,7 +215,7 @@ export NCCL_NET=Socket
 export NCCL_P2P_LEVEL=NVL
 export NCCL_SHM_DISABLE=0
 export NCCL_DEBUG=WARN
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=4
 
 echo "================================================================"
@@ -187,6 +227,8 @@ nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>
     | awk '{print " GPU     :", \$0}' || echo " GPU     : nvidia-smi unavailable"
 echo "================================================================"
 echo ""
+
+pip install --quiet pydicom
 
 echo "Running 50-step DDP minimal run (4 GPUs)..."
 echo ""
@@ -218,18 +260,27 @@ set -euo pipefail
 cd ${REPO_DIR}
 export PYTHONPATH="${REPO_DIR}:\${PYTHONPATH:-}"
 
-# Single-node 4×GH200: use NVLink for P2P + TCP socket for coordination.
-# The container toml forces NCCL_NET=AWS Libfabric via LD_LIBRARY_PATH, but
-# the CXI/EFA device is not accessible for sbatch-launched containers, so the
-# plugin fails. Strip it from LD_LIBRARY_PATH and force Socket transport so
-# NCCL uses its built-in TCP rendezvous while still using NVLink for P2P data.
+# Multi-node GH200 (4 GPUs/node; NODES set above) on CSCS Alps / Slingshot-11.
+# - Strip aws-ofi-nccl: the AWS OFI plugin requires CXI device access that is
+#   not available inside the sbatch-launched container, causing ncclInvalidUsage.
+# - Force NCCL_NET=Socket so NCCL uses its built-in TCP transport for cross-node
+#   gradient sync (no external plugin needed).  Intra-node traffic still goes
+#   over NVLink (NCCL_P2P_LEVEL=NVL), so per-node compute efficiency is preserved.
+# - Revisit proper Slingshot OFI transport (FI_CXI_ATS=0 + keep aws-ofi-nccl)
+#   once the CXI device is confirmed accessible in the container image.
 export LD_LIBRARY_PATH=\$(echo "\${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v 'aws-ofi-nccl' | paste -sd ':' -)
 export NCCL_NET=Socket
 export NCCL_P2P_LEVEL=NVL
 export NCCL_SHM_DISABLE=0
 export NCCL_DEBUG=WARN
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,expandable_segments:True
-export OMP_NUM_THREADS=4
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=8
+
+# Rendezvous: rank-0 node is the master
+export MASTER_ADDR=\$(scontrol show hostnames "\${SLURM_JOB_NODELIST}" | head -n 1)
+export MASTER_PORT=29500
+echo "MASTER_ADDR : \${MASTER_ADDR}"
+echo "SLURM nodes : \${SLURM_NNODES}  (node \${SLURM_NODEID:-?} of \${SLURM_NNODES})"
 
 echo "================================================================"
 echo " Ultatron — ${JOB_NAME}"
@@ -251,14 +302,35 @@ _checkpoint_and_requeue() {
 }
 trap _checkpoint_and_requeue SIGUSR1
 
+pip install --quiet pydicom
+
 echo "Checkpoint dir : ${CKPT_DIR}"
 echo "Resume         : ${RESUME_ARG:-none}"
 echo ""
 
+# ── Build manifest (rank-0 only; idempotent — skip if already exists) ─────────
+mkdir -p "${MANIFEST_DIR}"
+if [[ ! -f "${MANIFEST_PATH}" || -n "\${FORCE_REBUILD_MANIFEST:-}" ]]; then
+    echo "Building run1 manifest → ${MANIFEST_PATH}"
+    python3 scripts/build_manifest.py \
+        --config configs/run1/data_run1.yaml \
+        --out "${MANIFEST_PATH}" \
+        || { echo "ERROR: manifest build failed"; exit 1; }
+    echo "Manifest built: \$(wc -l < ${MANIFEST_PATH}) entries"
+else
+    echo "Reusing existing manifest: ${MANIFEST_PATH} (\$(wc -l < ${MANIFEST_PATH}) entries)"
+fi
+echo ""
+
 python3 -m torch.distributed.run \
+    --nnodes=\${SLURM_NNODES} \
     --nproc_per_node=4 \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint="\${MASTER_ADDR}:\${MASTER_PORT}" \
+    --rdzv_id=\${SLURM_JOB_ID} \
     scripts/train.py \
     --config configs/experiments/run1.yaml \
+    --manifest "${MANIFEST_PATH}" \
     --ckpt-dir ${CKPT_DIR} \
     ${NO_7B_ARG} \
     ${RESUME_ARG}

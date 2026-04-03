@@ -1,19 +1,22 @@
 """
-finetune/experiments/lus_patient.py  ·  LUS patient-level TB/Pneumonia/COVID finetune
-======================================================================================
+finetune/experiments/lus_patient.py  ·  LUS patient-level TB finetune (Gated MIL)
+==================================================================================
 
-Task:    Binary classification per task: TB, Pneumonia, COVID.
+Task:    Binary classification: TB (single head, sigmoid + BCE).
 Dataset: Benin-LUS + RSA-LUS (pooled, patient-level train/val/test split).
 Branch:  Video branch (V-JEPA2 teacher, frozen) — clip_cls token.
-Head:    Linear multi-label head: vid_embed_dim → 3 logits (sigmoid + BCE).
-Metric:  Patient-level AUC per task + macro-average AUC.
+Head:    Gated Attention MIL (ABMIL, Ilse et al. 2018):
+           each clip embedding → gated attention weights → weighted sum → Linear(D, 1).
+Metric:  Patient-level AUC-ROC for TB.
 
-Multi-instance note
--------------------
-Each patient has multiple video clips (different lung sites/depths).
-Training: treat each clip independently with patient-level labels.
-Evaluation: aggregate clip-level predictions per patient (mean pooling),
-            then compute AUC against patient-level ground truth.
+Multiple-instance learning note
+--------------------------------
+Each patient is a *bag* of video clips (different lung sites/depths).
+Training: all clips for a patient are encoded by the frozen backbone, then
+          aggregated by the trainable GatedAttentionMIL head into a single
+          patient-level logit.  Loss is BCE vs the patient's TB label.
+Evaluation: the MIL head directly produces a patient-level prediction — no
+            post-hoc mean pooling required.
 """
 from __future__ import annotations
 
@@ -35,16 +38,58 @@ from eval.metrics import auc_roc
 
 log = logging.getLogger(__name__)
 
-TASK_KEYS   = ["tb", "pneumonia", "covid"]
-N_FRAMES    = 8
-CLIP_SIZE   = 224
+TASK            = "tb"
+MIL_HIDDEN_DIM  = 256
+CLIP_ENCODE_BS  = 8     # sub-batch size when encoding clips for one patient
+N_FRAMES        = 8
+CLIP_SIZE       = 224
+
+
+# ── Gated Attention MIL ───────────────────────────────────────────────────────
+
+class GatedAttentionMIL(nn.Module):
+    """
+    Gated Attention Multiple Instance Learning (Ilse et al., 2018).
+
+    For a bag of N clip embeddings H ∈ R^{N×D}:
+
+        e_i = tanh(W_V · h_i)          (attention branch)
+        g_i = sigmoid(W_U · h_i)       (gate branch)
+        a_i = softmax(w^T (e_i ⊙ g_i)) (attention weights, sums to 1)
+        z   = Σ a_i · h_i              (aggregated patient representation)
+        logit = W_c · z                (scalar TB logit)
+    """
+
+    def __init__(self, embed_dim: int, hidden_dim: int = MIL_HIDDEN_DIM):
+        super().__init__()
+        self.attn_V     = nn.Linear(embed_dim, hidden_dim)
+        self.attn_U     = nn.Linear(embed_dim, hidden_dim)
+        self.attn_w     = nn.Linear(hidden_dim, 1, bias=False)
+        self.classifier = nn.Linear(embed_dim, 1)
+
+    def forward(self, H: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            H: (N, D) clip embeddings for one patient
+        Returns:
+            scalar logit (pre-sigmoid)
+        """
+        A = self.attn_w(torch.tanh(self.attn_V(H)) * torch.sigmoid(self.attn_U(H)))  # (N, 1)
+        A = torch.softmax(A, dim=0)                                                    # (N, 1)
+        z = (A * H).sum(dim=0)                                                         # (D,)
+        return self.classifier(z).squeeze(-1)                                          # scalar
+
+    def attention_weights(self, H: torch.Tensor) -> torch.Tensor:
+        """Return attention weights (N,) for interpretability."""
+        A = self.attn_w(torch.tanh(self.attn_V(H)) * torch.sigmoid(self.attn_U(H)))
+        return torch.softmax(A, dim=0).squeeze(-1)
 
 
 # ── Dataset ──────────────────────────────────────────────────────────────────
 
-class LUSPatientDataset(Dataset):
+class LUSPatientBagDataset(Dataset):
     """
-    One sample = one video clip.  Label = patient-level (tb, pneumonia, covid).
+    One sample = one patient = a bag of video clips.
 
     Layout:
         {root}/cleaned/videos/{PatientID}_{Site}_{Depth}_{Count}.mp4
@@ -52,36 +97,35 @@ class LUSPatientDataset(Dataset):
         {root}/cleaned/rsa_pathology_labels.csv    (RSA)
 
     Returns:
-        clip      : (n_frames, 3, H, W) float32 [0, 1]
-        label     : (3,) float32  [tb, pneumonia, covid]
+        clips     : list of (n_frames, 3, H, W) float32 tensors [0, 1]
+        label     : scalar float32  (TB: 0 or 1)
         patient_id: str
-        source    : str  "benin" | "rsa"
     """
 
     def __init__(
         self,
         root_benin: str,
         root_rsa:   str,
-        split:      str  = "train",
-        n_frames:   int  = N_FRAMES,
-        img_size:   int  = CLIP_SIZE,
-        seed:       int  = 42,
+        split:      str   = "train",
+        n_frames:   int   = N_FRAMES,
+        img_size:   int   = CLIP_SIZE,
+        seed:       int   = 42,
         val_frac:   float = 0.15,
         test_frac:  float = 0.15,
     ):
         self.n_frames = n_frames
         self.img_size = img_size
-        self.samples  = self._collect(root_benin, root_rsa, split, seed,
+        self.patients = self._collect(root_benin, root_rsa, split, seed,
                                       val_frac, test_frac)
-        log.info(f"[LUS] {split}: {len(self.samples)} clips from "
-                 f"{len({s['patient_id'] for s in self.samples})} patients")
+        n_clips = sum(len(p["paths"]) for p in self.patients)
+        log.info(f"[LUS] {split}: {len(self.patients)} patients, {n_clips} clips total")
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _read_labels(labels_csv: Path) -> Dict[str, Dict[str, int]]:
-        """Return {patient_id: {tb:0|1, pneumonia:0|1, covid:0|1}}."""
-        labels: Dict[str, Dict[str, int]] = {}
+    def _read_labels(labels_csv: Path) -> Dict[str, int]:
+        """Return {patient_id: tb_label (0|1)}."""
+        labels: Dict[str, int] = {}
         with labels_csv.open() as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -89,11 +133,7 @@ class LUSPatientDataset(Dataset):
                 if not pid:
                     continue
                 try:
-                    labels[pid] = {
-                        "tb":        int(float(row.get("TB Label", 0) or 0)),
-                        "pneumonia": int(float(row.get("Pneumonia",  0) or 0)),
-                        "covid":     int(float(row.get("Covid",      0) or 0)),
-                    }
+                    labels[pid] = int(float(row.get("TB Label", 0) or 0))
                 except (ValueError, KeyError):
                     pass
         return labels
@@ -107,7 +147,7 @@ class LUSPatientDataset(Dataset):
         val_frac:   float,
         test_frac:  float,
     ) -> List[dict]:
-        all_samples: List[dict] = []
+        all_patients: Dict[str, dict] = {}
 
         for source, root_str, labels_name in [
             ("benin", root_benin, "labels_multidiagnosis.csv"),
@@ -132,27 +172,26 @@ class LUSPatientDataset(Dataset):
                     clips_by_patient[pid].append(vid_path)
 
             for pid, clips in clips_by_patient.items():
-                for clip_path in clips:
-                    all_samples.append({
-                        "patient_id": f"{source}_{pid}",
-                        "source":     source,
-                        "path":       clip_path,
-                        "labels":     labels[pid],
-                    })
+                global_pid = f"{source}_{pid}"
+                all_patients[global_pid] = {
+                    "patient_id": global_pid,
+                    "paths":      clips,
+                    "label":      labels[pid],
+                }
 
-        # Patient-level split (stratify by TB label to preserve prevalence)
-        patient_ids = sorted({s["patient_id"] for s in all_samples})
+        # Patient-level split
+        patient_ids = sorted(all_patients.keys())
         rng = random.Random(seed)
         rng.shuffle(patient_ids)
         n_test = max(1, int(len(patient_ids) * test_frac))
         n_val  = max(1, int(len(patient_ids) * val_frac))
-        test_set = set(patient_ids[:n_test])
-        val_set  = set(patient_ids[n_test:n_test + n_val])
+        test_set  = set(patient_ids[:n_test])
+        val_set   = set(patient_ids[n_test:n_test + n_val])
         train_set = set(patient_ids[n_test + n_val:])
 
         split_map = {"train": train_set, "val": val_set, "test": test_set}
         keep = split_map.get(split, train_set)
-        return [s for s in all_samples if s["patient_id"] in keep]
+        return [all_patients[pid] for pid in patient_ids if pid in keep]
 
     def _load_clip(self, path: Path) -> Optional[torch.Tensor]:
         """Load a video clip. Returns (T, 3, H, W) float32 or None on failure."""
@@ -193,39 +232,61 @@ class LUSPatientDataset(Dataset):
         return clip
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.patients)
 
     def __getitem__(self, idx: int) -> dict:
-        sample = self.samples[idx]
-        clip   = self._load_clip(sample["path"])
-        if clip is None:
-            clip = torch.zeros(self.n_frames, 3, self.img_size, self.img_size)
+        patient = self.patients[idx]
+        clips = []
+        for path in patient["paths"]:
+            clip = self._load_clip(path)
+            if clip is None:
+                clip = torch.zeros(self.n_frames, 3, self.img_size, self.img_size)
+            clips.append(clip)
 
-        lbl = sample["labels"]
-        label = torch.tensor(
-            [lbl["tb"], lbl["pneumonia"], lbl["covid"]], dtype=torch.float32
-        )
+        # Guarantee at least one clip
+        if not clips:
+            clips = [torch.zeros(self.n_frames, 3, self.img_size, self.img_size)]
+
         return {
-            "clip":       clip,
-            "label":      label,
-            "patient_id": sample["patient_id"],
+            "clips":      clips,                                          # list[Tensor(T,3,H,W)]
+            "label":      torch.tensor(patient["label"], dtype=torch.float32),  # scalar
+            "patient_id": patient["patient_id"],
         }
+
+
+def mil_collate_fn(batch: List[dict]) -> dict:
+    """
+    Collate a list of patient bags into a batch.
+
+    Because each patient has a different number of clips we keep clips as a
+    Python list (one stacked tensor per patient) rather than padding.
+
+    Returns:
+        clips      : list[Tensor(N_i, T, 3, H, W)]  — one tensor per patient
+        labels     : Tensor(B,)
+        patient_ids: list[str]
+    """
+    clips_list   = [torch.stack(item["clips"], dim=0) for item in batch]
+    labels       = torch.stack([item["label"] for item in batch])
+    patient_ids  = [item["patient_id"] for item in batch]
+    return {"clips": clips_list, "labels": labels, "patient_ids": patient_ids}
 
 
 # ── Finetune experiment ───────────────────────────────────────────────────────
 
 class LUSPatientFinetune(FinetuneExperiment):
     """
-    Patient-level TB/Pneumonia/COVID prediction from LUS video clips.
+    Patient-level TB prediction from LUS video clips via Gated Attention MIL.
 
-    Uses the video branch (frozen teacher, clip_cls token).
-    Three-output sigmoid head; patient-level AUC by averaging clip predictions.
+    Uses the video branch (frozen V-JEPA2 teacher, clip_cls token).
+    Each patient's clips are independently encoded, then aggregated by the
+    GatedAttentionMIL head into a single patient-level TB logit.
     """
 
-    EXPERIMENT_NAME = "lus_patient_classification"
+    EXPERIMENT_NAME = "lus_patient_tb_mil"
     DATASET_ID      = "Benin-LUS+RSA-LUS"
-    TASK            = "multilabel_classification"
-    BENCHMARK_CLS   = None   # custom evaluate() below
+    TASK            = "binary_classification"
+    BENCHMARK_CLS   = None
 
     def __init__(
         self,
@@ -235,18 +296,21 @@ class LUSPatientFinetune(FinetuneExperiment):
         cfg:             FinetuneConfig,
         n_frames:        int = N_FRAMES,
         img_size:        int = CLIP_SIZE,
+        mil_hidden_dim:  int = MIL_HIDDEN_DIM,
+        clip_encode_bs:  int = CLIP_ENCODE_BS,
     ):
-        # We store dual roots; pass benin as primary data_root for base class
         super().__init__(data_root=data_root_benin, output_dir=output_dir, cfg=cfg)
-        self.data_root_rsa = data_root_rsa
-        self.n_frames      = n_frames
-        self.img_size      = img_size
+        self.data_root_rsa  = data_root_rsa
+        self.n_frames       = n_frames
+        self.img_size       = img_size
+        self.mil_hidden_dim = mil_hidden_dim
+        self.clip_encode_bs = clip_encode_bs
 
     # ── Abstract interface ────────────────────────────────────────────────────
 
     def build_head(self, embed_dim: int, cfg: FinetuneConfig) -> nn.Module:
-        """Linear multi-label head: vid_embed_dim → 3 logits (tb/pneumonia/covid)."""
-        return nn.Linear(embed_dim, len(TASK_KEYS))
+        """Gated Attention MIL head."""
+        return GatedAttentionMIL(embed_dim=embed_dim, hidden_dim=self.mil_hidden_dim)
 
     def setup(self, img_branch, device: str = "cuda", vid_branch=None):
         """Override: use video branch embed_dim."""
@@ -260,12 +324,14 @@ class LUSPatientFinetune(FinetuneExperiment):
                 p.requires_grad_(False)
             vid_branch.eval()
 
-        embed_dim = vid_branch.embed_dim
-        self.head = self.build_head(embed_dim, self.cfg).to(device)
-        log.info(f"[LUS] Multi-label head: {self.head}")
+        embed_dim      = vid_branch.embed_dim
+        backbone_dtype = next(vid_branch.parameters()).dtype
+        self.head = self.build_head(embed_dim, self.cfg).to(device=device, dtype=backbone_dtype)
+        log.info(f"[LUS] GatedAttentionMIL head: embed_dim={embed_dim}, "
+                 f"hidden_dim={self.mil_hidden_dim} (dtype={backbone_dtype})")
 
     def build_dataloader(self, split: str) -> DataLoader:
-        dataset = LUSPatientDataset(
+        dataset = LUSPatientBagDataset(
             root_benin = str(self.data_root),
             root_rsa   = str(self.data_root_rsa),
             split      = split,
@@ -278,11 +344,36 @@ class LUSPatientFinetune(FinetuneExperiment):
             shuffle     = (split == "train"),
             num_workers = self.cfg.num_workers,
             pin_memory  = True,
+            collate_fn  = mil_collate_fn,
         )
 
     def compute_loss(self, batch, feats, head_output) -> torch.Tensor:
-        label = batch["label"].to(self.device)    # (B, 3)
-        return F.binary_cross_entropy_with_logits(head_output, label)
+        labels = batch["labels"].to(self.device)   # (B,)
+        return F.binary_cross_entropy_with_logits(head_output, labels)
+
+    # ── Clip encoding helper ──────────────────────────────────────────────────
+
+    @torch.no_grad()
+    def _encode_clips(self, clips: torch.Tensor) -> torch.Tensor:
+        """
+        Encode a bag of clips through the frozen backbone.
+
+        Args:
+            clips: (N, T, 3, H, W)  — all clips for one patient
+        Returns:
+            H: (N, D)  — clip_cls embeddings
+        """
+        N = clips.shape[0]
+        embeddings = []
+        for start in range(0, N, self.clip_encode_bs):
+            sub = clips[start:start + self.clip_encode_bs].to(self.device, non_blocking=True)
+            with torch.autocast("cuda", dtype=torch.bfloat16,
+                                enabled=torch.cuda.is_available()):
+                out = self.vid_branch.forward_teacher(sub)
+            embeddings.append(out["clip_cls"].float())
+        return torch.cat(embeddings, dim=0)   # (N, D)
+
+    # ── Training loop ─────────────────────────────────────────────────────────
 
     def _train_epoch(self, loader, optimiser, scaler) -> float:
         self.head.train()
@@ -291,17 +382,20 @@ class LUSPatientFinetune(FinetuneExperiment):
         n = 0
 
         for batch in loader:
-            batch = {k: v.to(self.device, non_blocking=True)
-                     if isinstance(v, torch.Tensor) else v
-                     for k, v in batch.items()}
+            labels = batch["labels"].to(self.device)   # (B,)
+            logits_list = []
 
-            with torch.autocast("cuda", dtype=torch.bfloat16,
-                                 enabled=torch.cuda.is_available()):
-                with torch.no_grad():
-                    vid_out = self.vid_branch.forward_teacher(batch["clip"])
-                logits = self.head(vid_out["clip_cls"])
-                loss   = self.compute_loss(batch, {}, logits)
+            for i, clips in enumerate(batch["clips"]):
+                # clips: (N_i, T, 3, H, W)
+                H = self._encode_clips(clips)           # (N_i, D)
+                with torch.autocast("cuda", dtype=torch.bfloat16,
+                                    enabled=torch.cuda.is_available()):
+                    logit = self.head(H)                # scalar
+                logits_list.append(logit)
 
+            logits = torch.stack(logits_list)           # (B,)
+
+            loss = F.binary_cross_entropy_with_logits(logits, labels)
             scaler.scale(loss).backward()
             scaler.unscale_(optimiser)
             torch.nn.utils.clip_grad_norm_(self.head.parameters(), 1.0)
@@ -319,50 +413,44 @@ class LUSPatientFinetune(FinetuneExperiment):
         self.head.eval()
         self.vid_branch.teacher.eval()
 
-        patient_preds: Dict[str, List[np.ndarray]] = defaultdict(list)
-        patient_labels: Dict[str, np.ndarray] = {}
+        all_probs:  List[float] = []
+        all_labels: List[float] = []
         total_loss = 0.0
         n = 0
 
         for batch in val_loader:
-            batch = {k: v.to(self.device, non_blocking=True)
-                     if isinstance(v, torch.Tensor) else v
-                     for k, v in batch.items()}
-            vid_out = self.vid_branch.forward_teacher(batch["clip"])
-            logits  = self.head(vid_out["clip_cls"])
-            loss    = self.compute_loss(batch, {}, logits)
+            labels = batch["labels"].to(self.device)   # (B,)
+            logits_list = []
+
+            for clips in batch["clips"]:
+                H = self._encode_clips(clips)
+                logit = self.head(H)
+                logits_list.append(logit)
+
+            logits = torch.stack(logits_list)          # (B,)
+            loss   = F.binary_cross_entropy_with_logits(logits, labels)
             total_loss += loss.item()
             n += 1
 
             probs = torch.sigmoid(logits).cpu().float().numpy()
-            for i, pid in enumerate(batch["patient_id"]):
-                patient_preds[pid].append(probs[i])
-                patient_labels[pid] = batch["label"][i].cpu().numpy()
+            all_probs.extend(probs.tolist())
+            all_labels.extend(labels.cpu().float().numpy().tolist())
 
-        # Patient-level aggregation (mean over clips per patient)
-        all_pred  = np.stack([np.mean(patient_preds[p], 0)
-                              for p in sorted(patient_preds)])
-        all_label = np.stack([patient_labels[p]
-                              for p in sorted(patient_preds)])
+        y_true = np.array(all_labels)
+        y_pred = np.array(all_probs)
 
-        aucs = {}
-        for ti, task in enumerate(TASK_KEYS):
-            y_true = all_label[:, ti]
-            y_pred = all_pred[:, ti]
-            if len(np.unique(y_true)) < 2:
-                aucs[f"val_auc_{task}"] = float("nan")
-            else:
-                aucs[f"val_auc_{task}"] = round(float(auc_roc(y_pred, y_true)), 4)
+        if len(np.unique(y_true)) < 2:
+            val_auc = float("nan")
+        else:
+            val_auc = round(float(auc_roc(y_true, y_pred)), 4)
 
-        valid_aucs = [v for v in aucs.values() if not np.isnan(v)]
-        aucs["val_auc_macro"] = round(float(np.mean(valid_aucs)), 4) if valid_aucs else float("nan")
-        aucs["val_loss"]      = round(total_loss / max(n, 1), 4)
-        return aucs
+        return {
+            "val_auc_tb": val_auc,
+            "val_loss":   round(total_loss / max(n, 1), 4),
+        }
 
     def evaluate(self, split: str = "test") -> dict:
-        """
-        Run patient-level evaluation.  Returns per-task AUC + macro AUC.
-        """
+        """Run patient-level evaluation. Returns TB AUC and loss."""
         loader  = self.build_dataloader(split)
         metrics = self.compute_val_metrics(loader)
         metrics["experiment"] = self.EXPERIMENT_NAME
@@ -376,12 +464,15 @@ class LUSPatientFinetune(FinetuneExperiment):
         raw: dict,
         output_dir: str,
     ) -> "LUSPatientFinetune":
-        cfg = FinetuneConfig.from_dict(raw.get("finetune", raw))
+        ft = raw.get("finetune", raw)
+        cfg = FinetuneConfig.from_dict(ft)
         return cls(
             data_root_benin = raw.get("dataset_root_benin", ""),
             data_root_rsa   = raw.get("dataset_root_rsa",   ""),
             output_dir      = output_dir,
             cfg             = cfg,
-            n_frames        = raw.get("finetune", raw).get("n_frames", N_FRAMES),
-            img_size        = raw.get("finetune", raw).get("img_size",  CLIP_SIZE),
+            n_frames        = ft.get("n_frames",      N_FRAMES),
+            img_size        = ft.get("img_size",       CLIP_SIZE),
+            mil_hidden_dim  = ft.get("mil_hidden_dim", MIL_HIDDEN_DIM),
+            clip_encode_bs  = ft.get("clip_encode_bs", CLIP_ENCODE_BS),
         )

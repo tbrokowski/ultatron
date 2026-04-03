@@ -42,8 +42,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from data.adapters.busi import BUSIAdapter
-from data.adapters.echonet import EchoNetDynamicAdapter
-from data.adapters.benin_lus import BeninLUSAdapter
+from data.adapters.cardiac.camus import CAMUSAdapter
+from data.adapters.cardiac.echonet import EchoNetDynamicAdapter
+from data.adapters.cardiac.echonet_pediatric import EchoNetPediatricAdapter
+from data.adapters.cardiac.ted import TEDAdapter
+from data.adapters.lung.benin_lus import BeninLUSAdapter
 from data.schema.manifest import ManifestWriter, USManifestEntry, load_manifest
 from data.pipeline.dataset import ImageSSLDataset, VideoSSLDataset
 from data.pipeline.downstream_dataset import DownstreamDataset, PatientLevelDataset
@@ -69,9 +72,12 @@ log = logging.getLogger("training_smoke")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _STORE = Path("/capstor/store/cscs/swissai/a127/ultrasound/raw")
-_DEFAULT_BUSI_ROOT    = _STORE / "breast" / "BUSI"
-_DEFAULT_ECHONET_ROOT = _STORE / "cardiac" / "EchoNet-Dynamic"
-_DEFAULT_BENIN_ROOT   = _STORE / "lung" / "Benin_Videos"
+_DEFAULT_CAMUS_ROOT          = _STORE / "cardiac" / "CAMUS"
+_DEFAULT_BUSI_ROOT           = _STORE / "breast"  / "BUSI"
+_DEFAULT_ECHONET_ROOT        = _STORE / "cardiac" / "EchoNet-Dynamic"
+_DEFAULT_ECHONET_PED_ROOT    = _STORE / "cardiac" / "EchoNet-Pediatric"
+_DEFAULT_TED_ROOT            = _STORE / "cardiac" / "TED"
+_DEFAULT_BENIN_ROOT          = _STORE / "lung"    / "Benin_Videos"
 
 _SMOKE_OUT  = _ROOT / "dataset_exploration_outputs" / "smoke"
 _SMOKE_CFG  = _ROOT / "configs" / "smoke" / "multi_dataset_smoke.yaml"
@@ -103,6 +109,27 @@ def _root(env_var: str, default: Path) -> Optional[Path]:
     env = os.environ.get(env_var)
     p = Path(env) if env else default
     return p if p.exists() else None
+
+
+def _build_camus_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_CAMUS_ROOT", _DEFAULT_CAMUS_ROOT)
+    if root is None:
+        log.warning("CAMUS root not found — skipping")
+        return []
+    try:
+        import SimpleITK  # noqa: F401
+    except ImportError:
+        log.warning("SimpleITK not installed — skipping CAMUS")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in CAMUSAdapter(root).iter_entries():
+        # Prefer image entries for Phase 1 image SSL coverage
+        if e.modality_type in ("image", "pseudo_video"):
+            entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("CAMUS: %d entries", len(entries))
+    return entries
 
 
 def _build_busi_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
@@ -148,6 +175,38 @@ def _build_benin_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
     return entries
 
 
+def _build_echonet_ped_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_ECHONET_PED_ROOT", _DEFAULT_ECHONET_PED_ROOT)
+    if root is None:
+        log.warning("EchoNet-Pediatric root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in EchoNetPediatricAdapter(root).iter_entries():
+        if e.split == "train":
+            entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("EchoNet-Pediatric: %d entries", len(entries))
+    return entries
+
+
+def _build_ted_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_TED_ROOT", _DEFAULT_TED_ROOT)
+    if root is None:
+        log.warning("TED root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    # Only take 'video' modality entries for the smoke manifest (ED/ES images
+    # are a by-product of the same file; video entries are sufficient here).
+    for e in TEDAdapter(root).iter_entries():
+        if e.modality_type == "video":
+            entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("TED: %d entries", len(entries))
+    return entries
+
+
 def build_combined_manifest(force: bool = False) -> Path:
     """Build (or reuse) the combined smoke manifest."""
     _SMOKE_OUT.mkdir(parents=True, exist_ok=True)
@@ -157,8 +216,11 @@ def build_combined_manifest(force: bool = False) -> Path:
         return _COMBINED_MANIFEST
 
     all_entries: List[USManifestEntry] = (
-        _build_busi_entries()
+        _build_camus_entries()
+        + _build_busi_entries()
         + _build_echonet_entries()
+        + _build_echonet_ped_entries()
+        + _build_ted_entries()
         + _build_benin_entries()
     )
 

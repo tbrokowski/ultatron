@@ -1,19 +1,24 @@
 """
-data/adapters/camus.py  ·  CAMUS dataset adapter
+data/adapters/cardiac/camus.py  ·  CAMUS dataset adapter
 ======================================================
 
 CAMUS: Cardiac Acquisitions for Multi-structure Ultrasound Segmentation
   500 patients, 2CH + 4CH views, ED + ES phases
   Labels: endocardium, epicardium (myocardium), left atrium
-  Format: SimpleITK .mhd + .zraw files
+  Format: NIfTI .nii.gz files under database_nifti/
 
-Entries emitted
----------------
-Per patient × view × phase:
+Actual layout after extracting the 'download' zip:
+  {root}/database_nifti/patient{NNN}/
+      patient{NNN}_2CH_ED.nii.gz
+      patient{NNN}_2CH_ED_gt.nii.gz
+      patient{NNN}_2CH_ES.nii.gz
+      patient{NNN}_2CH_ES_gt.nii.gz
+      patient{NNN}_2CH_half_sequence.nii.gz
+      patient{NNN}_4CH_ED.nii.gz   ...
+
+Entries emitted per patient × view × phase:
   1 × image entry       (single ED or ES frame)
   1 × pseudo_video entry (ED→ES pair, for video branch)
-
-Both entries link to the same mask files.
 """
 from __future__ import annotations
 
@@ -44,9 +49,23 @@ class CAMUSAdapter(BaseAdapter):
     VIEWS   = ("2CH", "4CH")
     PHASES  = ("ED", "ES")
 
+    def _patients_dir(self) -> Path:
+        """Return the directory containing patient* subdirectories."""
+        # Downloaded as: {root}/database_nifti/patient*/
+        nifti_dir = self.root / "database_nifti"
+        if nifti_dir.exists():
+            return nifti_dir
+        # Fallback: root itself (legacy .mhd layout)
+        return self.root
+
     def iter_entries(self) -> Iterator[USManifestEntry]:
-        patients = sorted(self.root.glob("patient*/"))
-        n        = len(patients)
+        pdir_root = self._patients_dir()
+        patients  = sorted(pdir_root.glob("patient*/"))
+        n         = len(patients)
+
+        # Support both .nii.gz (downloaded NIfTI) and .mhd (legacy)
+        ext = ".nii.gz" if any(pdir_root.rglob("*.nii.gz")) else ".mhd"
+        gt_suffix = f"_gt{ext}"
 
         for i, pdir in enumerate(patients):
             pid   = pdir.name
@@ -56,8 +75,8 @@ class CAMUSAdapter(BaseAdapter):
                 frames, masks = [], []
 
                 for phase in self.PHASES:
-                    img_path = pdir / f"{pid}_{view}_{phase}.mhd"
-                    msk_path = pdir / f"{pid}_{view}_{phase}_gt.mhd"
+                    img_path = pdir / f"{pid}_{view}_{phase}{ext}"
+                    msk_path = pdir / f"{pid}_{view}_{phase}{gt_suffix}"
                     if not img_path.exists():
                         continue
                     frames.append(str(img_path))

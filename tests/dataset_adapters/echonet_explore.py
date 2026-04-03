@@ -26,7 +26,7 @@ from typing import Iterable, List
 import numpy as np
 from PIL import Image
 
-from data.adapters.echonet import EchoNetDynamicAdapter
+from data.adapters.cardiac.echonet import EchoNetDynamicAdapter
 from data.schema.manifest import (
     ManifestWriter,
     USManifestEntry,

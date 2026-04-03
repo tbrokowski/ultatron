@@ -1,0 +1,23 @@
+# configs/finetune/cardiacudc.yaml
+dataset_root: "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CardiacUDC"
+
+model:
+  image_backbone: dinov3_l
+  video_backbone: vjepa2_l
+  frozen_teacher: null
+  dtype: bfloat16
+
+finetune:
+  lr:           1.0e-4
+  weight_decay: 0.01
+  max_epochs:   50
+  batch_size:   8
+  num_workers:  2
+  head_type:    mlp
+  patience:     10
+  monitor:      val_auc
+  monitor_mode: max
+  freeze_backbone: true
+  output_size:  224
+  log_every:    5
+  checkpoint_best: true

@@ -27,8 +27,8 @@ from typing import List
 import numpy as np
 from PIL import Image
 
-from data.adapters.benin_lus import BeninLUSAdapter
-from data.adapters.rsa_lus import RSALUSAdapter
+from data.adapters.lung.benin_lus import BeninLUSAdapter
+from data.adapters.lung.rsa_lus import RSALUSAdapter
 from data.schema.manifest import ManifestWriter, USManifestEntry, load_manifest, manifest_stats
 from data.pipeline.dataset import load_video_frames
 from data.pipeline.downstream_dataset import DownstreamDataset, PatientLevelDataset

@@ -75,3 +75,14 @@ tb_logs/
 
 # ── HuggingFace cache ─────────────────────────────────────────────────────────
 .cache/
+
+# ── Scripts with embedded credentials ────────────────────────────────────────
+scripts/download_mimic_iv_echo.sh
+scripts/download_echonet_pediatric.sh
+scripts/download_camus.sh
+scripts/download_cardiacudc.sh
+scripts/download_echonet_lvh.sh
+scripts/download_echocp.sh
+scripts/download_echo_uci.sh
+scripts/download_mimic_lvvol_a4c.sh
+scripts/download_mimic_echoqa.sh

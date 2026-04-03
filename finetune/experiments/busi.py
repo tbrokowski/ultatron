@@ -143,11 +143,11 @@ class BUSIFinetune(FinetuneExperiment):
 
     def setup(self, img_branch, device="cuda", vid_branch=None):
         super().setup(img_branch, device, vid_branch)
-        # Second head: 3-class classification on CLS token
+        backbone_dtype = next(img_branch.parameters()).dtype
         self.head2 = build_cls_head(
             img_branch.embed_dim, n_classes=3, head_type="linear"
-        ).to(device)
-        log.info(f"[BUSI] Cls head: {self.head2}")
+        ).to(device=device, dtype=backbone_dtype)
+        log.info(f"[BUSI] Cls head: {self.head2} (dtype={backbone_dtype})")
 
     def build_dataloader(self, split: str) -> DataLoader:
         return DataLoader(

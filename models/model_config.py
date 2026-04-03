@@ -80,6 +80,7 @@ class ModelConfig:
     align_dim:       int   = 256
     dtype:           str   = "bfloat16"
     hf_cache_dir:    Optional[str] = None
+    use_gradient_checkpointing: bool = True
 
     @classmethod
     def from_dict(cls, d: dict) -> "ModelConfig":
@@ -123,9 +124,13 @@ def build_image_branch(
     # ── Student ───────────────────────────────────────────────────────────────
     student = _build_img_bb(cfg.image_backbone, dtype=dtype, hf_cache_dir=cache_dir)
 
-    # ── EMA teacher: deep-copy of student ─────────────────────────────────────
+    # ── EMA teacher: deep-copy of student (before enabling grad checkpoint) ────
     log.info("  Copying student to EMA teacher ...")
     teacher = copy.deepcopy(student)
+
+    # ── Gradient checkpointing on student only ────────────────────────────────
+    if cfg.use_gradient_checkpointing:
+        student.enable_gradient_checkpointing()
 
     # ── Frozen distillation teacher ───────────────────────────────────────────
     teacher_d = None
@@ -182,6 +187,9 @@ def build_video_branch(
 
     log.info("  Copying student to EMA teacher ...")
     teacher = copy.deepcopy(student)
+
+    if cfg.use_gradient_checkpointing:
+        student.enable_gradient_checkpointing()
 
     branch = VideoBranch(student, teacher)
     branch = branch.to(device=device, dtype=dtype)

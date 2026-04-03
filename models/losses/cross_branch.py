@@ -23,16 +23,21 @@ Operates on a single (img, vid) pair indexed by an AlignmentPair.
 This preserves spatial correspondence: the hepatic patch aligns with
 the hepatic tube token rather than averaging everything together.
 
-infonce_cross_loss
-------------------
+infonce_cross_loss / infonce_cross_loss_from_pairs
+--------------------------------------------------
 CLIP-style InfoNCE contrastive loss (Radford et al. 2021) over a batch
 of pre-projected, L2-normalised (B_pair, align_dim) image/video features.
 
-  sim_matrix = img_feats @ vid_feats.T / temperature   (B_pair, B_pair)
+  sim_matrix = img_feats @ vid_feats.T / temperature   (B_global, B_global)
   diagonal = positive pairs; off-diagonal = in-batch negatives
   L = (CE(sim, labels) + CE(sim.T, labels)) / 2
 
-Requires at least 2 aligned pairs; returns 0 otherwise.
+In distributed training, features are all-gathered across ranks before
+forming the similarity matrix (effective batch = B_local × world_size).
+Gradients flow only through each rank's own local slice — gathered copies
+from other ranks are treated as constants (MoCo v3 / OpenCLIP pattern).
+
+Requires at least 2 global pairs; returns 0 otherwise.
 Applied in Stage 3 only.
 
 Loss weights (in phase3_step lam dict)
@@ -45,12 +50,61 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
 if TYPE_CHECKING:
     from data.pipeline.collators_extended import AlignmentPair
+
+
+# ── Distributed helpers ────────────────────────────────────────────────────────
+
+def _is_dist() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def _all_gather_nograd(t: Tensor) -> Tensor:
+    """
+    Gather a tensor from all ranks along dim 0; no gradient through the result.
+
+    Returns the input unchanged when not in a distributed context (single-GPU,
+    unit tests, etc.), so all callers degrade gracefully.
+    """
+    if not _is_dist() or dist.get_world_size() == 1:
+        return t.detach()
+    gathered = [torch.zeros_like(t) for _ in range(dist.get_world_size())]
+    dist.all_gather(gathered, t.contiguous())
+    return torch.cat(gathered, dim=0)
+
+
+def _gather_with_local_grad(t: Tensor) -> Tensor:
+    """
+    Gather tensor from all ranks, but keep the gradient path live through
+    this rank's own slice.
+
+    Pattern (MoCo v3 / OpenCLIP):
+      1. All-gather with no grad → global tensor of detached copies.
+      2. Splice this rank's live (grad-attached) slice back in-place.
+
+    Result: a (world_size * B_local, D) tensor where only the local slice
+    carries gradients.  The (B_global, B_global) similarity matrix computed
+    from it will propagate gradients only to this rank's features — correct
+    behaviour for DDP because each rank updates its own parameters.
+    """
+    if not _is_dist() or dist.get_world_size() == 1:
+        return t
+
+    world = dist.get_world_size()
+    rank  = dist.get_rank()
+
+    gathered = [torch.zeros_like(t) for _ in range(world)]
+    dist.all_gather(gathered, t.contiguous())
+
+    # Replace the local rank's entry with the live tensor so grads flow through
+    gathered[rank] = t
+    return torch.cat(gathered, dim=0)
 
 
 def cross_branch_loss(
@@ -190,30 +244,33 @@ def filip_cross_loss_from_pairs(
 # ── InfoNCE contrastive loss ───────────────────────────────────────────────────
 
 def infonce_cross_loss(
-    img_feats: Tensor,      # (B_pair, align_dim) — projected + L2-normed
-    vid_feats: Tensor,      # (B_pair, align_dim) — projected + L2-normed (after predictor)
+    img_feats: Tensor,      # (B_global, align_dim) — projected + L2-normed
+    vid_feats: Tensor,      # (B_global, align_dim) — projected + L2-normed (after predictor)
     temperature: float = 0.07,
+    rank_offset: int = 0,   # this rank's start index in the global batch (for label offset)
 ) -> Tensor:
     """
-    CLIP-style InfoNCE loss over a batch of aligned (image, video) pairs.
+    CLIP-style InfoNCE loss over a global batch of aligned (image, video) pairs.
 
-    The (B_pair, B_pair) similarity matrix has positive pairs on the diagonal
-    and all other positions as in-batch negatives.
+    The (B_global, B_global) similarity matrix has positive pairs on the diagonal
+    and all other positions as in-batch negatives.  In distributed training,
+    img_feats / vid_feats are the globally-gathered tensors; rank_offset shifts
+    the CE labels so each rank's positives sit on the correct diagonal entries.
 
-    Requires at least 2 pairs (otherwise CE with one class = 0 loss trivially).
-    Returns 0 for B_pair < 2.
+    Requires at least 2 pairs; returns 0 otherwise.
 
     Parameters
     ----------
-    img_feats : (B_pair, align_dim)  already L2-normalised image teacher features
-    vid_feats : (B_pair, align_dim)  already L2-normalised video student features
-    temperature : float  default 0.07 (CLIP standard)
+    img_feats    : (B_global, align_dim)  already L2-normalised image features
+    vid_feats    : (B_global, align_dim)  already L2-normalised video features
+    temperature  : float  default 0.07 (CLIP standard)
+    rank_offset  : int    this rank's start row/col in the global sim matrix
     """
     B = img_feats.shape[0]
     if B < 2:
         return img_feats.new_tensor(0.0)
 
-    sim = img_feats @ vid_feats.T / temperature   # (B, B)
+    sim = img_feats @ vid_feats.T / temperature   # (B_global, B_global)
     labels = torch.arange(B, device=img_feats.device)
 
     loss_i2v = F.cross_entropy(sim,   labels)
@@ -233,12 +290,18 @@ def infonce_cross_loss_from_pairs(
     temperature: float = 0.07,
 ) -> Tensor:
     """
-    Builds per-pair mean-pooled projections for each alignment pair, then
-    computes InfoNCE over the resulting (B_pair, align_dim) matrices.
+    Builds per-pair mean-pooled projections for each alignment pair on this rank,
+    all-gathers features from all DDP ranks, then computes InfoNCE over the full
+    global batch (effective size = B_local × world_size).
 
-    Returns 0 if fewer than 2 pairs exist.
+    Gradient flow:
+        Only this rank's local slice of img_feats / vid_feats carries gradients
+        (_gather_with_local_grad pattern).  Remote slices are detached constants,
+        serving only as hard negatives.
+
+    Returns 0 if the global batch has fewer than 2 pairs.
     """
-    if len(alignment_pairs) < 2:
+    if len(alignment_pairs) < 1:
         return img_patch_tokens.new_tensor(0.0)
 
     img_feat_list = []
@@ -251,10 +314,7 @@ def infonce_cross_loss_from_pairs(
         n_spatial = ph * pw
         t_start   = pair.frame_offset * n_spatial
         t_end     = min(t_start + n_spatial, vid_tok.shape[0])
-        if t_start < t_end:
-            vid_frame = vid_tok[t_start:t_end]
-        else:
-            vid_frame = vid_tok
+        vid_frame = vid_tok[t_start:t_end] if t_start < t_end else vid_tok
 
         img_proj = F.normalize(proj_img(img_tok.float().mean(0)), dim=-1)   # (align_dim,)
         vid_proj_raw = proj_vid(vid_frame.float().mean(0))                   # (align_dim,)
@@ -265,6 +325,15 @@ def infonce_cross_loss_from_pairs(
         img_feat_list.append(img_proj)
         vid_feat_list.append(vid_proj)
 
-    img_feats = torch.stack(img_feat_list)   # (B_pair, align_dim)
-    vid_feats = torch.stack(vid_feat_list)   # (B_pair, align_dim)
-    return infonce_cross_loss(img_feats, vid_feats, temperature)
+    # Local features — (B_local, align_dim), grads live here
+    img_local = torch.stack(img_feat_list)
+    vid_local = torch.stack(vid_feat_list)
+
+    # All-gather to (B_global, align_dim); only the local slice retains grads
+    img_global = _gather_with_local_grad(img_local)
+    vid_global = _gather_with_local_grad(vid_local)
+
+    if img_global.shape[0] < 2:
+        return img_patch_tokens.new_tensor(0.0)
+
+    return infonce_cross_loss(img_global, vid_global, temperature)

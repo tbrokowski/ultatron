@@ -1,0 +1,58 @@
+# configs/vlm/run1_vlm.yaml
+# ============================================================
+# Run1-specific VLM GRPO configuration.
+# Inherits base_vlm.yaml; overrides paths and a few key hparams.
+#
+# Prerequisite: run1 SSL training must be complete and
+#   phase3_end.pt must exist at backbone.checkpoint.
+#
+# Usage (via scripts/train_vlm.py):
+#   python scripts/train_vlm.py --config configs/vlm/run1_vlm.yaml
+#
+# CSCS submission:
+#   bash scripts/submit_vlm.sh
+# ============================================================
+
+_base_:
+  - configs/vlm/base_vlm.yaml
+
+experiment_name: ultatron_vlm_grpo_run1
+
+# ── Ultatron backbone (run1 checkpoint) ──────────────────────────────────────
+backbone:
+  checkpoint:  /capstor/scratch/cscs/tbrokowski/ultrasound/checkpoints/run1/phase3_end.pt
+
+# ── HF cache (CSCS scratch) ──────────────────────────────────────────────────
+student:
+  hf_cache_dir: /capstor/scratch/cscs/tbrokowski/hf_cache
+
+sam2:
+  hf_cache_dir: /capstor/scratch/cscs/tbrokowski/hf_cache
+  # Uncomment if SAM2 weights are manually downloaded:
+  # model_cfg:  sam2_hiera_large
+  # checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/raw/weights/sam2_hiera_large.pt
+
+# ── Med-Gemini teacher ────────────────────────────────────────────────────────
+# Mode: "rule" by default (no internet on CSCS compute nodes).
+# Switch to "api" if outbound HTTP is available, or "local" with a
+# downloaded medical VLM judge (e.g. LLaVA-Med from HF).
+reward:
+  medgemini:
+    mode: rule   # change to "api" + set GOOGLE_API_KEY env var for full Med-Gemini
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+data:
+  manifest_path: /users/tbrokowski/Ultatron/logs/run1/run1_train.jsonl
+  batch_size:    4
+  num_workers:   8
+
+# ── GRPO ─────────────────────────────────────────────────────────────────────
+grpo:
+  total_steps:  18000
+  ckpt_dir:     /capstor/scratch/cscs/tbrokowski/ultrasound/checkpoints/vlm_run1
+
+  # Reduce group size on single-node 4×GH200 if OOM
+  group_size:   8
+
+  # Gradient accumulation: effective batch = 4 samples × 8 rollouts × 4 accum = 128 trajectories
+  gradient_accumulation_steps: 4

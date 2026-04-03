@@ -217,6 +217,29 @@ def ef_r2(pred_ef: np.ndarray, true_ef: np.ndarray) -> float:
     return r2_score(pred_ef, true_ef)
 
 
+# ── Binary classification convenience aliases ─────────────────────────────────
+
+def binary_auc(y_score: np.ndarray, y_true: np.ndarray) -> float:
+    """AUC-ROC for binary classification. Signature: (scores, labels)."""
+    return auc_roc(y_true, y_score)
+
+
+def binary_accuracy(y_pred: np.ndarray, y_true: np.ndarray) -> float:
+    """Fraction of correct binary predictions."""
+    return float(np.mean(np.asarray(y_pred) == np.asarray(y_true)))
+
+
+def binary_f1(y_pred: np.ndarray, y_true: np.ndarray) -> float:
+    """F1 score for binary classification (positive class = 1)."""
+    pred = np.asarray(y_pred, dtype=int)
+    true = np.asarray(y_true, dtype=int)
+    tp = int(((pred == 1) & (true == 1)).sum())
+    fp = int(((pred == 1) & (true == 0)).sum())
+    fn = int(((pred == 0) & (true == 1)).sum())
+    denom = 2 * tp + fp + fn
+    return float(2 * tp / denom) if denom > 0 else 0.0
+
+
 # ── Anatomy-stratified aggregation ────────────────────────────────────────────
 
 def stratified_auc(

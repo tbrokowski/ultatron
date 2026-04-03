@@ -23,6 +23,15 @@ describes the content, grounded in the image's spatial semantics.
 Both modalities are projected to align_dim via cross_distill.proj_img/vid
 BEFORE being passed here, so all proto logic operates in the shared space.
 
+Distributed training
+--------------------
+Sinkhorn-Knopp requires a global view of the batch to produce a balanced
+assignment (each of the K prototypes used equally across ALL samples, not
+just those on one GPU).  swav_proto_loss_from_tokens therefore all-gathers
+the image logits from all ranks before running Sinkhorn, then slices out
+this rank's local target rows.  The video student logits are NOT gathered —
+gradients flow through the local vid_logits only, which is correct under DDP.
+
 Functions
 ---------
 proto_assign            Soft prototype assignment (B, K) from (B, N, D) tokens.
@@ -30,13 +39,27 @@ sinkhorn                Iterative Sinkhorn-Knopp equalisation.
 swav_proto_loss         Asymmetric SwAV: teacher assigns → student predicts.
 proto_consistency_loss  (legacy) Symmetric cross-entropy, kept for backward compat.
 proto_loss_from_tokens  (legacy) Symmetric wrapper called from old code paths.
-swav_proto_loss_from_tokens  Convenience wrapper for phase3_step.
+swav_proto_loss_from_tokens  Convenience wrapper for phase3_step (distributed-aware).
 """
 from __future__ import annotations
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor
+
+
+def _is_dist() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def _all_gather_nograd(t: Tensor) -> Tensor:
+    """Gather tensor from all ranks; no gradient through the result."""
+    if not _is_dist() or dist.get_world_size() == 1:
+        return t.detach()
+    gathered = [torch.zeros_like(t) for _ in range(dist.get_world_size())]
+    dist.all_gather(gathered, t.contiguous())
+    return torch.cat(gathered, dim=0)
 
 
 def proto_assign(
@@ -145,12 +168,45 @@ def swav_proto_loss_from_tokens(
     temperature: float = 0.1,
 ) -> Tensor:
     """
-    Convenience wrapper for phase3_step.
+    Distributed-aware SwAV wrapper for phase3_step.
     Tokens are already projected to align_dim by cross_distill.proj_img/vid.
+
+    Sinkhorn strategy (distributed):
+        - All-gather image logits across ranks before Sinkhorn so the balanced
+          assignment uses the full global batch (required for K prototypes to be
+          used equally when B_local << K).
+        - Slice this rank's local rows from the global Sinkhorn target.
+        - Video logits are NOT gathered — gradients flow through local vid only.
+
+    Single-GPU / non-distributed: identical to the original per-rank behaviour.
     """
-    img_logits = proto_assign(img_tokens, prototypes, temperature)   # (B, K)
-    vid_logits = proto_assign(vid_tokens, prototypes, temperature)   # (B, K)
-    return swav_proto_loss(img_logits, vid_logits, temperature)
+    img_logits_local = proto_assign(img_tokens, prototypes, temperature)   # (B_local, K)
+    vid_logits_local = proto_assign(vid_tokens, prototypes, temperature)   # (B_local, K)
+
+    if _is_dist() and dist.get_world_size() > 1:
+        # Gather image logits from all ranks for a globally balanced Sinkhorn
+        img_logits_global = _all_gather_nograd(img_logits_local)   # (B_global, K)
+
+        with torch.no_grad():
+            target_global = sinkhorn(img_logits_global)            # (B_global, K)
+
+        # Extract this rank's slice of the global target
+        rank     = dist.get_rank()
+        B_local  = img_logits_local.shape[0]
+        start    = rank * B_local
+        target   = target_global[start : start + B_local]         # (B_local, K)
+    else:
+        with torch.no_grad():
+            target = sinkhorn(img_logits_local)                    # (B_local, K)
+
+    B = min(target.shape[0], vid_logits_local.shape[0])
+    if B == 0:
+        return img_tokens.new_tensor(0.0)
+
+    prediction = F.softmax(vid_logits_local[:B], dim=-1)           # (B_local, K)
+    eps        = 1e-8
+    loss = -(target[:B] * (prediction + eps).log()).sum(dim=-1).mean()
+    return loss
 
 
 # ── Legacy symmetric functions (kept for backward compatibility) ───────────────

@@ -106,12 +106,21 @@ class TrainConfig:
     gram_start_step:      int = 100_000
     gram_refresh_interval: int = 50_000
 
-    # Resolution curriculum (step boundaries + corresponding px values)
+    # Image resolution curriculum (step boundaries + max_global_crop_px values)
     res_step_1: int = 30_000
     res_step_2: int = 150_000
     res_px_1:   int = 512
     res_px_2:   int = 672
     res_px_3:   int = 896
+
+    # Video resolution curriculum (max_crop_px for VideoSSLTransformConfig).
+    # Defaults mirror the image curriculum but at conservatively lower values
+    # since 8-frame clips scale memory quadratically in spatial resolution.
+    res_vid_step_1: int = 30_000
+    res_vid_step_2: int = 150_000
+    res_vid_px_1:   int = 224
+    res_vid_px_2:   int = 256
+    res_vid_px_3:   int = 336
 
     # Checkpointing
     checkpoint_every: int = 5_000
@@ -138,6 +147,8 @@ class TrainConfig:
         for key in ("warmup_steps_p1", "warmup_steps_p2", "warmup_steps_p3",
                     "gram_start_step", "gram_refresh_interval",
                     "res_step_1", "res_step_2", "res_px_1", "res_px_2", "res_px_3",
+                    "res_vid_step_1", "res_vid_step_2",
+                    "res_vid_px_1", "res_vid_px_2", "res_vid_px_3",
                     "checkpoint_every", "log_every"):
             if key in filtered and isinstance(filtered[key], str):
                 filtered[key] = int(filtered[key])
@@ -395,16 +406,30 @@ class Trainer:
     def _update_resolution(self):
         s = self.global_step
         c = self.cfg
-        px = c.res_px_1
+
+        # ── Image resolution ──────────────────────────────────────────────────
+        img_px = c.res_px_1
         if s >= c.res_step_2:
-            px = c.res_px_3
+            img_px = c.res_px_3
         elif s >= c.res_step_1:
-            px = c.res_px_2
+            img_px = c.res_px_2
         img_cfg = self.dm.image_cfg
-        if img_cfg.max_global_crop_px != px:
-            img_cfg.max_global_crop_px = px
+        if img_cfg.max_global_crop_px != img_px:
+            img_cfg.max_global_crop_px = img_px
             if self.rank == 0:
-                log.info(f"[step {s}] Resolution → {px}px")
+                log.info(f"[step {s}] Image resolution → {img_px}px")
+
+        # ── Video resolution ──────────────────────────────────────────────────
+        vid_px = c.res_vid_px_1
+        if s >= c.res_vid_step_2:
+            vid_px = c.res_vid_px_3
+        elif s >= c.res_vid_step_1:
+            vid_px = c.res_vid_px_2
+        vid_cfg = self.dm.video_cfg
+        if vid_cfg.max_crop_px != vid_px:
+            vid_cfg.max_crop_px = vid_px
+            if self.rank == 0:
+                log.info(f"[step {s}] Video resolution → {vid_px}px")
 
     # ── Per-step update helper ────────────────────────────────────────────────
 
@@ -424,17 +449,29 @@ class Trainer:
             + list(self.cross_distill.parameters())
             + list(self.proto_head.parameters())
         )
-        torch.nn.utils.clip_grad_norm_(
+        grad_norm = torch.nn.utils.clip_grad_norm_(
             [p for p in all_params if p.requires_grad and p.grad is not None],
             self.cfg.grad_clip,
         )
 
-        if self.scaler.is_enabled():
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+        if not torch.isfinite(grad_norm):
+            # Non-finite gradients (NaN or Inf) — skip this optimizer step to
+            # prevent corrupting model weights.  This can happen when a batch
+            # contains pathological inputs (e.g. all-padded crops) before the
+            # attention-bias construction is made numerically safe.
+            if self.rank == 0:
+                log.warning(
+                    f"[step {self.global_step}] Non-finite grad norm "
+                    f"({grad_norm:.4f}) — skipping optimizer step"
+                )
+            self.optimizer.zero_grad(set_to_none=True)
         else:
-            self.optimizer.step()
-        self.optimizer.zero_grad(set_to_none=True)
+            if self.scaler.is_enabled():
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
 
         # EMA
         self.img_branch.update_teacher(self.cfg.ema_momentum)
@@ -479,6 +516,11 @@ class Trainer:
                 yield batch
 
     def train(self):
+        # Apply resolution curriculum immediately so the very first batch is
+        # loaded at the correct starting resolution (res_px_1 / res_vid_px_1).
+        # Without this call, the DataLoader would use whatever value is in the
+        # config YAML, which may not match the curriculum starting point.
+        self._update_resolution()
         log.info(f"[rank {self.rank}] Starting training from step {self.global_step}")
 
         # ── Phase 1: Image warm-start ──────────────────────────────────────────

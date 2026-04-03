@@ -1,19 +1,22 @@
 # configs/train/train_config.yaml
-# Base training hyperparameters (run1-scaled: 20k steps, single-node)
+# Base training hyperparameters (run1: 10k steps — see data_run1 curriculum)
 # =============================================================================
 
 train:
-  phase1_frac: 0.10
-  phase2_frac: 0.20
-  phase3_frac: 0.90
+  # Cumulative SSL phase boundaries (fraction of curriculum.total_training_steps).
+  # With total_steps=10k (data_run1): 2k image | 4k video | 4k hybrid.
+  #   P1 [0, 2000)  P2 [2000, 6000)  P3 [6000, 10000)
+  phase1_frac: 0.20   # 2000 / 10000 — end of image-only
+  phase2_frac: 0.60   # 6000 / 10000 — end of video-only (start of hybrid)
+  phase3_frac: 1.00   # end of hybrid / SSL
 
-  base_lr:          1e-4
+  base_lr:          1e-5
   weight_decay:     0.04
   beta1:            0.90
   beta2:            0.95
   grad_clip:        1.0
-  warmup_steps_p1:  500
-  warmup_steps_p2:  300
+  warmup_steps_p1:  200
+  warmup_steps_p2:  200
   warmup_steps_p3:  200
 
   ema_momentum:     0.999
@@ -23,20 +26,43 @@ train:
   lam3:      0.5
   lam4:      1.0
   lam5:      1.0
-  lam6:      1.0
-  lam7:      0.5
-  lam_7b:    0.0
-  lam_gram:  0.0
-  lam_koleo: 0.1
+  lam6:           1.0   
+  lam6_nce:       0.3   
+  lam6_nce_temp:  0.1  
+  lam7:           0.5   
+  lam_7b:         0.0
+  lam_gram:       0.0
+  lam_koleo:      0.1
+  lam_koleo_cross: 0.05 
 
   gram_start_step:       999999
   gram_refresh_interval: 50000
 
-  res_step_1:  4000
-  res_step_2:  12000
-  res_px_1:    224
-  res_px_2:    336
-  res_px_3:    448
+  # Resolution curriculum — image branch max_global_crop_px.
+  # Starts at native-small (256px), ramps through native-medium to native-full
+  # as training stabilises.  Video curriculum tracks independently (see below).
+  # With total_steps=10k, phase2_frac=0.6 → P1+P2 ends at step 6000.
+  res_step_1:     6000   # scale with phase2_frac * total_training_steps
+  res_step_2:    8000    # mid Phase 3 hybrid (between 6000 and 10000)
+  res_px_1:       256    # Phase 1+2: native-small (16²=256 patches per image)
+  res_px_2:       384    # early Phase 3: native-medium (24²=576 patches)
+  res_px_3:       512    # late Phase 3: native-full (32²=1024 patches)
+
+  # Video resolution curriculum — max_crop_px for VideoSSLTransformConfig.
+  # n_frames=32 with tubelet_size=2 → 16 temporal patches. V-JEPA2 predictor
+  # uses full (quadratic) self-attention across ALL tokens (context + target),
+  # so attention memory per layer = batch × heads × n² × 2 bytes where
+  # n = spatial_patches × 16. At 224px: n=3136 → 7.5 GiB/layer × 12 = 90 GiB.
+  # Recalibrated to the same token budget as the original design (which assumed
+  # n_frames=8 / 4 temporal patches):
+  #   112px → 7²×16 = 784 tokens  ← matches original 224px×8-frame intent
+  #   128px → 8²×16 = 1024 tokens ← matches original 256px×8-frame intent
+  #   160px → 10²×16 = 1600 tokens ← matches original 336px×8-frame intent
+  res_vid_step_1: 6000   # align with res_step_1
+  res_vid_step_2: 8000
+  res_vid_px_1:   112    # Phase 1+2: 7²=49 spatial patches × 16 temporal = 784 tokens
+  res_vid_px_2:   128    # early Phase 3: 8²=64 × 16 = 1024 tokens
+  res_vid_px_3:   160    # late Phase 3: 10²=100 × 16 = 1600 tokens (≈31 GiB predictor attn)
 
   checkpoint_every: 1000
   log_every:        25

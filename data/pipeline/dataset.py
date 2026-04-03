@@ -7,7 +7,9 @@ This file contains the dataset classes for the Ultatron foundation model.
 from __future__ import annotations
 
 import io
+import logging
 import os
+import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,6 +23,86 @@ from data.pipeline.transforms import (
     ImageSSLTransform, ImageSSLTransformConfig,
     VideoSSLTransform, VideoSSLTransformConfig,
 )
+
+
+# ── Format helpers (no external deps beyond stdlib + numpy) ──────────────────
+
+def _read_nifti_array(path: str) -> np.ndarray:
+    """Read a NIfTI1 (.nii / .nii.gz) file and return the raw voxel array.
+
+    Returns an ndarray with shape transposed to (T-or-Z, Y, X) for 3-D volumes
+    or (Y, X) for 2-D images (NIfTI stores data as X-fastest, so we transpose).
+    """
+    import gzip, struct as _struct
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rb") as f:
+        raw = f.read()
+    endian = "<" if _struct.unpack_from("<i", raw, 0)[0] == 348 else ">"
+    ndim   = _struct.unpack_from(f"{endian}h", raw, 40)[0]
+    shape  = tuple(_struct.unpack_from(f"{endian}{ndim}h", raw, 42))
+    datatype = _struct.unpack_from(f"{endian}h", raw, 70)[0]
+    _dt_map  = {2: np.uint8, 4: np.int16, 8: np.int32, 16: np.float32,
+                64: np.float64, 256: np.int8, 512: np.uint16, 768: np.uint32}
+    dtype = np.dtype(_dt_map.get(datatype, np.float32)).newbyteorder(endian)
+    vox_offset = int(_struct.unpack_from(f"{endian}f", raw, 108)[0])
+    arr = np.frombuffer(raw[vox_offset:], dtype=dtype).reshape(shape)
+    return arr.T  # (X, Y[, T]) → (T, Y, X) or (Y, X)
+
+
+def _read_mhd_array(path: str) -> np.ndarray:
+    """Read a MetaImage (.mhd/.mha) file and return the raw voxel array.
+
+    Returns shape (nz, ny, nx) for 3-D or (ny, nx) for 2-D.
+    The caller is responsible for selecting the desired slice/frame.
+    """
+    import struct as _struct
+    header: dict = {}
+    with open(path, "rb") as f:
+        for line in f:
+            line = line.decode("ascii", errors="ignore").strip()
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            header[key.strip()] = val.strip()
+            if key.strip() == "ElementDataFile":
+                break
+
+    ndims     = int(header.get("NDims", 3))
+    dim_sizes = [int(v) for v in header.get("DimSize", "").split()]
+    elem_type = header.get("ElementType", "MET_UCHAR").upper()
+    _et_map   = {"MET_UCHAR": np.uint8, "MET_CHAR": np.int8,
+                 "MET_USHORT": np.uint16, "MET_SHORT": np.int16,
+                 "MET_UINT": np.uint32, "MET_INT": np.int32,
+                 "MET_FLOAT": np.float32, "MET_DOUBLE": np.float64}
+    dtype     = np.dtype(_et_map.get(elem_type, np.uint8))
+    msb       = header.get("BinaryDataByteOrderMSB", "False").lower() == "true"
+    if msb:
+        dtype = dtype.newbyteorder(">")
+
+    data_file = header.get("ElementDataFile", "LOCAL")
+    if data_file == "LOCAL":
+        # Inline .mha — data follows the header in the same file
+        with open(path, "rb") as f:
+            content = f.read()
+        # Find the end of the header (last "ElementDataFile = LOCAL\n")
+        sentinel = b"ElementDataFile = LOCAL"
+        idx = content.rfind(sentinel)
+        raw = content[idx + len(sentinel):].lstrip(b"\r\n")
+    else:
+        raw_path = Path(path).parent / data_file
+        compressed = header.get("CompressedData", "False").lower() == "true"
+        if compressed:
+            import gzip
+            with gzip.open(str(raw_path), "rb") as f:
+                raw = f.read()
+        else:
+            with open(str(raw_path), "rb") as f:
+                raw = f.read()
+
+    # DimSize is (nx, ny[, nz, ...]) — reshape in reverse for C-order (nz, ny, nx)
+    shape = tuple(reversed(dim_sizes))
+    arr = np.frombuffer(raw, dtype=dtype).reshape(shape)
+    return arr
 
 
 # ── Image / video loading ─────────────────────────────────────────────────────
@@ -38,7 +120,9 @@ def load_image(path: str) -> np.ndarray:
     2D arrays are channel-repeated to (3, H, W); (H, W, 3) arrays are permuted
     to (3, H, W) without modification.
     """
-    ext = Path(path).suffix.lower()
+    suffixes = Path(path).suffixes
+    # Compound extensions like .nii.gz → treat as ".nii.gz"
+    ext = "".join(suffixes[-2:]).lower() if len(suffixes) >= 2 else (suffixes[-1].lower() if suffixes else "")
 
     if ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"):
         from PIL import Image
@@ -56,14 +140,12 @@ def load_image(path: str) -> np.ndarray:
         return arr.astype(np.uint8)
 
     if ext in (".mhd", ".mha"):
-        try:
-            import SimpleITK as sitk
-            img = sitk.GetArrayFromImage(sitk.ReadImage(path))
-            if img.ndim == 3: img = img[0]
-            img = ((img - img.min()) / (img.max() - img.min() + 1e-8) * 255).astype(np.uint8)
-            return img
-        except ImportError:
-            raise RuntimeError("SimpleITK required for .mhd files")
+        arr = _read_mhd_array(path)
+        if arr.ndim == 3:
+            arr = arr[0]
+        arr = arr.astype(np.float32)
+        img = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
+        return img
 
     if ext in (".dcm",):
         try:
@@ -74,6 +156,14 @@ def load_image(path: str) -> np.ndarray:
             return arr   # (H, W) for monochrome DICOM; to_canonical_tensor expands to RGB
         except ImportError:
             raise RuntimeError("pydicom required for DICOM files")
+
+    if ext in (".nii.gz", ".nii"):
+        arr = _read_nifti_array(path)
+        if arr.ndim == 3:
+            arr = arr[0]
+        arr = arr.astype(np.float32)
+        img = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
+        return img
 
     raise ValueError(f"Unsupported image format: {ext}")
 
@@ -126,7 +216,19 @@ def load_video_frames(path: str, max_frames: Optional[int] = None) -> List[np.nd
     raise ValueError(f"Unsupported video format: {ext}")
 
 
-def load_mask(path: str) -> np.ndarray:
+def load_mask(path: str, frame_idx: int = 0) -> np.ndarray:
+    suffixes = Path(path).suffixes
+    ext = "".join(suffixes[-2:]).lower() if len(suffixes) >= 2 else (suffixes[-1].lower() if suffixes else "")
+    if ext in (".nii.gz", ".nii"):
+        arr = _read_nifti_array(path)
+        if arr.ndim == 3:
+            arr = arr[min(frame_idx, arr.shape[0] - 1)]
+        return (arr > 0).astype(np.uint8)
+    if ext in (".mhd", ".mha"):
+        arr = _read_mhd_array(path)
+        if arr.ndim == 3:
+            arr = arr[min(frame_idx, arr.shape[0] - 1)]
+        return (arr > 0).astype(np.uint8)
     from PIL import Image
     mask = np.array(Image.open(path).convert("L"), dtype=np.uint8)
     return (mask > 127).astype(np.uint8)
@@ -161,11 +263,11 @@ class USFoundationDataset(Dataset):
             frames = frames[::step][:max_frames]
         return frames
 
-    def _load_mask_tensor(self, inst) -> Optional[Tensor]:
+    def _load_mask_tensor(self, inst, frame_idx: int = 0) -> Optional[Tensor]:
         if inst.mask_path is None: return None
         mp = self._remap_path(inst.mask_path)
         if not Path(mp).exists(): return None
-        return torch.from_numpy(load_mask(mp)).float().unsqueeze(0)
+        return torch.from_numpy(load_mask(mp, frame_idx=frame_idx)).float().unsqueeze(0)
 
     def __len__(self):  return len(self.entries)
     def __getitem__(self, idx): raise NotImplementedError
@@ -206,6 +308,18 @@ class ImageSSLDataset(USFoundationDataset):
         self.alpha     = alpha
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        for _attempt in range(8):
+            try:
+                return self._load_image_item(idx)
+            except (FileNotFoundError, OSError) as exc:
+                if _attempt == 0:
+                    logging.warning(
+                        "ImageSSLDataset: missing file at idx=%d: %s — resampling.", idx, exc
+                    )
+                idx = random.randrange(len(self))
+        raise RuntimeError("ImageSSLDataset: too many consecutive missing-file errors.")
+
+    def _load_image_item(self, idx: int) -> Dict[str, Any]:
         e = self.entries[idx]
 
         source_frame_idx = -1  # -1 for static images; actual index for frames sampled from video
@@ -228,9 +342,10 @@ class ImageSSLDataset(USFoundationDataset):
         views = self.transform(img, alpha=self.alpha)
 
         seg_mask, cls_label = None, -1
+        _meta_frame_idx = (e.source_meta or {}).get("frame_idx", 0) or 0
         for inst in e.instances:
             if inst.mask_path:
-                seg_mask = self._load_mask_tensor(inst)
+                seg_mask = self._load_mask_tensor(inst, frame_idx=_meta_frame_idx)
                 break
             if inst.classification_label is not None:
                 cls_label = inst.classification_label
@@ -283,6 +398,18 @@ class VideoSSLDataset(USFoundationDataset):
         self.mask_ratio = mask_ratio
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        for _attempt in range(8):
+            try:
+                return self._load_video_item(idx)
+            except (FileNotFoundError, OSError) as exc:
+                if _attempt == 0:
+                    logging.warning(
+                        "VideoSSLDataset: missing file at idx=%d: %s — resampling.", idx, exc
+                    )
+                idx = random.randrange(len(self))
+        raise RuntimeError("VideoSSLDataset: too many consecutive missing-file errors.")
+
+    def _load_video_item(self, idx: int) -> Dict[str, Any]:
         e      = self.entries[idx]
         frames = self._load_clip(e)
         views  = self.transform(frames, mask_ratio=self.mask_ratio)
@@ -341,6 +468,18 @@ class PairedSSLDataset(USFoundationDataset):
         self.vid_mask_ratio = vid_mask_ratio
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        for _attempt in range(8):
+            try:
+                return self._load_paired_item(idx)
+            except (FileNotFoundError, OSError) as exc:
+                if _attempt == 0:
+                    logging.warning(
+                        "PairedSSLDataset: missing file at idx=%d: %s — resampling.", idx, exc
+                    )
+                idx = random.randrange(len(self))
+        raise RuntimeError("PairedSSLDataset: too many consecutive missing-file errors.")
+
+    def _load_paired_item(self, idx: int) -> Dict[str, Any]:
         e = self.entries[idx]
 
         # Load the full clip once for both modalities.

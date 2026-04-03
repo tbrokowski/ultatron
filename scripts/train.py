@@ -179,6 +179,8 @@ def main():
                         help="Run Phase 4 finetune experiments (BUSI, EchoNet, LUS) "
                              "after Phase 3 on rank 0. Requires dataset roots in "
                              "configs/finetune/*.yaml")
+    parser.add_argument("--manifest", default=None,
+                        help="Override manifest.path from config (pre-built JSONL file)")
     args = parser.parse_args()
 
     rank, world_size, local_rank = _setup_distributed()
@@ -272,14 +274,18 @@ def main():
         freq_mask=FreqMaskConfig(**vid_freq) if vid_freq else FreqMaskConfig(),
     )
 
-    # Resolve manifest: use config path if it exists (absolute or repo-relative)
-    _manifest_cfg = Path(cfg["manifest"]["path"])
-    if not _manifest_cfg.is_absolute():
-        _manifest_cfg = Path(__file__).resolve().parent.parent / _manifest_cfg
-    if _manifest_cfg.exists():
-        manifest_path = str(_manifest_cfg)
+    # Resolve manifest: --manifest flag overrides config; otherwise use config path
+    if args.manifest:
+        manifest_path = args.manifest
+        log.info("Manifest override (--manifest): %s", manifest_path)
     else:
-        manifest_path = str(cscs.manifest_path(Path(cfg["manifest"]["path"]).name))
+        _manifest_cfg = Path(cfg["manifest"]["path"])
+        if not _manifest_cfg.is_absolute():
+            _manifest_cfg = Path(__file__).resolve().parent.parent / _manifest_cfg
+        if _manifest_cfg.exists():
+            manifest_path = str(_manifest_cfg)
+        else:
+            manifest_path = str(cscs.manifest_path(Path(cfg["manifest"]["path"]).name))
 
     # Use config root_remap if present (e.g. {} to use manifest paths as-is from store).
     # Otherwise remap store → scratch for staged runs.

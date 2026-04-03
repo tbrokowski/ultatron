@@ -123,7 +123,37 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
         self.variant_key = variant_key
         # tubelet_size: how many frames per temporal patch token
         self.tubelet_size = getattr(hf_model.config, "tubelet_size", 2)
+        self._use_gradient_checkpointing = False
 
+
+    def _model_forward(
+        self,
+        pixel_values: torch.Tensor,
+        context_mask,   # List[Tensor] or None — not a tensor, captured via closure
+        target_mask,    # List[Tensor] or None — same
+    ) -> torch.Tensor:
+        """Inner model call for gradient checkpointing.
+
+        context_mask and target_mask are not saved by checkpoint (they don't
+        require grad), but they're bound at call time via functools.partial and
+        remain accessible during the backward recomputation.
+        """
+        out = self._model(
+            pixel_values_videos=pixel_values,
+            context_mask=context_mask,
+            target_mask=target_mask,
+            output_hidden_states=False,
+        )
+        # Return a tuple so checkpoint can track multiple output tensors.
+        # predictor_output may be None; return a dummy zero tensor in that case
+        # so the return type is always (Tensor, Tensor).
+        hs = out.last_hidden_state
+        pred = (
+            out.predictor_output.last_hidden_state
+            if (hasattr(out, "predictor_output") and out.predictor_output is not None)
+            else hs.new_zeros(1)
+        )
+        return hs, pred
 
     def forward(
         self,
@@ -134,6 +164,7 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
         **kwargs,
     ) -> dict:
         context_mask = target_mask = None
+        tgt = None
         if tube_mask is not None:
             # The HF V-JEPA2 model operates at tubelet level (groups of
             # tubelet_size frames → 1 token).  Convert frame-level inputs to
@@ -152,14 +183,25 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
             context_mask = [ctx]
             target_mask  = [tgt]
 
-        out = self._model(
-            pixel_values_videos=pixel_values,
-            context_mask=context_mask,
-            target_mask=target_mask,
-            output_hidden_states=False,
-        )
-
-        tube_tokens = out.last_hidden_state   # (B, N_out, D)
+        if self._use_gradient_checkpointing and torch.is_grad_enabled():
+            import functools
+            import torch.utils.checkpoint as cp
+            # context_mask / target_mask are captured in the partial closure;
+            # only pixel_values (the large activation tensor) is an explicit arg
+            # saved by checkpoint.
+            tube_tokens, pred_hs = cp.checkpoint(
+                functools.partial(
+                    self._model_forward,
+                    context_mask=context_mask,
+                    target_mask=target_mask,
+                ),
+                pixel_values,
+                use_reentrant=False,
+            )
+        else:
+            tube_tokens, pred_hs = self._model_forward(
+                pixel_values, context_mask, target_mask
+            )
 
         # clip_cls: mean pooling over output tokens.
         #
@@ -193,14 +235,28 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
             "tube_tokens": tube_tokens,
         }
 
-        if hasattr(out, "predictor_output") and out.predictor_output is not None:
-            result["predicted"] = out.predictor_output.last_hidden_state
-            # Also expose target indices so phase2_step can gather teacher tokens
-            # at the exact target positions (tubelet-level, shape (B, N_tgt))
-            if tube_mask is not None:
-                result["tgt_indices"] = tgt   # tgt defined in the tube_mask branch above
+        # pred_hs is real (ndim==3: B×N_tgt×D) only when target_mask was set;
+        # otherwise it's the dummy scalar zeros(1) returned by _model_forward.
+        if pred_hs.ndim == 3:
+            result["predicted"] = pred_hs
+            if tgt is not None:
+                result["tgt_indices"] = tgt
 
         return result
+
+    def enable_gradient_checkpointing(self) -> None:
+        """Enable whole-forward gradient checkpointing on the student ViT.
+
+        Checkpoints the entire model call as a single unit: only the input
+        pixel tensor is retained between forward and backward; all intermediate
+        activations are recomputed during the backward pass.
+
+        This implementation bypasses HuggingFace's gradient_checkpointing_enable()
+        which does not reliably wire up _gradient_checkpointing_func on VJEPA2
+        layer modules in the installed transformers version.
+        """
+        self._use_gradient_checkpointing = True
+        log.info("VJEPA2VideoBackbone: gradient checkpointing enabled.")
 
     def __repr__(self):
         return (f"VJEPA2VideoBackbone(variant={self.variant_key!r}, "

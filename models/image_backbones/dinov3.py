@@ -78,7 +78,17 @@ def _make_attn_bias(
     """
     Build (B, n_heads, seq, seq) additive attention bias.
     seq = 1 (CLS) + n_reg (register tokens) + N (patches).
-    Padding token positions receive -inf so they are ignored in softmax.
+
+    Only the KEY dimension of padded positions is set to -inf, preventing
+    any query token from attending to padded keys.  The QUERY dimension is
+    intentionally left at 0 (unmasked) so that padded-patch query tokens still
+    attend to valid keys and produce finite (if semantically irrelevant) hidden
+    states.  Setting the Q-side rows to -inf would make softmax(all -inf) = NaN,
+    and those NaN hidden states would contaminate subsequent-layer K projections
+    via the NaN + (-inf) = NaN identity, collapsing the entire forward pass.
+
+    Padded patch tokens' outputs are excluded from every loss term via s_pmask,
+    so their finite-but-meaningless representations never contribute gradients.
     """
     B, ph, pw = padding_mask.shape
     N   = ph * pw
@@ -89,13 +99,11 @@ def _make_attn_bias(
     is_pad  = ~padding_mask.flatten(1)          # (B, N)  True = padding
     p_start = 1 + n_reg                         # index where patch tokens start
 
-    # Key dimension: padding patches contribute nothing (columns → -inf)
+    # Key dimension only: padding patches contribute nothing (columns → -inf).
+    # Valid Q tokens (CLS, registers, real patches) will have attention weight 0
+    # for padded K positions after softmax, keeping their outputs clean.
     bias[:, 0, :, p_start:].masked_fill_(
         is_pad.unsqueeze(1).expand(-1, seq, -1), float("-inf")
-    )
-    # Query dimension: padding patches attend to nothing (rows → -inf)
-    bias[:, 0, p_start:, :].masked_fill_(
-        is_pad.unsqueeze(2).expand(-1, -1, seq), float("-inf")
     )
     return bias.expand(-1, n_heads, -1, -1)     # (B, n_heads, seq, seq)
 
@@ -141,6 +149,7 @@ class DINOv3ImageBackbone(ImageBackboneBase):
         self._n_heads    = hf_model.config.num_attention_heads
         self._n_reg      = getattr(hf_model.config, "num_register_tokens", 0)
         self.variant_key = variant_key
+        self._use_gradient_checkpointing = False
 
         # Import the concrete attention class so we can target it precisely.
         # Lazy import keeps the top-level module importable without transformers.
@@ -160,22 +169,49 @@ class DINOv3ImageBackbone(ImageBackboneBase):
             "%d DINOv3ViTAttention modules.", len(self._hook_handles)
         )
 
+    def _vit_forward_with_mask(
+        self,
+        pixel_values: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Inner ViT call used as the checkpointed function.
+
+        Receives attention bias as an explicit tensor argument so that
+        torch.utils.checkpoint saves and restores it correctly during the
+        backward recomputation pass, keeping padding-mask behaviour correct.
+        Returns last_hidden_state directly (the dict unpacking happens in
+        the outer forward).
+        """
+        if bias is not None:
+            self._hook.set_mask(bias)
+        out = self._vit(pixel_values=pixel_values, output_hidden_states=False)
+        self._hook.set_mask(None)
+        return out.last_hidden_state
+
     def forward(
         self,
         pixel_values: torch.Tensor,              # (B, 3, H, W)
         padding_mask: Optional[torch.Tensor] = None,  # (B, ph, pw)
         **kwargs,
     ) -> dict:
+        bias: Optional[torch.Tensor] = None
         if padding_mask is not None:
             bias = _make_attn_bias(padding_mask, self._n_heads, self._n_reg)
-            self._hook.set_mask(bias.to(pixel_values.device))
+            bias = bias.to(pixel_values.device)
+
+        if self._use_gradient_checkpointing and torch.is_grad_enabled():
+            import torch.utils.checkpoint as cp
+            # Pass bias as an explicit tensor arg so checkpoint saves/restores
+            # it correctly; _vit_forward_with_mask handles None bias safely.
+            hs = cp.checkpoint(
+                self._vit_forward_with_mask,
+                pixel_values,
+                bias,
+                use_reentrant=False,
+            )
         else:
-            self._hook.set_mask(None)
+            hs = self._vit_forward_with_mask(pixel_values, bias)
 
-        out = self._vit(pixel_values=pixel_values, output_hidden_states=False)
-        self._hook.set_mask(None)   # always clear — even if forward raised
-
-        hs = out.last_hidden_state  # (B, 1 + n_reg + N, D)
         result = {
             "cls":          hs[:, 0],
             "patch_tokens": hs[:, 1 + self._n_reg:],
@@ -183,6 +219,22 @@ class DINOv3ImageBackbone(ImageBackboneBase):
         if self._n_reg > 0:
             result["register_tokens"] = hs[:, 1:1 + self._n_reg]
         return result
+
+    def enable_gradient_checkpointing(self) -> None:
+        """Enable whole-forward gradient checkpointing on the student ViT.
+
+        Checkpoints the entire 24-layer ViT call as a single unit: only the
+        input pixel tensor (and optional attention bias) are retained; all
+        intermediate activations are recomputed during backward.  This reduces
+        activation memory from O(L·B·N·D) to O(B·N·D) — roughly 24× for
+        ViT-L — at the cost of one extra forward pass per backward pass.
+
+        This implementation bypasses HuggingFace's gradient_checkpointing_enable()
+        which does not properly wire up _gradient_checkpointing_func on the
+        DINOv3Vit layer modules in the installed transformers version.
+        """
+        self._use_gradient_checkpointing = True
+        log.info("DINOv3ImageBackbone: gradient checkpointing enabled.")
 
     def remove_hooks(self):
         for h in self._hook_handles:

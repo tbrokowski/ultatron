@@ -69,9 +69,20 @@ class CAMUSFinetuneDataset(Dataset):
         self.root    = Path(root)
         self.samples = self._collect(split)
 
+    def _patients_dir(self) -> Path:
+        """Handle both extracted layouts: database_nifti/ (.nii.gz) or root/ (.mhd)."""
+        nifti_dir = self.root / "database_nifti"
+        return nifti_dir if nifti_dir.exists() else self.root
+
     def _collect(self, split: str) -> list[dict]:
-        patients = sorted(self.root.glob("patient*/"))
-        n        = len(patients)
+        pdir_root = self._patients_dir()
+        patients  = sorted(pdir_root.glob("patient*/"))
+        n         = len(patients)
+
+        # Detect file extension
+        ext    = ".nii.gz" if any(pdir_root.rglob("*.nii.gz")) else ".mhd"
+        gt_sfx = f"_gt{ext}"
+
         split_map = {}
         for i, p in enumerate(patients):
             frac = i / max(n - 1, 1)
@@ -86,27 +97,32 @@ class CAMUSFinetuneDataset(Dataset):
             pid = pdir.name
             for view in ("2CH", "4CH"):
                 for phase in ("ED", "ES"):
-                    img = pdir / f"{pid}_{view}_{phase}.mhd"
-                    msk = pdir / f"{pid}_{view}_{phase}_gt.mhd"
+                    img = pdir / f"{pid}_{view}_{phase}{ext}"
+                    msk = pdir / f"{pid}_{view}_{phase}{gt_sfx}"
                     if img.exists() and msk.exists():
                         out.append({"img": str(img), "msk": str(msk),
                                     "id": f"{pid}_{view}_{phase}",
-                                    "view": view, "phase": phase})
-        log.info(f"CAMUS {split}: {len(out)} samples")
+                                    "view": view, "phase": phase,
+                                    "ext": ext})
+        log.info(f"CAMUS {split}: {len(out)} samples (ext={ext})")
         return out
 
-    def _load_mhd(self, path: str) -> np.ndarray:
+    def _load_volume(self, path: str) -> np.ndarray:
+        """Load .mhd or .nii.gz via SimpleITK; return 2-D float32 slice."""
         import SimpleITK as sitk
         arr = sitk.GetArrayFromImage(sitk.ReadImage(path)).astype(np.float32)
-        return arr[0] if arr.ndim == 3 else arr
+        # SimpleITK reads (Z, Y, X) for 3-D; take middle slice if volume
+        if arr.ndim == 3:
+            arr = arr[arr.shape[0] // 2]
+        return arr
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> dict:
         s   = self.samples[idx]
-        img = self._load_mhd(s["img"])
-        msk = self._load_mhd(s["msk"])
+        img = self._load_volume(s["img"])
+        msk = self._load_volume(s["msk"])
 
         # Normalise image
         img = (img - img.min()) / (img.max() - img.min() + 1e-8)

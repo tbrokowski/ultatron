@@ -212,8 +212,11 @@ class FinetuneExperiment(ABC):
                 p.requires_grad_(False)
             img_branch.eval()
 
-        self.head = self.build_head(embed_dim, self.cfg).to(device)
-        log.info(f"[{self.EXPERIMENT_NAME}] Head: {self.head}")
+        # Match the head dtype to the backbone so features and weights are
+        # compatible without needing autocast in every forward pass.
+        backbone_dtype = next(img_branch.parameters()).dtype
+        self.head = self.build_head(embed_dim, self.cfg).to(device=device, dtype=backbone_dtype)
+        log.info(f"[{self.EXPERIMENT_NAME}] Head: {self.head} (dtype={backbone_dtype})")
 
     # ── Training loop ─────────────────────────────────────────────────────────
 

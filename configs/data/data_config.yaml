@@ -177,11 +177,18 @@ anatomy_weights:
   ocular: 3.0
 
 datasets:
-  CAMUS:            "/data/us/CAMUS"
-  EchoNet-Dynamic:  "/data/us/EchoNet-Dynamic"
-  EchoNet-LVH:      "/data/us/EchoNet-LVH"
-  MIMIC-IV-ECHO:    "/data/us/MIMIC-IV-ECHO"
-  Unity-Imaging:    "/data/us/Unity-Imaging"
+  # Cardiac — labelled
+  CAMUS:                    "/data/us/CAMUS"
+  EchoNet-Dynamic:          "/data/us/EchoNet-Dynamic"
+  EchoNet-LVH:              "/data/us/EchoNet-LVH"
+  EchoNet-Pediatric:        "/data/us/EchoNet-Pediatric"
+  MIMIC-IV-ECHO:            "/data/us/MIMIC-IV-Echo"
+  MIMIC-IV-Echo-LVVol-A4C:  "/data/us/MIMIC-IV-Echo-LVVol-A4C"
+  TED:                      "/data/us/TED"
+  Unity-Echo:               "/data/us/Unity"
+  CardiacUDC:               "/data/us/CardiacUDC"
+  EchoCP:                   "/data/us/EchoCP"
+  # Breast / thyroid
   BUS-BRA:          "/data/us/BUS-BRA"
   FETAL_PLANES_DB:  "/data/us/FETAL_PLANES_DB"
   COVIDx-US:        "/data/us/COVIDx-US"
@@ -191,7 +198,7 @@ datasets:
   KidneyUS:         "/data/us/KidneyUS"
   HC18:             "/data/us/HC18"
   ACOUSLIC-AI:      "/data/us/ACOUSLIC-AI"
-  
+
   ###Add other datasets here
 
 # ── Model configuration ───────────────────────────────────────────────────────

@@ -1,31 +1,39 @@
 # configs/run1/data_run1.yaml
-# First run: BUSI + EchoNet-Dynamic + Benin-LUS + RSA-LUS
-# Single-node (4 GPUs), 20k steps, dinov3_l + vjepa2_l
+# First run: all available cardiac + BUSI + Benin-LUS + RSA-LUS
+# Single-node (4 GPUs), 10k steps (2k image / 4k video / 4k hybrid), dinov3_l + vjepa2_l
+#
+# Cardiac datasets added in this revision:
+#   CAMUS, EchoNet-Dynamic, EchoNet-Pediatric, EchoNet-LVH,
+#   MIMIC-IV-ECHO, MIMIC-IV-Echo-LVVol-A4C, TED, Unity-Echo,
+#   CardiacUDC, EchoCP
 # =============================================================================
 
 manifest:
-  # Use local path for run1 manifest (built by build_manifest.py).
-  # On CSCS, copy to scratch and set path to /capstor/scratch/cscs/$USER/ultrasound/manifests/run1_train.jsonl
+  # Built by:
+  #   python scripts/build_manifest.py \
+  #     --config configs/run1/data_run1.yaml \
+  #     --out dataset_exploration_outputs/run1/run1_train.jsonl
+  # On CSCS: /capstor/scratch/cscs/$USER/ultrasound/manifests/run1_train.jsonl
   path: "dataset_exploration_outputs/run1/run1_train.jsonl"
   val_path: null
-  root_remap: {}
+  root_remap: null   # null → auto-remap store→scratch via CSCSConfig.remap_dict()
 
 loaders:
-  image_batch_size: 16
-  video_batch_size: 4
+  image_batch_size: 64
+  video_batch_size: 32   
   num_workers: 8
   pin_memory: true
 
 transforms:
   patch_size: 16
   image:
-    n_global_crops: 2
+    n_global_crops: 4
     global_crop_scale: [0.4, 1.0]
-    n_local_crops: 4
+    n_local_crops: 8
     local_crop_scale: [0.05, 0.4]
     patch_size: 16
     mask_ratio: 0.40
-    max_global_crop_px: 224
+    max_global_crop_px: 256   # matches res_px_1=256; curriculum ramps to 384→512 at later steps
     min_crop_px: 32
     brightness: 0.4
     contrast: 0.4
@@ -49,20 +57,20 @@ transforms:
       phase_perturb_sigma: 0.10
       n_bands: 1
   video:
-    n_frames: 8
-    max_n_frames: 16
-    temporal_stride: 2
+    n_frames: 32
+    max_n_frames: 64
+    temporal_stride: 8
     tube_mask_ratio: 0.75
     min_mask_ratio: 0.40
     max_mask_ratio: 0.80
-    max_crop_px: 224
+    max_crop_px: 112          # matches res_vid_px_1=112; curriculum ramps to 128→160 at later steps
     min_crop_px: 64
     crop_scale: [0.5, 1.0]
     allow_hflip: false
     apply_speckle: true
     speckle_sigma: 0.08
-    mask_strategy: "both"
-    tube_size: 2
+    mask_strategy: "freq"
+    tube_size: 8
     spatial_mask_ratio: 0.40
     freq_mask:
       r_inner_min: 0.10
@@ -76,9 +84,9 @@ transforms:
       n_bands: 1
 
 curriculum:
-  total_training_steps: 20000
-  image_samples_per_epoch: 10000
-  video_samples_per_epoch: 14000
+  total_training_steps: 10000
+  image_samples_per_epoch: 12000
+  video_samples_per_epoch: 20000
 
 gram_anchoring:
   start_step: 999999
@@ -86,22 +94,36 @@ gram_anchoring:
   lambda: 0.0
 
 anatomy_weights:
-  cardiac: 1.0
-  breast:  1.2
-  lung:    1.5
+  cardiac:  0.7   # down-weighted: cardiac is now the largest single anatomy group
+  thyroid:  1.0
+  breast:   1.2
+  lung:     1.5
 
 datasets:
-  BUSI:            "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
-  EchoNet-Dynamic: "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-Dynamic"
-  Benin-LUS:       "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
-  RSA-LUS:         "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
+  # ── Cardiac ────────────────────────────────────────────────────────────────
+  CAMUS:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CAMUS"
+  EchoNet-Dynamic:          "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-Dynamic"
+  EchoNet-Pediatric:        "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-Pediatric"
+  EchoNet-LVH:              "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-LVH"
+  MIMIC-IV-ECHO:            "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/MIMIC-IV-Echo"
+  MIMIC-IV-Echo-LVVol-A4C:  "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/MIMIC-IV-Echo-LVVol-A4C"
+  TED:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/TED"
+  Unity-Echo:               "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/Unity"
+  CardiacUDC:               "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CardiacUDC"
+  EchoCP:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoCP"
+  # ── Breast ────────────────────────────────────────────────────────────────
+  BUSI:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
+  # ── Lung ──────────────────────────────────────────────────────────────────
+  Benin-LUS:                "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
+  RSA-LUS:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
 
 model:
   image_backbone:  dinov3_l
   video_backbone:  vjepa2_l
   frozen_teacher:  null
   ema_momentum:    0.999
-  n_prototypes:    128
-  align_dim:       256
+  n_prototypes:    64    # B/K = 128_global/32 = 4.0 — healthy SwAV regime (was 128, B/K=1)
+  align_dim:       1024
   dtype:           bfloat16
   hf_cache_dir:    null
+  use_gradient_checkpointing: true   # ~13x activation memory reduction; required for ViT-L at bs=64

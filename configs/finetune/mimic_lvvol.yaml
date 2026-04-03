@@ -1,0 +1,23 @@
+# configs/finetune/mimic_lvvol.yaml
+dataset_root: "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/MIMIC-IV-Echo-LVVol-A4C"
+
+model:
+  image_backbone: dinov3_l
+  video_backbone: vjepa2_l
+  frozen_teacher: null
+  dtype: bfloat16
+
+finetune:
+  lr:           1.0e-4
+  weight_decay: 0.01
+  max_epochs:   50
+  batch_size:   8       # DICOM loading is slow; smaller batch is safer
+  num_workers:  2
+  head_type:    linear
+  patience:     10
+  monitor:      val_mae
+  monitor_mode: min
+  freeze_backbone: true
+  output_size:  224
+  log_every:    5
+  checkpoint_best: true
