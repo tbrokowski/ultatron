@@ -195,9 +195,20 @@ datasets:
   TN3K:             "/data/us/TN3K"
   TN5000:           "/data/us/TN5000"
   DDTI:             "/data/us/DDTI"
+  CUBS:             "/capstor/store/cscs/swissai/a127/ultrasound/raw/vascular-carotid/CUBS"
+  Common-Carotid-Artery-Ultrasound-Images: "/capstor/store/cscs/swissai/a127/ultrasound/raw/vascular-carotid/Common-Carotid-Artery-Ultrasound-Images"
   KidneyUS:         "/data/us/KidneyUS"
   HC18:             "/data/us/HC18"
   ACOUSLIC-AI:      "/data/us/ACOUSLIC-AI"
+  3D-US-Neuroimages-Dataset: "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/3D-US-Neuroimages-Dataset"
+  BITE:             "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/BITE"
+  REMIND-Brain-iUS: "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/REMIND-Brain-iUS"
+  RESECT:           "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/RESECT"
+  ReMIND2Reg:       "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/ReMIND2Reg"
+  STU-Hospital-master: "/capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/STU-Hospital-master"
+  annotated_heterogeneous_us_db: "/capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/annotated_heterogeneous_us_db"
+  ERDES:            "/capstor/store/cscs/swissai/a127/ultrasound/raw/ocular/ERDES"
+  Dermatologic-US-Skin-Lesions: "/capstor/store/cscs/swissai/a127/ultrasound/raw/skin/Dermatologic-US-Skin-Lesions"
 
   ###Add other datasets here
 

@@ -18,6 +18,10 @@ def _gray(h=64, w=64):
     rng = np.random.default_rng(42)
     return (rng.random((h, w)) * 255).astype(np.uint8)
 
+def _rgb(h=64, w=64):
+    gray = _gray(h, w)
+    return np.stack([gray, gray, gray], axis=-1)
+
 def _mask(h=64, w=64):
     m = np.zeros((h, w), dtype=np.uint8)
     m[16:48, 16:48] = 255
@@ -30,6 +34,18 @@ def _save_png(arr, path: Path):
         # fallback: write raw bytes (tests will skip if PIL not available)
         path.write_bytes(b"\x89PNG\r\n" + arr.tobytes()[:64])
 
+def _save_jpg(arr, path: Path):
+    if PIL_OK:
+        Image.fromarray(arr).save(path)
+    else:
+        path.write_bytes(arr.tobytes()[:128])
+
+def _save_tiff(arr, path: Path):
+    if PIL_OK:
+        Image.fromarray(arr).save(path)
+    else:
+        path.write_bytes(arr.tobytes()[:128])
+
 def _save_mhd(arr, path: Path):
     try:
         import SimpleITK as sitk
@@ -41,6 +57,10 @@ def _save_mhd(arr, path: Path):
             f"ObjectType = Image\nNDims = 2\nDimSize = {arr.shape[1]} {arr.shape[0]}\n"
             f"ElementType = MET_UCHAR\nElementDataFile = {raw.name}\n"
         )
+
+def _touch(path: Path, payload: bytes = b"synthetic-data"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
 
 
 # ── dataset layout builders ───────────────────────────────────────────────────
@@ -122,6 +142,150 @@ def build_bus_bra(root: Path, n=8):
     with open(root / "annotations.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["image_filename","pathology","birads"])
         w.writeheader(); w.writerows(rows)
+
+def build_cubs(root: Path):
+    (root / "IMAGES").mkdir(parents=True, exist_ok=True)
+    (root / "CF").mkdir(exist_ok=True)
+    (root / "SEGMENTATIONS" / "Manual-A1").mkdir(parents=True, exist_ok=True)
+
+    img_stem = "clin_0001_L"
+    _save_tiff(_rgb(48, 64), root / "IMAGES" / f"{img_stem}.tiff")
+    (root / "CF" / f"{img_stem}_CF.txt").write_text("0.063694\n")
+    (root / "SEGMENTATIONS" / "Manual-A1" / f"{img_stem}-LI.txt").write_text(
+        "10 10\n20 10\n30 10\n"
+    )
+    (root / "SEGMENTATIONS" / "Manual-A1" / f"{img_stem}-MA.txt").write_text(
+        "10 20\n20 20\n30 20\n"
+    )
+    (root / "SEGMENTATIONS" / "Manual-A1" / f"{img_stem}_rect.txt").write_text(
+        "5 5 40 20\n"
+    )
+    with open(root / "ClinicalDatabase-CUBS.csv", "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow(["", "Patient ID", "age", "Sex", "Hypertension"])
+        writer.writerow(["SyntheticSite", "clin_0001", "61", "1", "0"])
+
+def build_common_carotid(root: Path):
+    (root / "US images").mkdir(parents=True, exist_ok=True)
+    (root / "Expert mask images").mkdir(exist_ok=True)
+    common_name = "studyA_slice_0001.png"
+    _save_png(_rgb(52, 72), root / "US images" / common_name)
+    _save_png(_mask(52, 72), root / "Expert mask images" / common_name)
+
+def build_brain_3d_us_neuroimages(root: Path):
+    root.mkdir(parents=True, exist_ok=True)
+    for name in ("CaseA_preop.nrrd", "CaseA_postop.nrrd", "CaseB_resection.nrrd"):
+        _touch(root / name)
+
+def build_bite(root: Path):
+    study_specs = {
+        ("group1", "subject01"): ("slice01.mnc", "slice02.mnc"),
+        ("group2", "subject02"): ("slice01.mnc",),
+    }
+    for (group_name, subject_id), slices in study_specs.items():
+        base = root / group_name / subject_id
+        for slice_name in slices:
+            _touch(base / "2D" / slice_name)
+        _touch(base / "3D" / "US3DT.mnc")
+        _touch(base / "3D" / "MRT1.mnc")
+
+def build_remind_brain_ius(root: Path):
+    base = root / "remind" / "ReMIND-001" / "study-a"
+    _touch(base / "US_series_1" / "image_001.dcm")
+    _touch(base / "US_series_2" / "image_001.dcm")
+    _touch(base / "MR_series_1" / "image_001.dcm")
+    _touch(base / "SEG_series_1" / "image_001.dcm")
+
+def build_resect(root: Path):
+    case_root = root / "NIFTI" / "Case1"
+    for stage in ("before", "during", "after"):
+        _touch(case_root / "US" / f"Case1-US-{stage}.nii.gz")
+    _touch(case_root / "MRI" / "Case1-MRI.nii.gz")
+
+def build_remind2reg(root: Path):
+    (root / "imagesTr").mkdir(parents=True, exist_ok=True)
+    for suffix in ("0000", "0001", "0002"):
+        _touch(root / "imagesTr" / f"ReMIND2Reg_001_{suffix}.nii.gz")
+    payload = {
+        "training": [
+            {"image": "./imagesTr/ReMIND2Reg_001_0000.nii.gz"},
+            {"image": "./imagesTr/ReMIND2Reg_001_0001.nii.gz"},
+        ]
+    }
+    (root / "ReMIND2Reg_dataset.json").write_text(json.dumps(payload))
+
+def build_stu_hospital(root: Path):
+    hospital = root / "Hospital"
+    hospital.mkdir(parents=True, exist_ok=True)
+    _save_png(_gray(), hospital / "Test_Image_001.png")
+    _save_png(_mask(), hospital / "mask_001.png")
+    _save_png(_gray(), hospital / "Test_Image_002.png")
+    _save_png(_mask(), hospital / "mask_002.png")
+
+def build_annotated_heterogeneous_us_db(root: Path):
+    filtered = root / "Filtered Data"
+    processed = root / "Processed Data"
+    filtered.mkdir(parents=True, exist_ok=True)
+    processed.mkdir(parents=True, exist_ok=True)
+
+    _touch(filtered / "Video_10_Tumor,Calcification.mp4", payload=b"mp4")
+    _touch(filtered / "Video_12_UnknownLabel.mp4", payload=b"mp4")
+
+    photo_dir = filtered / "Photos_11_Anomalies"
+    photo_dir.mkdir(parents=True, exist_ok=True)
+    _save_jpg(_gray(), photo_dir / "01.jpg")
+    _save_jpg(_gray(), photo_dir / "02.jpg")
+    _save_jpg(_gray(), photo_dir / "03.jpg")
+
+    (processed / "noise_files.txt").write_text(
+        "/media/Storage2/yyz/Pretreat\\11_Anomalies\\02.jpg\n"
+    )
+
+def build_erdes(root: Path):
+    clip_specs = [
+        ("101_00001", "Retinal_Detachment/Macula_Detached/TD/101_00001.mp4", "rd", "train"),
+        ("202_00001", "Non_Retinal_Detachment/Normal/202_00001.mp4", "non_rd", "val"),
+        ("303_00001", "Non_Retinal_Detachment/Posterior_Vitreous_Detachment/303_00001.mp4", "non_rd", "test"),
+    ]
+    for clip_id, rel_path, _, _ in clip_specs:
+        _touch(root / "clips" / rel_path, payload=b"mp4")
+
+    with open(root / "erdes_metadata.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "clip_id", "file_path", "diagnostic_class", "subtype",
+            "anatomical_subclass", "fps", "frame_count",
+            "width", "height", "duration_seconds",
+        ])
+        for clip_id, rel_path, diagnostic_class, _ in clip_specs:
+            writer.writerow([
+                clip_id, rel_path, diagnostic_class, "subtype_a", "TD",
+                "27.0", "120", "512", "512", "4.5",
+            ])
+
+    for split_name in ("train", "val", "test"):
+        split_dir = root / "splits" / "non_rd_vs_rd"
+        split_dir.mkdir(parents=True, exist_ok=True)
+        with open(split_dir / f"{split_name}.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["path", "label"])
+            for _, rel_path, diagnostic_class, split in clip_specs:
+                if split == split_name:
+                    writer.writerow([rel_path, 1 if diagnostic_class == "rd" else 0])
+
+def build_dermatologic_skin_lesions(root: Path):
+    image_root = root / "images" / "bw"
+    image_root.mkdir(parents=True, exist_ok=True)
+
+    for name in ("01_bw.jpg", "01_doppler.jpg", "02_bw.jpg", "02_doppler.jpg", "03_bw.jpg"):
+        _save_jpg(_gray(), image_root / name)
+
+    with open(root / "201database.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["images_bw", "image_doppler", "label", "dx", "freq"])
+        writer.writerow(["images/bw/01_bw.jpg", "images/bw/01_doppler.jpg", "BENIGN", "CYST", "lowr"])
+        writer.writerow(["images/bw/02_bw.jpg", "images/bw/99_doppler.jpg", "MALIGNANT", "LEYOMIOMA", "highr"])
+        writer.writerow(["images/bw/03_bw.jpg", "", "BENIGN", "VENOUS MALFROMATION", "lowr"])
 
 
 def build_echonet_dynamic(root: Path, n=4):
@@ -305,6 +469,50 @@ def bus_bra_root(data_root):
 @pytest.fixture(scope="session")
 def generic_seg_root(data_root):
     r = data_root / "GenericSeg"; build_generic_seg(r); return r
+
+@pytest.fixture(scope="session")
+def cubs_root(data_root):
+    r = data_root / "CUBS"; build_cubs(r); return r
+
+@pytest.fixture(scope="session")
+def common_carotid_root(data_root):
+    r = data_root / "Common-Carotid-Artery-Ultrasound-Images"; build_common_carotid(r); return r
+
+@pytest.fixture(scope="session")
+def brain_3d_us_neuroimages_root(data_root):
+    r = data_root / "3D-US-Neuroimages-Dataset"; build_brain_3d_us_neuroimages(r); return r
+
+@pytest.fixture(scope="session")
+def bite_root(data_root):
+    r = data_root / "BITE"; build_bite(r); return r
+
+@pytest.fixture(scope="session")
+def remind_brain_ius_root(data_root):
+    r = data_root / "REMIND-Brain-iUS"; build_remind_brain_ius(r); return r
+
+@pytest.fixture(scope="session")
+def resect_root(data_root):
+    r = data_root / "RESECT"; build_resect(r); return r
+
+@pytest.fixture(scope="session")
+def remind2reg_root(data_root):
+    r = data_root / "ReMIND2Reg"; build_remind2reg(r); return r
+
+@pytest.fixture(scope="session")
+def stu_hospital_root(data_root):
+    r = data_root / "STU-Hospital-master"; build_stu_hospital(r); return r
+
+@pytest.fixture(scope="session")
+def annotated_heterogeneous_us_db_root(data_root):
+    r = data_root / "annotated_heterogeneous_us_db"; build_annotated_heterogeneous_us_db(r); return r
+
+@pytest.fixture(scope="session")
+def erdes_root(data_root):
+    r = data_root / "ERDES"; build_erdes(r); return r
+
+@pytest.fixture(scope="session")
+def dermatologic_skin_lesions_root(data_root):
+    r = data_root / "Dermatologic-US-Skin-Lesions"; build_dermatologic_skin_lesions(r); return r
 
 @pytest.fixture(scope="session")
 def echonet_pediatric_root(data_root):

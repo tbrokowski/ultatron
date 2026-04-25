@@ -22,6 +22,17 @@ from .cardiac.echocp            import EchoCPAdapter
 # ── Non-cardiac ───────────────────────────────────────────────────────────────
 from .busi    import BUSIAdapter
 from .tn3k    import TN3KAdapter
+from .annotated_heterogeneous_us_db import AnnotatedHeterogeneousUSDBAdapter
+from .bite import BITEAdapter
+from .brain_3d_us_neuroimages import ThreeDUSNeuroimagesAdapter
+from .common_carotid import CommonCarotidArteryImagesAdapter
+from .cubs import CUBSAdapter
+from .dermatologic_skin_lesions import DermatologicSkinLesionsAdapter
+from .erdes import ERDESAdapter
+from .remind2reg import ReMIND2RegAdapter
+from .remind_brain_ius import REMINDBrainIUSAdapter
+from .resect import RESECTAdapter
+from .stu_hospital import STUHospitalAdapter
 
 # ── Lung ──────────────────────────────────────────────────────────────────────
 from .lung.benin_lus import BeninLUSAdapter
@@ -43,6 +54,19 @@ ADAPTER_REGISTRY = {
     # Breast / thyroid
     "BUSI":                     BUSIAdapter,
     "TN3K":                     TN3KAdapter,
+    # Vascular / carotid
+    "CUBS":                     CUBSAdapter,
+    "Common-Carotid-Artery-Ultrasound-Images": CommonCarotidArteryImagesAdapter,
+    # Brain / multi-organ / ocular / skin
+    "3D-US-Neuroimages-Dataset": ThreeDUSNeuroimagesAdapter,
+    "BITE":                     BITEAdapter,
+    "REMIND-Brain-iUS":         REMINDBrainIUSAdapter,
+    "RESECT":                   RESECTAdapter,
+    "ReMIND2Reg":               ReMIND2RegAdapter,
+    "STU-Hospital-master":      STUHospitalAdapter,
+    "annotated_heterogeneous_us_db": AnnotatedHeterogeneousUSDBAdapter,
+    "ERDES":                    ERDESAdapter,
+    "Dermatologic-US-Skin-Lesions": DermatologicSkinLesionsAdapter,
     # Lung
     "Benin-LUS":                BeninLUSAdapter,
     "RSA-LUS":                  RSALUSAdapter,
@@ -85,7 +109,12 @@ __all__ = [
     "EchoNetLVHAdapter", "MIMICEchoAdapter", "MIMICLVVolA4CAdapter",
     "TEDAdapter", "UnityAdapter", "CardiacUDCAdapter", "EchoCPAdapter",
     # Non-cardiac
-    "BUSIAdapter", "TN3KAdapter",
+    "BUSIAdapter", "TN3KAdapter", "CUBSAdapter",
+    "CommonCarotidArteryImagesAdapter",
+    "ThreeDUSNeuroimagesAdapter", "BITEAdapter", "REMINDBrainIUSAdapter",
+    "RESECTAdapter", "ReMIND2RegAdapter", "STUHospitalAdapter",
+    "AnnotatedHeterogeneousUSDBAdapter", "ERDESAdapter",
+    "DermatologicSkinLesionsAdapter",
     # Lung
     "BeninLUSAdapter", "RSALUSAdapter",
     # Helpers
