@@ -6,6 +6,7 @@ from .bus_bra_adapter import BUSBRAAdapter
 from .bus_uc_adapter  import BUSUCAdapter
 from .bus_uclm_adapter import BUSUCLMAdapter
 from .breast_adapter import BrEaSTAdapter
+from .buid_adapter     import BUIDAdapter
 
 
-__all__ = ["BUSBRAAdapter", "BUSUCAdapter","BUSUCLMAdapter", "BrEaSTAdapter"]
+__all__ = ["BUSBRAAdapter", "BUSUCAdapter","BUSUCLMAdapter", "BrEaSTAdapter","BUIDAdapter"]
