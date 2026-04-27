@@ -10,6 +10,9 @@ from .breast.bus_bra_adapter import BUSBRAAdapter
 from .breast.bus_uclm_adapter import BUSUCLMAdapter
 from .breast.breast_adapter import BrEaSTAdapter
 from .breast.buid_adapter     import BUIDAdapter
+from .breast.s1_adapter import S1Adapter
+
+
 
 # ── Cardiac ───────────────────────────────────────────────────────────────────
 from .cardiac.camus             import CAMUSAdapter
@@ -53,6 +56,8 @@ ADAPTER_REGISTRY = {
     "BUS-UCLM": BUSUCLMAdapter,
     "BrEaST": BrEaSTAdapter,
     "BUID":     BUIDAdapter,
+    "S1": S1Adapter,
+
 
 
     "TN3K":                     TN3KAdapter,
@@ -98,7 +103,7 @@ __all__ = [
     "EchoNetLVHAdapter", "MIMICEchoAdapter", "MIMICLVVolA4CAdapter",
     "TEDAdapter", "UnityAdapter", "CardiacUDCAdapter", "EchoCPAdapter",
     # Non-cardiac
-    "BUSIAdapter", "TN3KAdapter", "BUSBRAAdapter","BUSUCAdapter","BUSUCLMAdapter","BrEaSTAdapter","BUIDAdapter",
+    "BUSIAdapter", "TN3KAdapter", "BUSBRAAdapter","BUSUCAdapter","BUSUCLMAdapter","BrEaSTAdapter","BUIDAdapter","S1Adapter",
     # Lung
     "BeninLUSAdapter", "RSALUSAdapter",
     # Helpers
