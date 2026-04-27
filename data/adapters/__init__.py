@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Optional
 
 from .base import BaseAdapter
+from .breast.bus_bra_adapter import BUSBRAAdapter
+from .breast.bus_uclm_adapter import BUSUCLMAdapter
 
 # ── Cardiac ───────────────────────────────────────────────────────────────────
 from .cardiac.camus             import CAMUSAdapter
@@ -22,6 +24,8 @@ from .cardiac.echocp            import EchoCPAdapter
 # ── Non-cardiac ───────────────────────────────────────────────────────────────
 from .busi    import BUSIAdapter
 from .tn3k    import TN3KAdapter
+from .breast.bus_uc_adapter import BUSUCAdapter
+
 
 # ── Lung ──────────────────────────────────────────────────────────────────────
 from .lung.benin_lus import BeninLUSAdapter
@@ -42,6 +46,9 @@ ADAPTER_REGISTRY = {
     "EchoCP":                   EchoCPAdapter,
     # Breast / thyroid
     "BUSI":                     BUSIAdapter,
+    "BUS-BRA": BUSBRAAdapter,
+    "BUS-UC": BUSUCAdapter,
+    "BUS-UCLM": BUSUCLMAdapter,
     "TN3K":                     TN3KAdapter,
     # Lung
     "Benin-LUS":                BeninLUSAdapter,
@@ -85,7 +92,7 @@ __all__ = [
     "EchoNetLVHAdapter", "MIMICEchoAdapter", "MIMICLVVolA4CAdapter",
     "TEDAdapter", "UnityAdapter", "CardiacUDCAdapter", "EchoCPAdapter",
     # Non-cardiac
-    "BUSIAdapter", "TN3KAdapter",
+    "BUSIAdapter", "TN3KAdapter", "BUSBRAAdapter","BUSUCAdapter","BUSUCLMAdapter",
     # Lung
     "BeninLUSAdapter", "RSALUSAdapter",
     # Helpers
