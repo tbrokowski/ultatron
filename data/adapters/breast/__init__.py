@@ -10,6 +10,7 @@ from .buid_adapter     import BUIDAdapter
 from .s1_adapter import S1Adapter
 from .busv_adapter import BUSVAdapter
 from .gdph_sysucc_adapter import GDPHSYSUCCAdapter
+from .chinese_us_report_adapter import ChineseUSReportBreastAdapter
 
 
 
@@ -17,4 +18,5 @@ from .gdph_sysucc_adapter import GDPHSYSUCCAdapter
 
 
 
-__all__ = ["BUSBRAAdapter", "BUSUCAdapter","BUSUCLMAdapter", "BrEaSTAdapter","BUIDAdapter","S1Adapter","BUSVAdapter","GDPHSYSUCCAdapter"]
+
+__all__ = ["BUSBRAAdapter", "BUSUCAdapter","BUSUCLMAdapter", "BrEaSTAdapter","BUIDAdapter","S1Adapter","BUSVAdapter","GDPHSYSUCCAdapter","ChineseUSReportBreastAdapter"]
