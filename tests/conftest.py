@@ -377,6 +377,51 @@ def acouslic_root(data_root):
     return r
 
 
+def build_fass(root: Path):
+    """
+    Synthetic FASS dataset inside the long-named subdirectory.
+
+    6 images across 3 patients (P01, P02, P03), 2 images each.
+    All 6 have paired NPY files except the last one (ssl_only path).
+    """
+    inner = root / "Fetal Abdominal Structures Segmentation Dataset Using Ultrasonic Images"
+    img_dir  = inner / "IMAGES"
+    mask_dir = inner / "ARRAY_FORMAT"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    samples = [
+        ("P01_IMG1", True),
+        ("P01_IMG2", True),
+        ("P02_IMG1", True),
+        ("P02_IMG2", True),
+        ("P03_IMG1", True),
+        ("P03_IMG2", False),  # no NPY → ssl_only
+    ]
+
+    h, w = 4, 4
+    for stem, has_npy in samples:
+        _save_png(_gray(h, w), img_dir / f"{stem}.png")
+        if has_npy:
+            data = {
+                "image": np.zeros((h, w, 3), dtype=np.uint8),
+                "structures": {
+                    "artery":  np.zeros((h, w), dtype=np.uint8),
+                    "liver":   np.zeros((h, w), dtype=np.uint8),
+                    "stomach": np.zeros((h, w), dtype=np.uint8),
+                    "vein":    np.zeros((h, w), dtype=np.uint8),
+                },
+            }
+            np.save(str(mask_dir / f"{stem}.npy"), np.array(data, dtype=object))
+
+
+@pytest.fixture(scope="session")
+def fass_root(data_root):
+    r = data_root / "FASS"
+    build_fass(r)
+    return r
+
+
 @pytest.fixture
 def tmp_manifest_with_masks(tmp_path):
     """A tiny manifest file with train/val entries and mask data."""
