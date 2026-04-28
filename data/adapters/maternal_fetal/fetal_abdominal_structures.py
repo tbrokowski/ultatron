@@ -16,7 +16,9 @@ Layout on disk:
 
 NPY dict schema:
   {
-    "image":      np.ndarray (768, 1024, 3) uint8,
+    "image":      np.ndarray (768, 1024, 3) uint8  — RGB for most files
+                            (768, 1024)     uint8  — grayscale for ~33 files
+                            (patients P01, P03, P0149, P0162–P0166, P04)
     "structures": {
         "artery":  np.ndarray (768, 1024) uint8 binary,
         "liver":   np.ndarray (768, 1024) uint8 binary,
@@ -25,6 +27,13 @@ NPY dict schema:
     }
   }
   Load with: np.load(path, allow_pickle=True).item()
+
+Image modality note:
+  ~1555 files are genuine RGB (channels are not identical).
+  ~33 files are 8-bit grayscale stored as single-channel PNGs.
+  The adapter detects this cheaply via the PNG header (PIL lazy open) and
+  stores is_grayscale=True in source_meta.  Normalization to a consistent
+  shape (grayscale↔RGB) is the pipeline's responsibility.
 
 One Instance per structure is emitted, with mask_channel encoding the
 structure index (0=artery, 1=liver, 2=stomach, 3=vein).  All four instances
@@ -38,6 +47,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
+
+from PIL import Image
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry
@@ -111,6 +122,7 @@ class FASSAdapter(BaseAdapter):
             npy_path   = npy_index.get(stem)
             has_mask   = npy_path is not None
             split      = self.split_override or patient_split.get(patient_id, "train")
+            is_gray    = self._is_grayscale(img_path)
 
             if has_mask:
                 instances = [
@@ -142,9 +154,10 @@ class FASSAdapter(BaseAdapter):
                 ssl_stream    = "image",
                 is_promptable = has_mask,
                 source_meta   = {
-                    "patient_id": patient_id,
-                    "stem":       stem,
-                    "structures": [s[0] for s in STRUCTURES] if has_mask else [],
+                    "patient_id":   patient_id,
+                    "stem":         stem,
+                    "is_grayscale": is_gray,
+                    "structures":   [s[0] for s in STRUCTURES] if has_mask else [],
                 },
             )
 
@@ -152,3 +165,12 @@ class FASSAdapter(BaseAdapter):
     def _patient_id(stem: str) -> str:
         m = _STEM_RE.match(stem)
         return m.group(1) if m else stem
+
+    @staticmethod
+    def _is_grayscale(img_path: Path) -> bool:
+        """Probe the PNG color mode without loading pixel data."""
+        try:
+            with Image.open(img_path) as img:
+                return img.mode in ("L", "LA")
+        except Exception:
+            return False

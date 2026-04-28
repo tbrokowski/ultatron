@@ -179,3 +179,22 @@ def test_fass_resolve_root_direct(fass_root: Path):
 def test_fass_split_override(fass_root: Path):
     entries = list(FASSAdapter(fass_root, split_override="test").iter_entries())
     assert all(e.split == "test" for e in entries)
+
+
+def test_fass_grayscale_flag(tmp_path: Path):
+    # Build a minimal dataset with one RGB and one grayscale PNG.
+    inner = tmp_path / "Fetal Abdominal Structures Segmentation Dataset Using Ultrasonic Images"
+    img_dir  = inner / "IMAGES"
+    mask_dir = inner / "ARRAY_FORMAT"
+    img_dir.mkdir(parents=True)
+    mask_dir.mkdir(parents=True)
+
+    from PIL import Image as PILImage
+    import numpy as np
+
+    PILImage.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(img_dir / "P99_IMG1.png")
+    PILImage.fromarray(np.zeros((4, 4),    dtype=np.uint8), mode="L").save(img_dir / "P99_IMG2.png")
+
+    entries = {e.series_id: e for e in FASSAdapter(tmp_path).iter_entries()}
+    assert entries["P99_IMG1"].source_meta["is_grayscale"] is False
+    assert entries["P99_IMG2"].source_meta["is_grayscale"] is True
