@@ -422,6 +422,33 @@ def fass_root(data_root):
     return r
 
 
+def build_fh_ps_aop(root: Path):
+    """
+    Synthetic FH-PS-AOP dataset inside the long-named subdirectory.
+
+    5 image/mask pairs (00001–00005) plus one image with no mask (00006)
+    to exercise the ssl_only path.
+    """
+    inner    = root / "Pubic Symphysis-Fetal Head Segmentation and Angle of Progression"
+    img_dir  = inner / "image_mha"
+    mask_dir = inner / "label_mha"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    for i in range(1, 7):
+        stem = f"{i:05d}"
+        (img_dir / f"{stem}.mha").write_bytes(b"MHA-stub")
+        if i < 6:  # 00006 has no mask → ssl_only
+            (mask_dir / f"{stem}.mha").write_bytes(b"MHA-stub")
+
+
+@pytest.fixture(scope="session")
+def fh_ps_aop_root(data_root):
+    r = data_root / "FH-PS-AOP"
+    build_fh_ps_aop(r)
+    return r
+
+
 @pytest.fixture
 def tmp_manifest_with_masks(tmp_path):
     """A tiny manifest file with train/val entries and mask data."""

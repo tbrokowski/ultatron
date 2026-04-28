@@ -30,6 +30,7 @@ from .lung.rsa_lus   import RSALUSAdapter
 # ── Maternal / fetal ──────────────────────────────────────────────────────────
 from .maternal_fetal.acouslic                   import ACOUSLICAIAdapter
 from .maternal_fetal.fetal_abdominal_structures import FASSAdapter
+from .maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 
 # Registry: dataset_id -> adapter class
 ADAPTER_REGISTRY = {
@@ -53,6 +54,7 @@ ADAPTER_REGISTRY = {
     # Maternal / fetal
     "ACOUSLIC-AI":              ACOUSLICAIAdapter,
     "FASS":                     FASSAdapter,
+    "FH-PS-AOP":                FHPSAOPAdapter,
 }
 
 
@@ -96,7 +98,7 @@ __all__ = [
     # Lung
     "BeninLUSAdapter", "RSALUSAdapter",
     # Maternal / fetal
-    "ACOUSLICAIAdapter", "FASSAdapter",
+    "ACOUSLICAIAdapter", "FASSAdapter", "FHPSAOPAdapter",
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
 ]

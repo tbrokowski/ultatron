@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from data.adapters.maternal_fetal.acouslic                   import ACOUSLICAIAdapter
 from data.adapters.maternal_fetal.fetal_abdominal_structures import FASSAdapter
+from data.adapters.maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -198,3 +199,65 @@ def test_fass_grayscale_flag(tmp_path: Path):
     entries = {e.series_id: e for e in FASSAdapter(tmp_path).iter_entries()}
     assert entries["P99_IMG1"].source_meta["is_grayscale"] is False
     assert entries["P99_IMG2"].source_meta["is_grayscale"] is True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FH-PS-AOP
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_fh_ps_aop_yields_all_images(fh_ps_aop_root: Path):
+    entries = list(FHPSAOPAdapter(fh_ps_aop_root).iter_entries())
+    assert len(entries) == 6
+
+
+def test_fh_ps_aop_schema(fh_ps_aop_root: Path):
+    entries = list(FHPSAOPAdapter(fh_ps_aop_root).iter_entries())
+    for e in entries:
+        assert e.dataset_id == "FH-PS-AOP"
+        assert e.anatomy_family == "intrapartum"
+        assert e.modality_type == "image"
+        assert e.view_type == "intrapartum_transperineal"
+        assert e.ssl_stream == "image"
+        assert e.curriculum_tier in (1, 2, 3)
+
+
+def test_fh_ps_aop_segmentation_entries(fh_ps_aop_root: Path):
+    entries = {e.study_id: e for e in FHPSAOPAdapter(fh_ps_aop_root).iter_entries()
+               if e.has_mask}
+    assert len(entries) == 5
+
+    for e in entries.values():
+        assert e.task_type == "segmentation"
+        assert e.is_promptable is True
+        assert len(e.instances) == 2
+
+        ontologies = {inst.label_ontology for inst in e.instances}
+        assert ontologies == {"pubic_symphysis", "fetal_head"}
+
+        channels = {inst.mask_channel for inst in e.instances}
+        assert channels == {1, 2}
+
+        # Both instances share the same mask_path
+        mask_paths = {inst.mask_path for inst in e.instances}
+        assert len(mask_paths) == 1
+        assert mask_paths.pop().endswith(".mha")
+
+
+def test_fh_ps_aop_ssl_only_entry(fh_ps_aop_root: Path):
+    entries = {e.study_id: e for e in FHPSAOPAdapter(fh_ps_aop_root).iter_entries()}
+    e = entries["00006"]
+    assert e.has_mask is False
+    assert e.task_type == "ssl_only"
+    assert e.is_promptable is False
+    assert len(e.instances) == 0
+
+
+def test_fh_ps_aop_resolve_root_direct(fh_ps_aop_root: Path):
+    inner = fh_ps_aop_root / "Pubic Symphysis-Fetal Head Segmentation and Angle of Progression"
+    entries = list(FHPSAOPAdapter(inner).iter_entries())
+    assert len(entries) == 6
+
+
+def test_fh_ps_aop_split_override(fh_ps_aop_root: Path):
+    entries = list(FHPSAOPAdapter(fh_ps_aop_root, split_override="val").iter_entries())
+    assert all(e.split == "val" for e in entries)
