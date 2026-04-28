@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.adapters.maternal_fetal.acouslic                   import ACOUSLICAIAdapter
 from data.adapters.maternal_fetal.fetal_abdominal_structures import FASSAdapter
 from data.adapters.maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
+from data.adapters.maternal_fetal.hc18                       import HC18Adapter
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -260,4 +261,84 @@ def test_fh_ps_aop_resolve_root_direct(fh_ps_aop_root: Path):
 
 def test_fh_ps_aop_split_override(fh_ps_aop_root: Path):
     entries = list(FHPSAOPAdapter(fh_ps_aop_root, split_override="val").iter_entries())
+    assert all(e.split == "val" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HC18
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_hc18_yields_all_images(hc18_root: Path):
+    entries = list(HC18Adapter(hc18_root).iter_entries())
+    # 4 training + 2 test
+    assert len(entries) == 6
+
+
+def test_hc18_schema(hc18_root: Path):
+    entries = list(HC18Adapter(hc18_root).iter_entries())
+    for e in entries:
+        assert e.dataset_id == "HC18"
+        assert e.anatomy_family == "fetal_head"
+        assert e.modality_type == "image"
+        assert e.view_type == "fetal_head_standard_plane"
+        assert e.ssl_stream == "image"
+        assert e.curriculum_tier in (1, 2, 3)
+
+
+def test_hc18_training_segmentation_entries(hc18_root: Path):
+    entries = {e.series_id: e for e in HC18Adapter(hc18_root).iter_entries()}
+
+    for stem in ("001_HC", "001_2HC", "002_HC"):
+        e = entries[stem]
+        assert e.has_mask is True
+        assert e.task_type == "regression"
+        assert e.is_promptable is True
+        assert len(e.instances) == 1
+        assert e.instances[0].label_ontology == "head_circumference"
+        assert e.instances[0].mask_path is not None
+        assert e.source_meta["annotation_type"] == "contour"
+
+
+def test_hc18_measurement_mm(hc18_root: Path):
+    entries = {e.series_id: e for e in HC18Adapter(hc18_root).iter_entries()}
+    assert entries["001_HC"].instances[0].measurement_mm  == pytest.approx(178.3)
+    assert entries["001_2HC"].instances[0].measurement_mm == pytest.approx(179.1)
+    assert entries["002_HC"].instances[0].measurement_mm  == pytest.approx(185.0)
+
+
+def test_hc18_pixel_size_in_meta(hc18_root: Path):
+    entries = {e.series_id: e for e in HC18Adapter(hc18_root).iter_entries()}
+    assert entries["001_HC"].source_meta["pixel_size_mm"] == pytest.approx(0.154)
+    assert entries["004_HC"].source_meta["pixel_size_mm"] == pytest.approx(0.158)
+
+
+def test_hc18_patient_level_splitting(hc18_root: Path):
+    entries = {e.series_id: e for e in HC18Adapter(hc18_root).iter_entries()}
+    # Both sweeps of patient 001 must share the same split.
+    assert entries["001_HC"].split == entries["001_2HC"].split
+    # study_id is the patient prefix; series_id is the full stem.
+    assert entries["001_HC"].study_id  == "001"
+    assert entries["001_2HC"].study_id == "001"
+    assert entries["002_HC"].study_id  == "002"
+
+
+def test_hc18_test_entries(hc18_root: Path):
+    entries = {e.series_id: e for e in HC18Adapter(hc18_root).iter_entries()}
+    for stem in ("004_HC", "005_HC"):
+        e = entries[stem]
+        assert e.split == "test"
+        assert e.task_type == "ssl_only"
+        assert e.has_mask is False
+        assert len(e.instances) == 0
+
+
+def test_hc18_ssl_only_training_entry(hc18_root: Path):
+    entries = {e.series_id: e for e in HC18Adapter(hc18_root).iter_entries()}
+    e = entries["003_HC"]
+    assert e.has_mask is False
+    assert e.task_type == "ssl_only"
+
+
+def test_hc18_split_override(hc18_root: Path):
+    entries = list(HC18Adapter(hc18_root, split_override="val").iter_entries())
     assert all(e.split == "val" for e in entries)

@@ -97,12 +97,50 @@ def build_fetal_planes(root: Path, n=12):
         w.writeheader(); w.writerows(rows)
 
 def build_hc18(root: Path):
-    for d, n in (("training", 6), ("test", 3)):
-        (root / d).mkdir(parents=True, exist_ok=True)
-        for i in range(n):
-            _save_png(_gray(), root / d / f"{i:03d}.png")
-            if d == "training":
-                _save_png(_mask(), root / d / f"{i:03d}_Annotation.png")
+    """
+    Synthetic HC18 dataset using the real naming convention.
+
+    Training patients and sweeps:
+      001_HC    patient 001, sweep 1  — image + annotation + CSV row
+      001_2HC   patient 001, sweep 2  — image + annotation + CSV row
+      002_HC    patient 002           — image + annotation + CSV row
+      003_HC    patient 003           — image + annotation + CSV row (no mask for ssl path)
+    Test set:
+      004_HC, 005_HC  — images only + pixel-size CSV
+    """
+    train_dir = root / "training_set"
+    test_dir  = root / "test_set"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    test_dir.mkdir(parents=True, exist_ok=True)
+
+    train_samples = [
+        ("001_HC",  True,  0.154, 178.3),
+        ("001_2HC", True,  0.154, 179.1),
+        ("002_HC",  True,  0.161, 185.0),
+        ("003_HC",  False, 0.160, None),   # no annotation → ssl_only
+    ]
+    for stem, has_ann, _px, _hc in train_samples:
+        _save_png(_gray(), train_dir / f"{stem}.png")
+        if has_ann:
+            _save_png(_mask(), train_dir / f"{stem}_Annotation.png")
+
+    with open(root / "training_set_pixel_size_and_HC.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "pixel size(mm)", "head circumference (mm)"])
+        w.writeheader()
+        for stem, _ann, px, hc in train_samples:
+            w.writerow({"filename": f"{stem}.png",
+                        "pixel size(mm)": str(px) if px else "",
+                        "head circumference (mm)": str(hc) if hc else ""})
+
+    test_samples = [("004_HC", 0.158), ("005_HC", 0.162)]
+    for stem, px in test_samples:
+        _save_png(_gray(), test_dir / f"{stem}.png")
+
+    with open(root / "test_set_pixel_size.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "pixel size(mm)"])
+        w.writeheader()
+        for stem, px in test_samples:
+            w.writerow({"filename": f"{stem}.png", "pixel size(mm)": str(px)})
 
 def build_lus_multicenter(root: Path, n=5):
     for cls in ("a_lines", "b_lines"):
