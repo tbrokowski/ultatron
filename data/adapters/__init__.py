@@ -27,6 +27,9 @@ from .tn3k    import TN3KAdapter
 from .lung.benin_lus import BeninLUSAdapter
 from .lung.rsa_lus   import RSALUSAdapter
 
+# ── Maternal / fetal ──────────────────────────────────────────────────────────
+from .maternal_fetal.acouslic import ACOUSLICAIAdapter
+
 # Registry: dataset_id -> adapter class
 ADAPTER_REGISTRY = {
     # Cardiac — fully labelled
@@ -46,6 +49,8 @@ ADAPTER_REGISTRY = {
     # Lung
     "Benin-LUS":                BeninLUSAdapter,
     "RSA-LUS":                  RSALUSAdapter,
+    # Maternal / fetal
+    "ACOUSLIC-AI":              ACOUSLICAIAdapter,
 }
 
 
@@ -88,6 +93,8 @@ __all__ = [
     "BUSIAdapter", "TN3KAdapter",
     # Lung
     "BeninLUSAdapter", "RSALUSAdapter",
+    # Maternal / fetal
+    "ACOUSLICAIAdapter",
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
 ]

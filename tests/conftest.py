@@ -323,6 +323,60 @@ def mimic_lvvol_a4c_root(data_root):
     r = data_root / "MIMIC-IV-Echo-LVVol-A4C"; build_mimic_lvvol_a4c(r); return r
 
 
+def build_acouslic(root: Path):
+    """
+    Synthetic ACOUSLIC-AI dataset.
+
+    4 sweeps across 3 subjects:
+      sweep-aaa  subject 01  ac_mm=250.0  image+mask
+      sweep-bbb  subject 01  ac_mm=252.0  image+mask  (same patient, two sweeps)
+      sweep-ccc  subject 02  ac_mm=270.0  image+mask
+      sweep-ddd  subject 03  no ac data   image only   (mask absent → ssl_only)
+    """
+    train_set = root / "acouslic-ai-train-set"
+    img_dir  = train_set / "images" / "stacked_fetal_ultrasound"
+    mask_dir = train_set / "masks"  / "stacked_fetal_abdomen"
+    circ_dir = train_set / "circumferences"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    circ_dir.mkdir(parents=True, exist_ok=True)
+
+    sweeps = [
+        ("sweep-aaa", "01", "250.0", ""),
+        ("sweep-bbb", "01", "",      "252.0"),
+        ("sweep-ccc", "02", "270.0", ""),
+        ("sweep-ddd", "03", "",      ""),
+    ]
+    for uuid, _sid, _ac1, _ac2 in sweeps:
+        (img_dir / f"{uuid}.mha").write_bytes(b"MHA-stub")
+
+    for uuid, _sid, _ac1, _ac2 in sweeps[:3]:  # sweep-ddd has no mask
+        (mask_dir / f"{uuid}.mha").write_bytes(b"MHA-stub")
+
+    rows = [
+        {"uuid": uuid, "subject_id": sid,
+         "sweep_1_ac_mm": ac1, "sweep_2_ac_mm": ac2,
+         "sweep_3_ac_mm": "", "sweep_4_ac_mm": "",
+         "sweep_5_ac_mm": "", "sweep_6_ac_mm": ""}
+        for uuid, sid, ac1, ac2 in sweeps
+    ]
+    fields = ["uuid", "subject_id",
+              "sweep_1_ac_mm", "sweep_2_ac_mm", "sweep_3_ac_mm",
+              "sweep_4_ac_mm", "sweep_5_ac_mm", "sweep_6_ac_mm"]
+    with open(circ_dir / "fetal_abdominal_circumferences_per_sweep.csv",
+              "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerows(rows)
+
+
+@pytest.fixture(scope="session")
+def acouslic_root(data_root):
+    r = data_root / "ACOUSLIC-AI"
+    build_acouslic(r)
+    return r
+
+
 @pytest.fixture
 def tmp_manifest_with_masks(tmp_path):
     """A tiny manifest file with train/val entries and mask data."""
