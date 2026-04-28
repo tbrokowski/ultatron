@@ -35,6 +35,7 @@ from .maternal_fetal.focus                      import FOCUSAdapter
 from .maternal_fetal.fpus23                     import FPUS23Adapter
 from .maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 from .maternal_fetal.hc18                       import HC18Adapter
+from .maternal_fetal.iugc2024                   import IUGC2024Adapter
 from .maternal_fetal.jnu_ifm                    import JNUIFMAdapter
 from .maternal_fetal.psfhs                      import PSFHSAdapter
 
@@ -65,6 +66,7 @@ ADAPTER_REGISTRY = {
     "FPUS23":                   FPUS23Adapter,
     "FH-PS-AOP":                FHPSAOPAdapter,
     "HC18":                     HC18Adapter,
+    "IUGC2024":                 IUGC2024Adapter,
     "JNU-IFM":                  JNUIFMAdapter,
     "PSFHS":                    PSFHSAdapter,
 }
@@ -112,7 +114,7 @@ __all__ = [
     # Maternal / fetal
     "ACOUSLICAIAdapter", "FASSAdapter", "FetalPlanesDBAdapter",
     "FOCUSAdapter", "FPUS23Adapter", "FHPSAOPAdapter", "HC18Adapter",
-    "JNUIFMAdapter", "PSFHSAdapter",
+    "IUGC2024Adapter", "JNUIFMAdapter", "PSFHSAdapter",
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
 ]

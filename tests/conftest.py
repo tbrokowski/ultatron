@@ -370,6 +370,106 @@ def build_jnu_ifm(root: Path):
         _save_png(_gray(8, 8), image_dir / f"{extra_stem}.png")
         _save_png(np.zeros((8, 8), dtype=np.uint8), mask_dir / f"{extra_stem}_mask.png")
 
+def build_iugc2024(root: Path):
+    """
+    Synthetic IUGC2024 `new/` layout covering train/val/test differences.
+    """
+    new_root = root / "new"
+
+    # Train: nested per-video mask folder and multiple labelled indices.
+    train = new_root / "train"
+    (train / "videos").mkdir(parents=True, exist_ok=True)
+    (train / "seg" / "trainvid" / "mask").mkdir(parents=True, exist_ok=True)
+    (train / "cls").mkdir(parents=True, exist_ok=True)
+    (train / "videos" / "trainvid.avi").write_bytes(b"\x00" * 64)
+    for frame_idx in (0, 9):
+        _save_png(_mask(8, 8), train / "seg" / "trainvid" / "mask" / f"trainvid_{frame_idx}_6.png")
+    with open(train / "train_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "pos", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "trainvid.avi", "pos": "TRUE", "frame_count": "80",
+                    "labeled_frame_count": "2", "labeled_frame_index": "0,9"})
+    with open(train / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_index"])
+        w.writeheader()
+        w.writerow({"filename": "trainvid.avi", "frame_count": "80",
+                    "labeled_frame_count": "2", "labeled_index": "0,9"})
+    with open(train / "cls" / "class_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "trainvid.avi", "frame_count": "80",
+                    "pos_index": "0,9", "neg_index": "NONE"})
+    (train / "seg" / "landmark.json").write_text(json.dumps({
+        "trainvid_0_6.png": {
+            "ps_points": [["69", "198"], ["84", "299"]],
+            "hsd_point": ["147", "294"],
+            "aop_tangency": ["174", "339"],
+            "hsd": 63.2,
+            "aop": 122.4,
+        }
+    }))
+
+    # Val: flat mask named <video>_<frame>.png and one labelled frame.
+    val = new_root / "val"
+    (val / "videos").mkdir(parents=True, exist_ok=True)
+    (val / "seg").mkdir(parents=True, exist_ok=True)
+    (val / "cls").mkdir(parents=True, exist_ok=True)
+    (val / "videos" / "valvid.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), val / "seg" / "valvid_6.png")
+    with open(val / "val_info.csv", "w", newline="") as f:
+        fields = ["filename", "SP_count", "NSP_count", "frame_count", "labeled_frame_count",
+                  "labeled_frame_index", "SP_index", "NSP_index"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({"filename": "valvid.avi", "SP_count": "2", "NSP_count": "1",
+                    "frame_count": "20", "labeled_frame_count": "1",
+                    "labeled_frame_index": "6", "SP_index": "[6, 7]", "NSP_index": "[0]"})
+    with open(val / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "valvid.avi", "frame_count": "20",
+                    "labeled_frame_count": "1", "labeled_frame_index": "6"})
+    with open(val / "cls" / "cls_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "valvid.avi", "frame_count": "20",
+                    "pos_index": "[6, 7]", "neg_index": "[0]"})
+    (val / "seg" / "landmark.json").write_text(json.dumps({
+        "valvid_6.png": {
+            "ps_points": [["10", "20"], ["11", "21"]],
+            "hsd_point": ["12", "22"],
+            "aop_tangency": ["13", "23"],
+            "hsd": 50.0,
+            "aop": 110.0,
+        }
+    }))
+
+    # Test: flat mask named <video>.png; stem contains frame index.
+    test = new_root / "test"
+    (test / "videos").mkdir(parents=True, exist_ok=True)
+    (test / "seg").mkdir(parents=True, exist_ok=True)
+    (test / "cls").mkdir(parents=True, exist_ok=True)
+    (test / "videos" / "test_10_80.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), test / "seg" / "test_10_80.png")
+    with open(test / "test_info.csv", "w", newline="") as f:
+        fields = ["filename", "SP_count", "NSP_count", "frame_count", "labeled_frame_count",
+                  "labeled_frame_index", "SP_index", "NSP_index"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "SP_count": "72", "NSP_count": "9",
+                    "frame_count": "81", "labeled_frame_count": "1",
+                    "labeled_frame_index": "80", "SP_index": "[9, 10, 80]", "NSP_index": "[0, 1]"})
+    with open(test / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
+                    "labeled_frame_count": "1", "labeled_frame_index": "80"})
+    with open(test / "cls" / "cls_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
+                    "pos_index": "ALL", "neg_index": "NONE"})
+
 def build_hc18(root: Path):
     """
     Synthetic HC18 dataset using the real naming convention.
@@ -617,6 +717,10 @@ def psfhs_root(data_root):
 @pytest.fixture(scope="session")
 def jnu_ifm_root(data_root):
     r = data_root / "JNU-IFM"; build_jnu_ifm(r); return r
+
+@pytest.fixture(scope="session")
+def iugc2024_root(data_root):
+    r = data_root / "IUGC2024"; build_iugc2024(r); return r
 
 @pytest.fixture(scope="session")
 def hc18_root(data_root):
