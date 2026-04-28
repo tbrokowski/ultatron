@@ -42,6 +42,50 @@ def _save_mhd(arr, path: Path):
             f"ElementType = MET_UCHAR\nElementDataFile = {raw.name}\n"
         )
 
+def _save_mha(arr, path: Path, *, vector_rgb: bool = False):
+    """Write a minimal uncompressed uint8 MHA file for adapter/loader tests."""
+    arr = np.asarray(arr, dtype=np.uint8)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if vector_rgb:
+        if arr.ndim != 3 or arr.shape[-1] not in (3, 4):
+            raise ValueError("vector_rgb expects H x W x C input")
+        h, w, c = arr.shape
+        header = (
+            "ObjectType = Image\n"
+            "NDims = 2\n"
+            f"DimSize = {w} {h}\n"
+            "ElementType = MET_UCHAR\n"
+            f"ElementNumberOfChannels = {c}\n"
+            "ElementSpacing = 1 1\n"
+            "Offset = 0 0\n"
+            "ElementDataFile = LOCAL\n"
+        )
+        payload = arr.tobytes(order="C")
+    else:
+        if arr.ndim == 2:
+            h, w = arr.shape
+            dim_size = f"{w} {h}"
+            spacing = "1 1"
+            offset = "0 0"
+        elif arr.ndim == 3:
+            z, h, w = arr.shape
+            dim_size = f"{w} {h} {z}"
+            spacing = "1 1 1"
+            offset = "0 0 0"
+        else:
+            raise ValueError("arr must be 2-D or 3-D")
+        header = (
+            "ObjectType = Image\n"
+            f"NDims = {arr.ndim}\n"
+            f"DimSize = {dim_size}\n"
+            "ElementType = MET_UCHAR\n"
+            f"ElementSpacing = {spacing}\n"
+            f"Offset = {offset}\n"
+            "ElementDataFile = LOCAL\n"
+        )
+        payload = arr.tobytes(order="C")
+    path.write_bytes(header.encode("ascii") + payload)
+
 
 # ── dataset layout builders ───────────────────────────────────────────────────
 def build_camus(root: Path, n=4):
@@ -243,6 +287,40 @@ def build_focus(root: Path):
             "[1, 1, 4, 1, 4, 5, 1, 5] cardiac 0\n"
             "[3, 3, 7, 3, 7, 7, 3, 7] thorax 1\n"
         )
+
+def build_psfhs(root: Path):
+    """
+    Synthetic PSFHS layout nested under PSFHS/.
+
+    00001 uses a vector RGB MHA image.
+    00002 uses a 3-plane MHA image to exercise channel-first handling.
+    00003 has no label mask to exercise the ssl_only path.
+    """
+    inner = root / "PSFHS"
+    img_dir = inner / "image_mha"
+    label_dir = inner / "label_mha"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    label_dir.mkdir(parents=True, exist_ok=True)
+
+    rgb_hwc = np.zeros((8, 8, 3), dtype=np.uint8)
+    rgb_hwc[..., 0] = 10
+    rgb_hwc[..., 1] = 80
+    rgb_hwc[..., 2] = 200
+    _save_mha(rgb_hwc, img_dir / "00001.mha", vector_rgb=True)
+
+    rgb_chw = np.zeros((3, 8, 8), dtype=np.uint8)
+    rgb_chw[0] = 20
+    rgb_chw[1] = 90
+    rgb_chw[2] = 220
+    _save_mha(rgb_chw, img_dir / "00002.mha")
+
+    _save_mha(rgb_hwc, img_dir / "00003.mha", vector_rgb=True)
+
+    for stem in ("00001", "00002"):
+        label = np.zeros((8, 8), dtype=np.uint8)
+        label[1:4, 1:4] = 1
+        label[4:7, 4:7] = 2
+        _save_mha(label, label_dir / f"{stem}.mha")
 
 def build_hc18(root: Path):
     """
@@ -483,6 +561,10 @@ def fpus23_root(data_root):
 @pytest.fixture(scope="session")
 def focus_root(data_root):
     r = data_root / "FOCUS"; build_focus(r); return r
+
+@pytest.fixture(scope="session")
+def psfhs_root(data_root):
+    r = data_root / "PSFHS-parent"; build_psfhs(r); return r
 
 @pytest.fixture(scope="session")
 def hc18_root(data_root):

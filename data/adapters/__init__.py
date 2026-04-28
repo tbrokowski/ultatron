@@ -35,6 +35,7 @@ from .maternal_fetal.focus                      import FOCUSAdapter
 from .maternal_fetal.fpus23                     import FPUS23Adapter
 from .maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 from .maternal_fetal.hc18                       import HC18Adapter
+from .maternal_fetal.psfhs                      import PSFHSAdapter
 
 # Registry: dataset_id -> adapter class
 ADAPTER_REGISTRY = {
@@ -63,6 +64,7 @@ ADAPTER_REGISTRY = {
     "FPUS23":                   FPUS23Adapter,
     "FH-PS-AOP":                FHPSAOPAdapter,
     "HC18":                     HC18Adapter,
+    "PSFHS":                    PSFHSAdapter,
 }
 
 
@@ -108,6 +110,7 @@ __all__ = [
     # Maternal / fetal
     "ACOUSLICAIAdapter", "FASSAdapter", "FetalPlanesDBAdapter",
     "FOCUSAdapter", "FPUS23Adapter", "FHPSAOPAdapter", "HC18Adapter",
+    "PSFHSAdapter",
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
 ]

@@ -20,6 +20,7 @@ from data.adapters.maternal_fetal.focus                      import FOCUSAdapter
 from data.adapters.maternal_fetal.fpus23                     import FPUS23Adapter
 from data.adapters.maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 from data.adapters.maternal_fetal.hc18                       import HC18Adapter
+from data.adapters.maternal_fetal.psfhs                      import PSFHSAdapter
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -623,3 +624,81 @@ def test_focus_no_mask_entry_keeps_geometry(focus_root: Path):
 def test_focus_split_override(focus_root: Path):
     entries = list(FOCUSAdapter(focus_root, split_override="test").iter_entries())
     assert all(e.split == "test" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PSFHS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_psfhs_yields_all_images(psfhs_root: Path):
+    entries = list(PSFHSAdapter(psfhs_root).iter_entries())
+    assert len(entries) == 3
+
+
+def test_psfhs_schema(psfhs_root: Path):
+    entries = list(PSFHSAdapter(psfhs_root).iter_entries())
+    for e in entries:
+        assert e.dataset_id == "PSFHS"
+        assert e.anatomy_family == "intrapartum"
+        assert e.modality_type == "image"
+        assert e.view_type == "intrapartum_transperineal"
+        assert e.ssl_stream == "image"
+        assert e.curriculum_tier in (1, 2, 3)
+
+
+def test_psfhs_segmentation_instances(psfhs_root: Path):
+    entries = {e.series_id: e for e in PSFHSAdapter(psfhs_root).iter_entries()}
+
+    for stem in ("00001", "00002"):
+        e = entries[stem]
+        assert e.has_mask is True
+        assert e.task_type == "segmentation"
+        assert e.is_promptable is True
+        assert len(e.instances) == 2
+        assert {inst.label_ontology for inst in e.instances} == {"pubic_symphysis", "fetal_head"}
+        assert {inst.mask_channel for inst in e.instances} == {1, 2}
+        assert len({inst.mask_path for inst in e.instances}) == 1
+        assert e.instances[0].mask_path.endswith(".mha")
+
+
+def test_psfhs_ssl_only_missing_label(psfhs_root: Path):
+    entries = {e.series_id: e for e in PSFHSAdapter(psfhs_root).iter_entries()}
+    e = entries["00003"]
+
+    assert e.has_mask is False
+    assert e.task_type == "ssl_only"
+    assert e.instances == []
+
+
+def test_psfhs_mha_header_metadata(psfhs_root: Path):
+    entries = {e.series_id: e for e in PSFHSAdapter(psfhs_root).iter_entries()}
+    e = entries["00001"]
+
+    assert e.source_meta["image_dim_size"] == "8 8"
+    assert e.source_meta["image_channels"] == "3"
+    assert e.source_meta["image_spacing"] == "1 1"
+    assert e.source_meta["image_origin"] == "0 0"
+    assert e.source_meta["label_dim_size"] == "8 8"
+    assert e.source_meta["label_element_type"] == "MET_UCHAR"
+
+
+def test_psfhs_resolve_root_direct(psfhs_root: Path):
+    entries = list(PSFHSAdapter(psfhs_root / "PSFHS").iter_entries())
+    assert len(entries) == 3
+
+
+def test_psfhs_split_override(psfhs_root: Path):
+    entries = list(PSFHSAdapter(psfhs_root, split_override="val").iter_entries())
+    assert all(e.split == "val" for e in entries)
+
+
+def test_psfhs_mha_rgb_loader_preserves_channels(psfhs_root: Path):
+    from data.pipeline.dataset import load_image
+
+    vector_rgb = load_image(str(psfhs_root / "PSFHS" / "image_mha" / "00001.mha"))
+    channel_first_rgb = load_image(str(psfhs_root / "PSFHS" / "image_mha" / "00002.mha"))
+
+    assert vector_rgb.shape == (8, 8, 3)
+    assert channel_first_rgb.shape == (8, 8, 3)
+    assert vector_rgb[0, 0].tolist() == [10, 80, 200]
+    assert channel_first_rgb[0, 0].tolist() == [20, 90, 220]
