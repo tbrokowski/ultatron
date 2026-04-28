@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.adapters.maternal_fetal.acouslic                   import ACOUSLICAIAdapter
 from data.adapters.maternal_fetal.fetal_abdominal_structures import FASSAdapter
 from data.adapters.maternal_fetal.fetal_planes_db            import FetalPlanesDBAdapter
+from data.adapters.maternal_fetal.fpus23                     import FPUS23Adapter
 from data.adapters.maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 from data.adapters.maternal_fetal.hc18                       import HC18Adapter
 
@@ -409,4 +410,108 @@ def test_fetal_planes_db_resolve_root_from_parent(fetal_planes_root: Path):
 
 def test_fetal_planes_db_split_override(fetal_planes_root: Path):
     entries = list(FetalPlanesDBAdapter(fetal_planes_root, split_override="val").iter_entries())
+    assert all(e.split == "val" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FPUS23
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_fpus23_yields_pose_frames_and_plane_images(fpus23_root: Path):
+    entries = list(FPUS23Adapter(fpus23_root).iter_entries())
+    pose_entries = [e for e in entries if e.source_meta["sub_dataset"] == "Dataset"]
+    plane_entries = [e for e in entries if e.source_meta["sub_dataset"] == "Dataset_Plane"]
+
+    assert len(entries) == 14
+    assert len(pose_entries) == 6
+    assert len(plane_entries) == 8
+
+
+def test_fpus23_schema(fpus23_root: Path):
+    entries = list(FPUS23Adapter(fpus23_root).iter_entries())
+    for e in entries:
+        assert e.dataset_id == "FPUS23"
+        assert e.anatomy_family == "fetal_planes"
+        assert e.modality_type == "image"
+        assert e.ssl_stream == "image"
+        assert e.curriculum_tier in (1, 2, 3)
+        assert len(e.image_paths) == 1
+
+
+def test_fpus23_pose_detection_entries(fpus23_root: Path):
+    entries = {
+        (e.source_meta.get("stream_name"), e.source_meta.get("frame_name")): e
+        for e in FPUS23Adapter(fpus23_root).iter_entries()
+        if e.source_meta["sub_dataset"] == "Dataset"
+    }
+
+    e = entries[("stream_hdvb_aroundabd_h", "frame_000000.png")]
+    assert e.task_type == "detection"
+    assert e.has_box is True
+    assert e.is_promptable is True
+    assert e.study_id == "stream_hdvb_aroundabd_h"
+    assert e.series_id == "stream_hdvb_aroundabd_h"
+    assert e.frame_indices == [0]
+
+    orientation = [inst for inst in e.instances if inst.label_ontology == "fetal_pose_orientation"]
+    boxes = [inst for inst in e.instances if inst.bbox_xyxy is not None]
+    assert orientation[0].label_raw == "hdvb"
+    assert orientation[0].classification_label == 0
+    assert {box.label_raw for box in boxes} == {"abdomen", "arm"}
+    assert boxes[0].bbox_xyxy == pytest.approx([1.0, 1.0, 5.0, 6.0])
+    assert e.source_meta["probe_orientation"] == "h"
+    assert e.source_meta["view_fetus"] == "abdomen"
+
+
+def test_fpus23_pose_tag_only_entries(fpus23_root: Path):
+    entries = {
+        (e.source_meta.get("stream_name"), e.source_meta.get("frame_name")): e
+        for e in FPUS23Adapter(fpus23_root).iter_entries()
+        if e.source_meta["sub_dataset"] == "Dataset"
+    }
+
+    e = entries[("stream_huvb_aroundhead_v", "frame_000001.png")]
+    assert e.task_type == "classification"
+    assert e.has_box is False
+    assert e.is_promptable is False
+    assert len(e.instances) == 1
+    assert e.instances[0].label_raw == "huvb"
+    assert e.instances[0].classification_label == 1
+    assert e.source_meta["probe_orientation"] == "v"
+
+
+def test_fpus23_stream_level_splitting(fpus23_root: Path):
+    entries = [
+        e for e in FPUS23Adapter(fpus23_root).iter_entries()
+        if e.source_meta["sub_dataset"] == "Dataset"
+    ]
+    by_stream = {}
+    for e in entries:
+        by_stream.setdefault(e.study_id, set()).add(e.split)
+
+    assert by_stream
+    assert all(len(splits) == 1 for splits in by_stream.values())
+
+
+def test_fpus23_plane_classification_entries(fpus23_root: Path):
+    plane_entries = [
+        e for e in FPUS23Adapter(fpus23_root).iter_entries()
+        if e.source_meta["sub_dataset"] == "Dataset_Plane"
+    ]
+
+    assert {e.source_meta["plane_class"] for e in plane_entries} == {
+        "AC_PLANE", "BPD_PLANE", "FL_PLANE", "NO_PLANE"
+    }
+    assert {e.instances[0].classification_label for e in plane_entries} == {0, 1, 2, 3}
+    assert all(e.task_type == "classification" for e in plane_entries)
+    assert all(e.has_box is False for e in plane_entries)
+
+
+def test_fpus23_resolve_root_direct_archive(fpus23_root: Path):
+    entries = list(FPUS23Adapter(fpus23_root / "archive").iter_entries())
+    assert len(entries) == 14
+
+
+def test_fpus23_split_override(fpus23_root: Path):
+    entries = list(FPUS23Adapter(fpus23_root, split_override="val").iter_entries())
     assert all(e.split == "val" for e in entries)

@@ -132,6 +132,68 @@ def build_fetal_planes(root: Path, n=12):
         )
         w.writeheader(); w.writerows(rows)
 
+def build_fpus23(root: Path):
+    """
+    Synthetic FPUS23 archive with both sub-datasets:
+      - Dataset/four_poses: 3 streams, 2 frames each, CVAT XML annotations.
+      - Dataset_Plane: 4 classes, 2 images each.
+    """
+    archive = root / "archive"
+    poses_root = archive / "Dataset" / "four_poses"
+    boxes_root = archive / "Dataset" / "boxes" / "annotation"
+    annos_root = archive / "Dataset" / "annos" / "annotation"
+    plane_root = archive / "Dataset_Plane"
+
+    streams = [
+        ("stream_hdvb_aroundabd_h", "hdvb", "h"),
+        ("stream_huvb_aroundhead_v", "huvb", "v"),
+        ("stream_hdvf_longrec_h", "hdvf", "h"),
+    ]
+
+    rgb = np.stack([_gray(8, 8)] * 3, axis=-1)
+    for stream_name, pose, probe in streams:
+        stream_dir = poses_root / stream_name
+        box_dir = boxes_root / stream_name
+        anno_dir = annos_root / stream_name
+        stream_dir.mkdir(parents=True, exist_ok=True)
+        box_dir.mkdir(parents=True, exist_ok=True)
+        anno_dir.mkdir(parents=True, exist_ok=True)
+
+        for i in range(2):
+            _save_png(rgb, stream_dir / f"frame_{i:06d}.png")
+
+        boxes_xml = f"""<annotations>
+  <image id="0" name="frame_000000.png" width="8" height="8">
+    <box label="abdomen" xtl="1.0" ytl="1.0" xbr="5.0" ybr="6.0" />
+    <box label="arm" xtl="2.0" ytl="2.0" xbr="4.0" ybr="4.0" />
+    <tag label="Orientation"><attribute name="Pose">{pose}</attribute></tag>
+    <tag label="Probe"><attribute name="orientation">{probe}</attribute></tag>
+    <tag label="location"><attribute name="View_fetus">abdomen</attribute></tag>
+  </image>
+  <image id="1" name="frame_000001.png" width="8" height="8">
+    <tag label="Orientation"><attribute name="Pose">{pose}</attribute></tag>
+    <tag label="Probe"><attribute name="orientation">{probe}</attribute></tag>
+  </image>
+</annotations>
+"""
+        annos_xml = f"""<annotations>
+  <image id="0" name="frame_000000.png" width="8" height="8">
+    <tag label="Orientation"><attribute name="Pose">{pose}</attribute></tag>
+  </image>
+  <image id="1" name="frame_000001.png" width="8" height="8">
+    <tag label="Orientation"><attribute name="Pose">{pose}</attribute></tag>
+  </image>
+</annotations>
+"""
+        (box_dir / "annotations.xml").write_text(boxes_xml)
+        (anno_dir / "annotations.xml").write_text(annos_xml)
+
+    for class_name in ("AC_PLANE", "BPD_PLANE", "FL_PLANE", "NO_PLANE"):
+        class_dir = plane_root / class_name
+        class_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(2):
+            _save_png(rgb, class_dir / f"{class_name.lower()}_{i}.png")
+
 def build_hc18(root: Path):
     """
     Synthetic HC18 dataset using the real naming convention.
@@ -363,6 +425,10 @@ def covidx_root(data_root):
 @pytest.fixture(scope="session")
 def fetal_planes_root(data_root):
     r = data_root / "FETAL_PLANES_DB"; build_fetal_planes(r); return r
+
+@pytest.fixture(scope="session")
+def fpus23_root(data_root):
+    r = data_root / "FPUS23"; build_fpus23(r); return r
 
 @pytest.fixture(scope="session")
 def hc18_root(data_root):

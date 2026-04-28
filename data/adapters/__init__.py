@@ -31,6 +31,7 @@ from .lung.rsa_lus   import RSALUSAdapter
 from .maternal_fetal.acouslic                   import ACOUSLICAIAdapter
 from .maternal_fetal.fetal_abdominal_structures import FASSAdapter
 from .maternal_fetal.fetal_planes_db            import FetalPlanesDBAdapter
+from .maternal_fetal.fpus23                     import FPUS23Adapter
 from .maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 from .maternal_fetal.hc18                       import HC18Adapter
 
@@ -57,6 +58,7 @@ ADAPTER_REGISTRY = {
     "ACOUSLIC-AI":              ACOUSLICAIAdapter,
     "FASS":                     FASSAdapter,
     "FETAL_PLANES_DB":          FetalPlanesDBAdapter,
+    "FPUS23":                   FPUS23Adapter,
     "FH-PS-AOP":                FHPSAOPAdapter,
     "HC18":                     HC18Adapter,
 }
@@ -103,7 +105,7 @@ __all__ = [
     "BeninLUSAdapter", "RSALUSAdapter",
     # Maternal / fetal
     "ACOUSLICAIAdapter", "FASSAdapter", "FetalPlanesDBAdapter",
-    "FHPSAOPAdapter", "HC18Adapter",
+    "FPUS23Adapter", "FHPSAOPAdapter", "HC18Adapter",
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
 ]
