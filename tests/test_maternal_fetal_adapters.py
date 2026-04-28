@@ -20,6 +20,7 @@ from data.adapters.maternal_fetal.focus                      import FOCUSAdapter
 from data.adapters.maternal_fetal.fpus23                     import FPUS23Adapter
 from data.adapters.maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 from data.adapters.maternal_fetal.hc18                       import HC18Adapter
+from data.adapters.maternal_fetal.jnu_ifm                    import JNUIFMAdapter
 from data.adapters.maternal_fetal.psfhs                      import PSFHSAdapter
 
 
@@ -689,4 +690,125 @@ def test_psfhs_resolve_root_direct(psfhs_root: Path):
 
 def test_psfhs_split_override(psfhs_root: Path):
     entries = list(PSFHSAdapter(psfhs_root, split_override="val").iter_entries())
+    assert all(e.split == "val" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JNU-IFM
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_jnu_ifm_uses_csv_frame_list(jnu_ifm_root: Path):
+    entries = list(JNUIFMAdapter(jnu_ifm_root).iter_entries())
+    assert len(entries) == 5
+    assert "20190830T115515_999" not in {e.series_id for e in entries}
+
+
+def test_jnu_ifm_schema(jnu_ifm_root: Path):
+    entries = list(JNUIFMAdapter(jnu_ifm_root).iter_entries())
+    for e in entries:
+        assert e.dataset_id == "JNU-IFM"
+        assert e.anatomy_family == "intrapartum"
+        assert e.modality_type == "image"
+        assert e.view_type == "intrapartum_transperineal"
+        assert e.has_mask is True
+        assert e.task_type == "segmentation"
+        assert e.ssl_stream == "image"
+        assert e.curriculum_tier in (1, 2, 3)
+
+
+def test_jnu_ifm_video_level_splitting(jnu_ifm_root: Path):
+    entries = list(JNUIFMAdapter(jnu_ifm_root).iter_entries())
+    by_video = {}
+    for e in entries:
+        by_video.setdefault(e.study_id, set()).add(e.split)
+
+    assert by_video
+    assert all(len(splits) == 1 for splits in by_video.values())
+
+
+def test_jnu_ifm_frame_label_mapping(jnu_ifm_root: Path):
+    entries = {e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()}
+
+    expected = {
+        "20190830T115515_169": ("none", 0),
+        "20190830T115515_170": ("only_sp", 1),
+        "20190918T123342_10": ("only_head", 2),
+        "20190830T115515_171": ("sp_head", 3),
+    }
+    for series_id, (label_raw, label_idx) in expected.items():
+        cls_inst = next(inst for inst in entries[series_id].instances
+                        if inst.label_ontology == "jnu_ifm_frame_visibility")
+        assert cls_inst.label_raw == label_raw
+        assert cls_inst.classification_label == label_idx
+
+
+def test_jnu_ifm_segmentation_instances(jnu_ifm_root: Path):
+    entries = {e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()}
+    e = entries["20190830T115515_171"]
+
+    seg_instances = [
+        inst for inst in e.instances
+        if inst.label_ontology in {"pubic_symphysis", "fetal_head"}
+    ]
+    assert len(seg_instances) == 2
+    assert {inst.mask_channel for inst in seg_instances} == {1, 2}
+    assert all(inst.mask_path.endswith(".npy") for inst in seg_instances)
+    assert all(inst.is_promptable is True for inst in seg_instances)
+
+
+def test_jnu_ifm_promptability_tracks_frame_label(jnu_ifm_root: Path):
+    entries = {e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()}
+
+    none_entry = entries["20190830T115515_169"]
+    only_sp_entry = entries["20190830T115515_170"]
+    only_head_entry = entries["20190918T123342_10"]
+
+    def flags(entry):
+        return {
+            inst.label_ontology: inst.is_promptable
+            for inst in entry.instances
+            if inst.label_ontology in {"pubic_symphysis", "fetal_head"}
+        }
+
+    assert flags(none_entry) == {"pubic_symphysis": False, "fetal_head": False}
+    assert flags(only_sp_entry) == {"pubic_symphysis": True, "fetal_head": False}
+    assert flags(only_head_entry) == {"pubic_symphysis": False, "fetal_head": True}
+
+
+def test_jnu_ifm_remaps_raw_mask_values(jnu_ifm_root: Path):
+    import numpy as np
+
+    entries = {e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()}
+    e = entries["20190830T115515_171"]
+    mask_path = next(inst.mask_path for inst in e.instances if inst.mask_path)
+    mapped = np.load(mask_path)
+
+    assert set(np.unique(mapped).tolist()) == {0, 1, 2}
+    assert mapped[1:4, 1:4].max() == 1
+    assert mapped[4:7, 4:7].max() == 2
+    assert e.source_meta["mask_value_mapping"] == {"7": 1, "8": 2}
+
+
+def test_jnu_ifm_source_meta(jnu_ifm_root: Path):
+    entries = {e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()}
+    e = entries["20190830T115515_170"]
+
+    assert e.study_id == "20190830T115515"
+    assert e.frame_indices == [170]
+    assert e.source_meta["video_id"] == "20190830T115515"
+    assert e.source_meta["frame_id"] == 170
+    assert e.source_meta["frame_label_raw"] == 4
+    assert e.source_meta["frame_label"] == "only_sp"
+    assert e.source_meta["frame_label_index"] == 1
+    assert e.source_meta["mask_enhance_ignored"] is True
+    assert e.source_meta["is_grayscale"] is True
+
+
+def test_jnu_ifm_resolve_us_data_direct(jnu_ifm_root: Path):
+    entries = list(JNUIFMAdapter(jnu_ifm_root / "us_data").iter_entries())
+    assert len(entries) == 5
+
+
+def test_jnu_ifm_split_override(jnu_ifm_root: Path):
+    entries = list(JNUIFMAdapter(jnu_ifm_root, split_override="val").iter_entries())
     assert all(e.split == "val" for e in entries)

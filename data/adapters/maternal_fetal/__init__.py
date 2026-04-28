@@ -9,6 +9,7 @@ from .focus                      import FOCUSAdapter
 from .fpus23                     import FPUS23Adapter
 from .fh_ps_aop                  import FHPSAOPAdapter
 from .hc18                       import HC18Adapter
+from .jnu_ifm                    import JNUIFMAdapter
 from .psfhs                      import PSFHSAdapter
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "FPUS23Adapter",
     "FHPSAOPAdapter",
     "HC18Adapter",
+    "JNUIFMAdapter",
     "PSFHSAdapter",
 ]

@@ -322,6 +322,54 @@ def build_psfhs(root: Path):
         label[4:7, 4:7] = 2
         _save_mha(label, label_dir / f"{stem}.mha")
 
+def build_jnu_ifm(root: Path):
+    """
+    Synthetic JNU-IFM us_data layout with two video/session folders.
+
+    CSV rows are the source of truth; one extra image outside the CSV is ignored.
+    Raw mask values use 7 for SP and 8 for fetal head.
+    """
+    us_data = root / "us_data"
+    sessions = {
+        "20190830T115515": [(169, 3), (170, 4), (171, 6)],
+        "20190918T123342": [(10, 5), (11, 6)],
+    }
+
+    for video_id, rows in sessions.items():
+        session = us_data / video_id
+        image_dir = session / "image"
+        mask_dir = session / "mask"
+        enhance_dir = session / "mask_enhance"
+        image_dir.mkdir(parents=True, exist_ok=True)
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        enhance_dir.mkdir(parents=True, exist_ok=True)
+
+        with open(session / "frame_label.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["", "frame_id", "frame_label"])
+            w.writeheader()
+            for idx, (frame_id, frame_label) in enumerate(rows):
+                stem = f"{video_id}_{frame_id}"
+                _save_png(_gray(8, 8), image_dir / f"{stem}.png")
+
+                mask = np.zeros((8, 8), dtype=np.uint8)
+                if frame_label in (4, 6):
+                    mask[1:4, 1:4] = 7
+                if frame_label in (5, 6):
+                    mask[4:7, 4:7] = 8
+                _save_png(mask, mask_dir / f"{stem}_mask.png")
+
+                enhanced = np.zeros((8, 8, 3), dtype=np.uint8)
+                enhanced[..., 0] = (mask == 7) * 128
+                enhanced[..., 1] = (mask == 8) * 255
+                _save_png(enhanced, enhance_dir / f"{stem}_mask.png")
+
+                w.writerow({"": idx, "frame_id": frame_id, "frame_label": frame_label})
+
+        # Extra image/mask not listed in CSV; adapter should ignore it.
+        extra_stem = f"{video_id}_999"
+        _save_png(_gray(8, 8), image_dir / f"{extra_stem}.png")
+        _save_png(np.zeros((8, 8), dtype=np.uint8), mask_dir / f"{extra_stem}_mask.png")
+
 def build_hc18(root: Path):
     """
     Synthetic HC18 dataset using the real naming convention.
@@ -565,6 +613,10 @@ def focus_root(data_root):
 @pytest.fixture(scope="session")
 def psfhs_root(data_root):
     r = data_root / "PSFHS-parent"; build_psfhs(r); return r
+
+@pytest.fixture(scope="session")
+def jnu_ifm_root(data_root):
+    r = data_root / "JNU-IFM"; build_jnu_ifm(r); return r
 
 @pytest.fixture(scope="session")
 def hc18_root(data_root):
