@@ -194,6 +194,56 @@ def build_fpus23(root: Path):
         for i in range(2):
             _save_png(rgb, class_dir / f"{class_name.lower()}_{i}.png")
 
+def build_focus(root: Path):
+    """
+    Synthetic FOCUS dataset across official split folders.
+
+    training/001 has both masks.
+    training/002 has only cardiac mask to test zero-filled missing thorax.
+    validation/003 has only thorax mask.
+    testing/004 has no masks but has rectangle annotations.
+    """
+    samples = [
+        ("training", "001", ("cardiac", "thorax"), True),
+        ("training", "002", ("cardiac",), True),
+        ("validation", "003", ("thorax",), True),
+        ("testing", "004", (), False),
+    ]
+
+    for split_dir, stem, masks, grayscale in samples:
+        base = root / split_dir
+        img_dir = base / "images"
+        mask_dir = base / "annfiles_mask"
+        ellipse_dir = base / "annfiles_ellipse"
+        rectangle_dir = base / "annfiles_rectangle"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        ellipse_dir.mkdir(parents=True, exist_ok=True)
+        rectangle_dir.mkdir(parents=True, exist_ok=True)
+
+        if grayscale:
+            _save_png(_gray(8, 8), img_dir / f"{stem}.png")
+        else:
+            rgb = np.stack([_gray(8, 8)] * 3, axis=-1)
+            _save_png(rgb, img_dir / f"{stem}.png")
+
+        for mask_name in masks:
+            mask = np.zeros((8, 8), dtype=np.uint8)
+            if mask_name == "cardiac":
+                mask[1:4, 1:4] = 255
+            else:
+                mask[4:7, 4:7] = 255
+            _save_png(mask, mask_dir / f"{stem}-{mask_name}.png")
+
+        (ellipse_dir / f"{stem}.txt").write_text(
+            "[4, 4, 2, 3, 15] cardiac\n"
+            "[5, 5, 3, 2, 20] thorax\n"
+        )
+        (rectangle_dir / f"{stem}.txt").write_text(
+            "[1, 1, 4, 1, 4, 5, 1, 5] cardiac 0\n"
+            "[3, 3, 7, 3, 7, 7, 3, 7] thorax 1\n"
+        )
+
 def build_hc18(root: Path):
     """
     Synthetic HC18 dataset using the real naming convention.
@@ -429,6 +479,10 @@ def fetal_planes_root(data_root):
 @pytest.fixture(scope="session")
 def fpus23_root(data_root):
     r = data_root / "FPUS23"; build_fpus23(r); return r
+
+@pytest.fixture(scope="session")
+def focus_root(data_root):
+    r = data_root / "FOCUS"; build_focus(r); return r
 
 @pytest.fixture(scope="session")
 def hc18_root(data_root):

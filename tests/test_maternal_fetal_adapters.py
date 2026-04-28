@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.adapters.maternal_fetal.acouslic                   import ACOUSLICAIAdapter
 from data.adapters.maternal_fetal.fetal_abdominal_structures import FASSAdapter
 from data.adapters.maternal_fetal.fetal_planes_db            import FetalPlanesDBAdapter
+from data.adapters.maternal_fetal.focus                      import FOCUSAdapter
 from data.adapters.maternal_fetal.fpus23                     import FPUS23Adapter
 from data.adapters.maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 from data.adapters.maternal_fetal.hc18                       import HC18Adapter
@@ -515,3 +516,110 @@ def test_fpus23_resolve_root_direct_archive(fpus23_root: Path):
 def test_fpus23_split_override(fpus23_root: Path):
     entries = list(FPUS23Adapter(fpus23_root, split_override="val").iter_entries())
     assert all(e.split == "val" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FOCUS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_focus_yields_all_split_images(focus_root: Path):
+    entries = list(FOCUSAdapter(focus_root).iter_entries())
+    assert len(entries) == 4
+    assert {e.split for e in entries} == {"train", "val", "test"}
+
+
+def test_focus_schema(focus_root: Path):
+    entries = list(FOCUSAdapter(focus_root).iter_entries())
+    for e in entries:
+        assert e.dataset_id == "FOCUS"
+        assert e.anatomy_family == "fetal_cardiac"
+        assert e.modality_type == "image"
+        assert e.view_type == "fetal_cardiothoracic"
+        assert e.ssl_stream == "image"
+        assert e.curriculum_tier in (1, 2, 3)
+
+
+def test_focus_multi_channel_mask_instances(focus_root: Path):
+    entries = {e.series_id: e for e in FOCUSAdapter(focus_root).iter_entries()}
+    e = entries["001"]
+
+    assert e.has_mask is True
+    assert e.task_type == "segmentation"
+    assert e.is_promptable is True
+    assert len(e.instances) == 2
+    assert {inst.label_raw for inst in e.instances} == {"cardiac", "thorax"}
+    assert {inst.label_ontology for inst in e.instances} == {"fetal_cardiac", "fetal_thorax"}
+    assert {inst.mask_channel for inst in e.instances} == {0, 1}
+
+    mask_paths = {inst.mask_path for inst in e.instances}
+    assert len(mask_paths) == 1
+    mask_path = Path(mask_paths.pop())
+    assert mask_path.exists()
+    assert mask_path.suffix == ".npy"
+
+    import numpy as np
+    stack = np.load(mask_path)
+    assert stack.shape == (2, 8, 8)
+    assert stack[0].sum() > 0
+    assert stack[1].sum() > 0
+
+
+def test_focus_missing_class_mask_is_zero_channel(focus_root: Path):
+    entries = {e.series_id: e for e in FOCUSAdapter(focus_root).iter_entries()}
+    e = entries["002"]
+
+    assert e.has_mask is True
+    assert e.source_meta["missing_mask_classes"] == ["thorax"]
+
+    import numpy as np
+    stack = np.load(e.instances[0].mask_path)
+    assert stack.shape == (2, 8, 8)
+    assert stack[0].sum() > 0
+    assert stack[1].sum() == 0
+
+
+def test_focus_rectangle_annotations_are_axis_aligned_boxes(focus_root: Path):
+    entries = {e.series_id: e for e in FOCUSAdapter(focus_root).iter_entries()}
+    e = entries["001"]
+
+    cardiac = next(inst for inst in e.instances if inst.label_raw == "cardiac")
+    thorax = next(inst for inst in e.instances if inst.label_raw == "thorax")
+    assert cardiac.bbox_xyxy == pytest.approx([1.0, 1.0, 4.0, 5.0])
+    assert thorax.bbox_xyxy == pytest.approx([3.0, 3.0, 7.0, 7.0])
+    assert e.has_box is True
+    assert e.source_meta["rectangles"][0]["points"] == [
+        [1.0, 1.0], [4.0, 1.0], [4.0, 5.0], [1.0, 5.0]
+    ]
+
+
+def test_focus_ellipse_annotations_in_source_meta(focus_root: Path):
+    entries = {e.series_id: e for e in FOCUSAdapter(focus_root).iter_entries()}
+    ellipses = entries["001"].source_meta["ellipses"]
+
+    assert len(ellipses) == 2
+    assert ellipses[0]["label"] == "cardiac"
+    assert ellipses[0]["center_x"] == pytest.approx(4.0)
+    assert ellipses[0]["axis_a"] == pytest.approx(2.0)
+
+
+def test_focus_grayscale_flag(focus_root: Path):
+    entries = {e.series_id: e for e in FOCUSAdapter(focus_root).iter_entries()}
+    assert entries["001"].source_meta["is_grayscale"] is True
+    assert entries["004"].source_meta["is_grayscale"] is False
+
+
+def test_focus_no_mask_entry_keeps_geometry(focus_root: Path):
+    entries = {e.series_id: e for e in FOCUSAdapter(focus_root).iter_entries()}
+    e = entries["004"]
+
+    assert e.has_mask is False
+    assert e.has_box is True
+    assert e.task_type == "detection"
+    assert e.is_promptable is True
+    assert len(e.instances) == 0
+    assert e.source_meta["missing_mask_classes"] == ["cardiac", "thorax"]
+
+
+def test_focus_split_override(focus_root: Path):
+    entries = list(FOCUSAdapter(focus_root, split_override="test").iter_entries())
+    assert all(e.split == "test" for e in entries)
