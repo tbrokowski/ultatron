@@ -85,15 +85,51 @@ def build_covidx(root: Path, n=4):
 
 def build_fetal_planes(root: Path, n=12):
     (root / "Images").mkdir(parents=True, exist_ok=True)
-    planes = ["Fetal abdomen","Fetal brain","Fetal femur","Fetal thorax","Maternal cervix","Other"]
+    planes = [
+        ("Patient00001_Plane1_1_of_2", "Other",           "Not A Brain",       "1", "Op. 1", "Voluson E6"),
+        ("Patient00001_Plane2_2_of_2", "Fetal brain",     "Trans-thalamic",    "1", "Op. 1", "Voluson E6"),
+        ("Patient00002_Plane3_1_of_1", "Fetal abdomen",   "Not A Brain",       "1", "Op. 2", "Aloka"),
+        ("Patient00003_Plane4_1_of_1", "Fetal femur",     "Not A Brain",       "1", "Op. 3", "Voluson S10"),
+        ("Patient00004_Plane5_1_of_1", "Fetal thorax",    "Not A Brain",       "0", "Other", "Other"),
+        ("Patient00005_Plane6_1_of_1", "Maternal cervix", "Not A Brain",       "0", "Op. 2", "Aloka"),
+    ]
     rows = []
-    for i in range(n):
-        stem = f"img_{i:04d}"
-        _save_png(_gray(), root / "Images" / f"{stem}.png")
-        rows.append({"Image_name": stem, "Plane": planes[i % len(planes)],
-                     "Patient_num": str(i // 2), "Train": "1" if i < 9 else "0"})
+    for idx, (stem, plane, brain_plane, train_flag, operator, machine) in enumerate(planes, start=1):
+        if PIL_OK:
+            Image.fromarray(np.zeros((8, 8, 4), dtype=np.uint8)).save(
+                root / "Images" / f"{stem}.png"
+            )
+        else:
+            _save_png(_gray(8, 8), root / "Images" / f"{stem}.png")
+        rows.append({
+            "Image_name": stem,
+            "Patient_num": str(idx if idx > 2 else 1),
+            "Plane": plane,
+            "Brain_plane": brain_plane,
+            "Operator": operator,
+            "US_Machine": machine,
+            "Train ": f"{train_flag} ",
+        })
+
+    # This metadata row should be ignored because its image is absent.
+    rows.append({
+        "Image_name": "Patient99999_Plane1_1_of_1",
+        "Patient_num": "99999",
+        "Plane": "Other",
+        "Brain_plane": "Not A Brain",
+        "Operator": "Other",
+        "US_Machine": "Other",
+        "Train ": "1 ",
+    })
     with open(root / "FETAL_PLANES_DB_data.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["Image_name","Plane","Patient_num","Train"], delimiter=";")
+        w = csv.DictWriter(
+            f,
+            fieldnames=[
+                "Image_name", "Patient_num", "Plane", "Brain_plane",
+                "Operator", "US_Machine", "Train ",
+            ],
+            delimiter=";",
+        )
         w.writeheader(); w.writerows(rows)
 
 def build_hc18(root: Path):

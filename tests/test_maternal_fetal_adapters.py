@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from data.adapters.maternal_fetal.acouslic                   import ACOUSLICAIAdapter
 from data.adapters.maternal_fetal.fetal_abdominal_structures import FASSAdapter
+from data.adapters.maternal_fetal.fetal_planes_db            import FetalPlanesDBAdapter
 from data.adapters.maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 from data.adapters.maternal_fetal.hc18                       import HC18Adapter
 
@@ -341,4 +342,71 @@ def test_hc18_ssl_only_training_entry(hc18_root: Path):
 
 def test_hc18_split_override(hc18_root: Path):
     entries = list(HC18Adapter(hc18_root, split_override="val").iter_entries())
+    assert all(e.split == "val" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FETAL-PLANES-DB
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_fetal_planes_db_yields_existing_images(fetal_planes_root: Path):
+    entries = list(FetalPlanesDBAdapter(fetal_planes_root).iter_entries())
+    # 6 image files exist; one extra metadata row points to a missing image.
+    assert len(entries) == 6
+
+
+def test_fetal_planes_db_schema(fetal_planes_root: Path):
+    entries = list(FetalPlanesDBAdapter(fetal_planes_root).iter_entries())
+    for e in entries:
+        assert e.dataset_id == "FETAL_PLANES_DB"
+        assert e.anatomy_family == "fetal_planes"
+        assert e.modality_type == "image"
+        assert e.task_type == "classification"
+        assert e.has_mask is False
+        assert e.is_promptable is False
+        assert e.ssl_stream == "image"
+        assert e.curriculum_tier in (1, 2, 3)
+        assert len(e.instances) == 1
+
+
+def test_fetal_planes_db_classification_labels(fetal_planes_root: Path):
+    entries = {e.instances[0].label_raw: e for e in FetalPlanesDBAdapter(fetal_planes_root).iter_entries()}
+
+    assert entries["Other"].instances[0].classification_label == 0
+    assert entries["Fetal brain"].instances[0].classification_label == 1
+    assert entries["Fetal abdomen"].instances[0].classification_label == 2
+    assert entries["Fetal femur"].instances[0].classification_label == 3
+    assert entries["Fetal thorax"].instances[0].classification_label == 4
+    assert entries["Maternal cervix"].instances[0].classification_label == 5
+
+
+def test_fetal_planes_db_uses_official_split_column(fetal_planes_root: Path):
+    entries = {e.series_id: e for e in FetalPlanesDBAdapter(fetal_planes_root).iter_entries()}
+
+    assert entries["Patient00001_Plane1_1_of_2"].split == "train"
+    assert entries["Patient00001_Plane2_2_of_2"].split == "train"
+    assert entries["Patient00004_Plane5_1_of_1"].split == "test"
+    assert entries["Patient00005_Plane6_1_of_1"].split == "test"
+
+
+def test_fetal_planes_db_patient_metadata(fetal_planes_root: Path):
+    entries = {e.series_id: e for e in FetalPlanesDBAdapter(fetal_planes_root).iter_entries()}
+
+    brain = entries["Patient00001_Plane2_2_of_2"]
+    assert brain.study_id == "1"
+    assert brain.view_type == "fetal_brain"
+    assert brain.source_meta["brain_plane"] == "Trans-thalamic"
+    assert brain.source_meta["operator"] == "Op. 1"
+    assert brain.source_meta["us_machine"] == "Voluson E6"
+    assert brain.source_meta["train_flag"] == "1"
+    assert brain.source_meta["image_format"] == "rgba_png"
+
+
+def test_fetal_planes_db_resolve_root_from_parent(fetal_planes_root: Path):
+    entries = list(FetalPlanesDBAdapter(fetal_planes_root.parent).iter_entries())
+    assert len(entries) == 6
+
+
+def test_fetal_planes_db_split_override(fetal_planes_root: Path):
+    entries = list(FetalPlanesDBAdapter(fetal_planes_root, split_override="val").iter_entries())
     assert all(e.split == "val" for e in entries)
