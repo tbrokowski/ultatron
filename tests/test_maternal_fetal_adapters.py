@@ -690,15 +690,3 @@ def test_psfhs_resolve_root_direct(psfhs_root: Path):
 def test_psfhs_split_override(psfhs_root: Path):
     entries = list(PSFHSAdapter(psfhs_root, split_override="val").iter_entries())
     assert all(e.split == "val" for e in entries)
-
-
-def test_psfhs_mha_rgb_loader_preserves_channels(psfhs_root: Path):
-    from data.pipeline.dataset import load_image
-
-    vector_rgb = load_image(str(psfhs_root / "PSFHS" / "image_mha" / "00001.mha"))
-    channel_first_rgb = load_image(str(psfhs_root / "PSFHS" / "image_mha" / "00002.mha"))
-
-    assert vector_rgb.shape == (8, 8, 3)
-    assert channel_first_rgb.shape == (8, 8, 3)
-    assert vector_rgb[0, 0].tolist() == [10, 80, 200]
-    assert channel_first_rgb[0, 0].tolist() == [20, 90, 220]

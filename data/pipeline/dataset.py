@@ -69,7 +69,6 @@ def _read_mhd_array(path: str) -> np.ndarray:
 
     ndims     = int(header.get("NDims", 3))
     dim_sizes = [int(v) for v in header.get("DimSize", "").split()]
-    n_channels = int(header.get("ElementNumberOfChannels", "1"))
     elem_type = header.get("ElementType", "MET_UCHAR").upper()
     _et_map   = {"MET_UCHAR": np.uint8, "MET_CHAR": np.int8,
                  "MET_USHORT": np.uint16, "MET_SHORT": np.int16,
@@ -88,12 +87,7 @@ def _read_mhd_array(path: str) -> np.ndarray:
         # Find the end of the header (last "ElementDataFile = LOCAL\n")
         sentinel = b"ElementDataFile = LOCAL"
         idx = content.rfind(sentinel)
-        raw_start = idx + len(sentinel)
-        if content[raw_start:raw_start + 2] == b"\r\n":
-            raw_start += 2
-        elif content[raw_start:raw_start + 1] in (b"\n", b"\r"):
-            raw_start += 1
-        raw = content[raw_start:]
+        raw = content[idx + len(sentinel):].lstrip(b"\r\n")
     else:
         raw_path = Path(path).parent / data_file
         compressed = header.get("CompressedData", "False").lower() == "true"
@@ -105,13 +99,8 @@ def _read_mhd_array(path: str) -> np.ndarray:
             with open(str(raw_path), "rb") as f:
                 raw = f.read()
 
-    # DimSize is (nx, ny[, nz, ...]) — reshape scalar images in reverse for
-    # C-order (nz, ny, nx). Vector 2-D MetaImages store channels as the
-    # fastest-varying component, so expose them as (ny, nx, C).
-    if n_channels > 1 and ndims == 2:
-        shape = tuple(reversed(dim_sizes)) + (n_channels,)
-    else:
-        shape = tuple(reversed(dim_sizes))
+    # DimSize is (nx, ny[, nz, ...]) — reshape in reverse for C-order (nz, ny, nx)
+    shape = tuple(reversed(dim_sizes))
     arr = np.frombuffer(raw, dtype=dtype).reshape(shape)
     return arr
 
@@ -153,17 +142,9 @@ def load_image(path: str) -> np.ndarray:
     if ext in (".mhd", ".mha"):
         arr = _read_mhd_array(path)
         if arr.ndim == 3:
-            if arr.shape[-1] in (3, 4):
-                arr = arr[..., :3]
-            elif arr.shape[0] in (3, 4):
-                arr = np.moveaxis(arr[:3], 0, -1)
-            else:
-                arr = arr[0]
-        if np.issubdtype(arr.dtype, np.integer) and arr.min() >= 0 and arr.max() <= 255:
-            img = arr.astype(np.uint8)
-        else:
-            arr = arr.astype(np.float32)
-            img = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
+            arr = arr[0]
+        arr = arr.astype(np.float32)
+        img = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
         return img
 
     if ext in (".dcm",):
