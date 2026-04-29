@@ -36,6 +36,7 @@ Reference: https://zenodo.org/record/3904280
 """
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
@@ -85,7 +86,6 @@ class FetalPlanesDBAdapter(BaseAdapter):
                 f"FETAL_PLANES_DB: metadata CSV not found at {csv_path}"
             )
 
-        import csv
         rows: list[Dict[str, str]] = []
         with csv_path.open(encoding="utf-8-sig", newline="") as f:
             reader = csv.reader(f, delimiter=";")

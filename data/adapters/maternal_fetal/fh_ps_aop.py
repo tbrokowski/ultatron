@@ -121,6 +121,7 @@ class FHPSAOPAdapter(BaseAdapter):
                 modality      = "image",
                 instances     = instances,
                 study_id      = stem,
+                series_id     = stem,
                 view_type     = "intrapartum_transperineal",
                 has_mask      = has_mask,
                 task_type     = task_type,

@@ -230,6 +230,7 @@ def test_fh_ps_aop_schema(fh_ps_aop_root: Path):
         assert e.view_type == "intrapartum_transperineal"
         assert e.ssl_stream == "image"
         assert e.curriculum_tier in (1, 2, 3)
+        assert e.series_id == e.study_id  # both should be the 5-digit stem
 
 
 def test_fh_ps_aop_segmentation_entries(fh_ps_aop_root: Path):
