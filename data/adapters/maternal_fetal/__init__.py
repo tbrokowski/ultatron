@@ -12,6 +12,7 @@ from .hc18                       import HC18Adapter
 from .iugc2024                   import IUGC2024Adapter
 from .jnu_ifm                    import JNUIFMAdapter
 from .large_scale_fetal_head_biometry import LargeScaleFetalHeadBiometryAdapter
+from .maternal_fetal_us_video_intrapartum import MaternalFetalUSVideoIntrapartumAdapter
 from .psfhs                      import PSFHSAdapter
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "IUGC2024Adapter",
     "JNUIFMAdapter",
     "LargeScaleFetalHeadBiometryAdapter",
+    "MaternalFetalUSVideoIntrapartumAdapter",
     "PSFHSAdapter",
 ]

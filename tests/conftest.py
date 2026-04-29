@@ -470,6 +470,99 @@ def build_iugc2024(root: Path):
         w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
                     "pos_index": "ALL", "neg_index": "NONE"})
 
+def build_maternal_fetal_us_video_intrapartum(root: Path):
+    """
+    Synthetic Maternal-Fetal US Video Intrapartum `DatasetV3/` layout.
+
+    This intentionally differs from the IUGC2024 fixture so the adapter remains
+    separate: root/DatasetV3 instead of root/new, empty val landmark JSON, and
+    split-specific mask naming.
+    """
+    dataset = root / "DatasetV3"
+
+    train = dataset / "train"
+    (train / "videos").mkdir(parents=True, exist_ok=True)
+    (train / "seg" / "240604102919" / "mask").mkdir(parents=True, exist_ok=True)
+    (train / "cls").mkdir(parents=True, exist_ok=True)
+    (train / "videos" / "240604102919.avi").write_bytes(b"\x00" * 64)
+    for frame_idx in (0, 19):
+        _save_png(_mask(8, 8), train / "seg" / "240604102919" / "mask" / f"240604102919_{frame_idx}_6.png")
+    with open(train / "train_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "pos", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "240604102919.avi", "pos": "TRUE", "frame_count": "80",
+                    "labeled_frame_count": "2", "labeled_frame_index": "0,19"})
+    with open(train / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_index"])
+        w.writeheader()
+        w.writerow({"filename": "240604102919.avi", "frame_count": "80",
+                    "labeled_frame_count": "2", "labeled_index": "0,19"})
+    with open(train / "cls" / "class_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "240604102919.avi", "frame_count": "80",
+                    "pos_index": "0,19", "neg_index": "NONE"})
+    (train / "seg" / "landmark.json").write_text(json.dumps({
+        "240604102919_0_6.png": {
+            "ps_points": [["69", "198"], ["84", "299"]],
+            "hsd_point": ["147", "294"],
+            "aop_tangency": ["174", "339"],
+            "hsd": 63.2,
+            "aop": 122.4,
+        }
+    }))
+
+    val = dataset / "val"
+    (val / "videos").mkdir(parents=True, exist_ok=True)
+    (val / "seg").mkdir(parents=True, exist_ok=True)
+    (val / "cls").mkdir(parents=True, exist_ok=True)
+    (val / "videos" / "20190909T155747I1.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), val / "seg" / "20190909T155747I1_6.png")
+    with open(val / "val_info.csv", "w", newline="") as f:
+        fields = ["filename", "SP_count", "NSP_count", "frame_count", "labeled_frame_count",
+                  "labeled_frame_index", "SP_index", "NSP_index"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({"filename": "20190909T155747I1.avi", "SP_count": "2", "NSP_count": "1",
+                    "frame_count": "20", "labeled_frame_count": "1",
+                    "labeled_frame_index": "6", "SP_index": "[6, 7]", "NSP_index": "[0]"})
+    with open(val / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "20190909T155747I1.avi", "frame_count": "20",
+                    "labeled_frame_count": "1", "labeled_frame_index": "6"})
+    with open(val / "cls" / "cls_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "20190909T155747I1.avi", "frame_count": "20",
+                    "pos_index": "[6, 7]", "neg_index": "[0]"})
+    (val / "seg" / "landmark.json").write_text("{}")
+
+    test = dataset / "test"
+    (test / "videos").mkdir(parents=True, exist_ok=True)
+    (test / "seg").mkdir(parents=True, exist_ok=True)
+    (test / "cls").mkdir(parents=True, exist_ok=True)
+    (test / "videos" / "test_10_80.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), test / "seg" / "test_10_80.png")
+    with open(test / "test_info.csv", "w", newline="") as f:
+        fields = ["filename", "SP_count", "NSP_count", "frame_count", "labeled_frame_count",
+                  "labeled_frame_index", "SP_index", "NSP_index"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "SP_count": "72", "NSP_count": "9",
+                    "frame_count": "81", "labeled_frame_count": "1",
+                    "labeled_frame_index": "80", "SP_index": "[9, 10, 80]", "NSP_index": "[0, 1]"})
+    with open(test / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
+                    "labeled_frame_count": "1", "labeled_frame_index": "80"})
+    with open(test / "cls" / "cls_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
+                    "pos_index": "ALL", "neg_index": "NONE"})
+
 def build_large_scale_fetal_head_biometry(root: Path):
     """
     Synthetic Large-Scale Fetal Head Biometry layout.
@@ -792,6 +885,12 @@ def jnu_ifm_root(data_root):
 @pytest.fixture(scope="session")
 def iugc2024_root(data_root):
     r = data_root / "IUGC2024"; build_iugc2024(r); return r
+
+@pytest.fixture(scope="session")
+def maternal_fetal_us_video_intrapartum_root(data_root):
+    r = data_root / "maternal-fetal-us-video-intrapartum"
+    build_maternal_fetal_us_video_intrapartum(r)
+    return r
 
 @pytest.fixture(scope="session")
 def large_scale_fhb_root(data_root):

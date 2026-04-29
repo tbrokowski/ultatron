@@ -23,6 +23,7 @@ from data.adapters.maternal_fetal.hc18                       import HC18Adapter
 from data.adapters.maternal_fetal.iugc2024                   import IUGC2024Adapter
 from data.adapters.maternal_fetal.jnu_ifm                    import JNUIFMAdapter
 from data.adapters.maternal_fetal.large_scale_fetal_head_biometry import LargeScaleFetalHeadBiometryAdapter
+from data.adapters.maternal_fetal.maternal_fetal_us_video_intrapartum import MaternalFetalUSVideoIntrapartumAdapter
 from data.adapters.maternal_fetal.psfhs                      import PSFHSAdapter
 
 
@@ -912,6 +913,176 @@ def test_iugc2024_resolve_new_root_direct(iugc2024_root: Path):
 
 def test_iugc2024_split_override(iugc2024_root: Path):
     entries = list(IUGC2024Adapter(iugc2024_root, split_override="test").iter_entries())
+    assert all(e.split == "test" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Maternal-Fetal US Video Intrapartum
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_maternal_fetal_us_video_yields_one_entry_per_video(
+    maternal_fetal_us_video_intrapartum_root: Path,
+):
+    entries = list(
+        MaternalFetalUSVideoIntrapartumAdapter(
+            maternal_fetal_us_video_intrapartum_root
+        ).iter_entries()
+    )
+
+    assert len(entries) == 3
+    assert {e.split for e in entries} == {"train", "val", "test"}
+
+
+def test_maternal_fetal_us_video_schema(
+    maternal_fetal_us_video_intrapartum_root: Path,
+):
+    entries = list(
+        MaternalFetalUSVideoIntrapartumAdapter(
+            maternal_fetal_us_video_intrapartum_root
+        ).iter_entries()
+    )
+
+    for e in entries:
+        assert e.dataset_id == "maternal-fetal-us-video-intrapartum"
+        assert e.anatomy_family == "intrapartum"
+        assert e.modality_type == "video"
+        assert e.view_type == "intrapartum_transperineal"
+        assert e.has_temporal_order is True
+        assert e.is_cine is True
+        assert e.ssl_stream == "both"
+        assert e.curriculum_tier in (1, 2, 3)
+
+
+def test_maternal_fetal_us_video_train_mask_paths_and_instances(
+    maternal_fetal_us_video_intrapartum_root: Path,
+):
+    entries = {
+        e.series_id: e
+        for e in MaternalFetalUSVideoIntrapartumAdapter(
+            maternal_fetal_us_video_intrapartum_root
+        ).iter_entries()
+    }
+    e = entries["240604102919"]
+
+    assert e.split == "train"
+    assert e.num_frames == 80
+    assert e.frame_indices == [0, 19]
+    assert e.has_mask is True
+    assert e.task_type == "segmentation"
+    assert len(e.instances) == 4
+    assert {inst.mask_channel for inst in e.instances} == {1, 2}
+    assert all("/train/seg/240604102919/mask/" in inst.mask_path for inst in e.instances)
+    assert e.source_meta["mask_names"] == ["240604102919_0_6.png", "240604102919_19_6.png"]
+
+
+def test_maternal_fetal_us_video_val_and_test_mask_naming(
+    maternal_fetal_us_video_intrapartum_root: Path,
+):
+    entries = {
+        e.series_id: e
+        for e in MaternalFetalUSVideoIntrapartumAdapter(
+            maternal_fetal_us_video_intrapartum_root
+        ).iter_entries()
+    }
+
+    val = entries["20190909T155747I1"]
+    test = entries["test_10_80"]
+    assert val.frame_indices == [6]
+    assert test.frame_indices == [80]
+    assert val.source_meta["mask_names"] == ["20190909T155747I1_6.png"]
+    assert test.source_meta["mask_names"] == ["test_10_80.png"]
+    assert val.source_meta["mask_paths"][0].endswith("/val/seg/20190909T155747I1_6.png")
+    assert test.source_meta["mask_paths"][0].endswith("/test/seg/test_10_80.png")
+
+
+def test_maternal_fetal_us_video_classification_indices(
+    maternal_fetal_us_video_intrapartum_root: Path,
+):
+    entries = {
+        e.series_id: e
+        for e in MaternalFetalUSVideoIntrapartumAdapter(
+            maternal_fetal_us_video_intrapartum_root
+        ).iter_entries()
+    }
+
+    assert entries["240604102919"].source_meta["pos_indices"] == [0, 19]
+    assert entries["240604102919"].source_meta["neg_indices"] == "NONE"
+    assert entries["20190909T155747I1"].source_meta["pos_indices"] == [6, 7]
+    assert entries["20190909T155747I1"].source_meta["neg_indices"] == [0]
+    assert entries["test_10_80"].source_meta["pos_indices"] == list(range(81))
+    assert entries["test_10_80"].source_meta["neg_indices"] == "NONE"
+
+
+def test_maternal_fetal_us_video_landmarks_convert_yx_to_xy(
+    maternal_fetal_us_video_intrapartum_root: Path,
+):
+    entries = {
+        e.series_id: e
+        for e in MaternalFetalUSVideoIntrapartumAdapter(
+            maternal_fetal_us_video_intrapartum_root
+        ).iter_entries()
+    }
+    e = entries["240604102919"]
+
+    ps = next(inst for inst in e.instances
+              if inst.instance_id == "240604102919_0_pubic_symphysis")
+    head = next(inst for inst in e.instances
+                if inst.instance_id == "240604102919_0_fetal_head")
+
+    assert ps.keypoints == [[198.0, 69.0], [299.0, 84.0]]
+    assert ps.measurement_mm == pytest.approx(122.4)
+    assert head.keypoints == [[294.0, 147.0], [339.0, 174.0]]
+    assert head.measurement_mm == pytest.approx(63.2)
+
+
+def test_maternal_fetal_us_video_handles_empty_landmark_json(
+    maternal_fetal_us_video_intrapartum_root: Path,
+):
+    entries = {
+        e.series_id: e
+        for e in MaternalFetalUSVideoIntrapartumAdapter(
+            maternal_fetal_us_video_intrapartum_root
+        ).iter_entries()
+    }
+    val = entries["20190909T155747I1"]
+
+    assert val.has_mask is True
+    assert val.source_meta["landmarks"] == {}
+    assert all(inst.keypoints == [] for inst in val.instances)
+    assert all(inst.measurement_mm is None for inst in val.instances)
+
+
+def test_maternal_fetal_us_video_resolve_datasetv3_root_direct(
+    maternal_fetal_us_video_intrapartum_root: Path,
+):
+    entries = list(
+        MaternalFetalUSVideoIntrapartumAdapter(
+            maternal_fetal_us_video_intrapartum_root / "DatasetV3"
+        ).iter_entries()
+    )
+    assert len(entries) == 3
+
+
+def test_maternal_fetal_us_video_resolve_from_raw_fetal_parent(
+    maternal_fetal_us_video_intrapartum_root: Path,
+):
+    entries = list(
+        MaternalFetalUSVideoIntrapartumAdapter(
+            maternal_fetal_us_video_intrapartum_root.parent
+        ).iter_entries()
+    )
+    assert len(entries) == 3
+
+
+def test_maternal_fetal_us_video_split_override(
+    maternal_fetal_us_video_intrapartum_root: Path,
+):
+    entries = list(
+        MaternalFetalUSVideoIntrapartumAdapter(
+            maternal_fetal_us_video_intrapartum_root,
+            split_override="test",
+        ).iter_entries()
+    )
     assert all(e.split == "test" for e in entries)
 
 

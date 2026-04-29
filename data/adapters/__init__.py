@@ -38,6 +38,7 @@ from .maternal_fetal.hc18                       import HC18Adapter
 from .maternal_fetal.iugc2024                   import IUGC2024Adapter
 from .maternal_fetal.jnu_ifm                    import JNUIFMAdapter
 from .maternal_fetal.large_scale_fetal_head_biometry import LargeScaleFetalHeadBiometryAdapter
+from .maternal_fetal.maternal_fetal_us_video_intrapartum import MaternalFetalUSVideoIntrapartumAdapter
 from .maternal_fetal.psfhs                      import PSFHSAdapter
 
 # Registry: dataset_id -> adapter class
@@ -70,6 +71,7 @@ ADAPTER_REGISTRY = {
     "IUGC2024":                 IUGC2024Adapter,
     "JNU-IFM":                  JNUIFMAdapter,
     "Large-Scale-Fetal-Head-Biometry": LargeScaleFetalHeadBiometryAdapter,
+    "maternal-fetal-us-video-intrapartum": MaternalFetalUSVideoIntrapartumAdapter,
     "PSFHS":                    PSFHSAdapter,
 }
 
@@ -117,7 +119,7 @@ __all__ = [
     "ACOUSLICAIAdapter", "FASSAdapter", "FetalPlanesDBAdapter",
     "FOCUSAdapter", "FPUS23Adapter", "FHPSAOPAdapter", "HC18Adapter",
     "IUGC2024Adapter", "JNUIFMAdapter", "LargeScaleFetalHeadBiometryAdapter",
-    "PSFHSAdapter",
+    "MaternalFetalUSVideoIntrapartumAdapter", "PSFHSAdapter",
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
 ]
