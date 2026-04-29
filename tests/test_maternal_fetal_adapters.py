@@ -18,6 +18,7 @@ from data.adapters.maternal_fetal.fetal_abdominal_structures import FASSAdapter
 from data.adapters.maternal_fetal.fetal_planes_db            import FetalPlanesDBAdapter
 from data.adapters.maternal_fetal.focus                      import FOCUSAdapter
 from data.adapters.maternal_fetal.fpus23                     import FPUS23Adapter
+from data.adapters.maternal_fetal.fugc                       import FUGCAdapter
 from data.adapters.maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 from data.adapters.maternal_fetal.hc18                       import HC18Adapter
 from data.adapters.maternal_fetal.iugc2024                   import IUGC2024Adapter
@@ -628,6 +629,87 @@ def test_focus_no_mask_entry_keeps_geometry(focus_root: Path):
 def test_focus_split_override(focus_root: Path):
     entries = list(FOCUSAdapter(focus_root, split_override="test").iter_entries())
     assert all(e.split == "test" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FUGC
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_fugc_yields_labeled_and_unlabeled_samples(fugc_root: Path):
+    entries = list(FUGCAdapter(fugc_root).iter_entries())
+    assert len(entries) == 9
+
+    by_subset = {}
+    for e in entries:
+        by_subset.setdefault(e.source_meta["subset"], 0)
+        by_subset[e.source_meta["subset"]] += 1
+
+    assert by_subset == {
+        "train_labeled": 2,
+        "train_unlabeled": 3,
+        "val": 2,
+        "test": 2,
+    }
+
+
+def test_fugc_schema(fugc_root: Path):
+    entries = list(FUGCAdapter(fugc_root).iter_entries())
+    for e in entries:
+        assert e.dataset_id == "FUGC"
+        assert e.anatomy_family == "intrapartum"
+        assert e.modality_type == "image"
+        assert e.view_type == "intrapartum_transperineal"
+        assert e.ssl_stream == "image"
+        assert e.curriculum_tier in (1, 2, 3)
+
+
+def test_fugc_labeled_segmentation_instances(fugc_root: Path):
+    entries = {e.series_id: e for e in FUGCAdapter(fugc_root).iter_entries()}
+
+    for stem in ("0001", "0002", "0101", "0102", "0201", "0202"):
+        e = entries[stem]
+        assert e.has_mask is True
+        assert e.task_type == "segmentation"
+        assert e.is_promptable is True
+        assert len(e.instances) == 2
+        assert {inst.label_raw for inst in e.instances} == {"class_1", "class_2"}
+        assert {inst.label_ontology for inst in e.instances} == {"fugc_label_1", "fugc_label_2"}
+        assert {inst.mask_channel for inst in e.instances} == {1, 2}
+        assert len({inst.mask_path for inst in e.instances}) == 1
+        assert e.source_meta["mask_values"] == [0, 1, 2]
+        assert e.source_meta["label_semantics_documented"] is False
+
+
+def test_fugc_unlabeled_train_entries_are_ssl_only(fugc_root: Path):
+    entries = {e.series_id: e for e in FUGCAdapter(fugc_root).iter_entries()}
+
+    for stem in ("0003", "0004", "0005"):
+        e = entries[stem]
+        assert e.split == "train"
+        assert e.has_mask is False
+        assert e.task_type == "ssl_only"
+        assert e.is_promptable is False
+        assert e.instances == []
+        assert e.source_meta["semi_supervised_unlabeled"] is True
+
+
+def test_fugc_uses_predefined_folder_splits(fugc_root: Path):
+    entries = {e.series_id: e for e in FUGCAdapter(fugc_root).iter_entries()}
+
+    assert entries["0001"].split == "train"
+    assert entries["0003"].split == "train"
+    assert entries["0101"].split == "val"
+    assert entries["0201"].split == "test"
+
+
+def test_fugc_resolve_dataset_root_direct(fugc_root: Path):
+    entries = list(FUGCAdapter(fugc_root / "dataset").iter_entries())
+    assert len(entries) == 9
+
+
+def test_fugc_split_override(fugc_root: Path):
+    entries = list(FUGCAdapter(fugc_root, split_override="val").iter_entries())
+    assert all(e.split == "val" for e in entries)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

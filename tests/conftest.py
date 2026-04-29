@@ -288,6 +288,42 @@ def build_focus(root: Path):
             "[3, 3, 7, 3, 7, 7, 3, 7] thorax 1\n"
         )
 
+def build_fugc(root: Path):
+    """
+    Synthetic FUGC dataset with predefined semi-supervised splits.
+
+    train/labeled_data: 2 image/mask pairs
+    train/unlabeled_data: 3 image-only samples
+    val: 2 image/mask pairs
+    test: 2 image/mask pairs
+    """
+    dataset = root / "dataset"
+    rgb = np.stack([_gray(8, 8)] * 3, axis=-1)
+    mask = np.zeros((8, 8), dtype=np.uint8)
+    mask[1:4, 1:4] = 1
+    mask[4:7, 4:7] = 2
+
+    labeled = dataset / "train" / "labeled_data"
+    (labeled / "images").mkdir(parents=True, exist_ok=True)
+    (labeled / "labels").mkdir(parents=True, exist_ok=True)
+    for stem in ("0001", "0002"):
+        _save_png(rgb, labeled / "images" / f"{stem}.png")
+        _save_png(mask, labeled / "labels" / f"{stem}.png")
+
+    unlabeled = dataset / "train" / "unlabeled_data" / "images"
+    unlabeled.mkdir(parents=True, exist_ok=True)
+    for stem in ("0003", "0004", "0005"):
+        _save_png(rgb, unlabeled / f"{stem}.png")
+
+    for split, stems in (("val", ("0101", "0102")), ("test", ("0201", "0202"))):
+        images_dir = dataset / split / "images"
+        labels_dir = dataset / split / "labels"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        for stem in stems:
+            _save_png(rgb, images_dir / f"{stem}.png")
+            _save_png(mask, labels_dir / f"{stem}.png")
+
 def build_psfhs(root: Path):
     """
     Synthetic PSFHS layout nested under PSFHS/.
@@ -873,6 +909,10 @@ def fpus23_root(data_root):
 @pytest.fixture(scope="session")
 def focus_root(data_root):
     r = data_root / "FOCUS"; build_focus(r); return r
+
+@pytest.fixture(scope="session")
+def fugc_root(data_root):
+    r = data_root / "FUGC"; build_fugc(r); return r
 
 @pytest.fixture(scope="session")
 def psfhs_root(data_root):

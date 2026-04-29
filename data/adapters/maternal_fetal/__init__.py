@@ -7,6 +7,7 @@ from .fetal_abdominal_structures import FASSAdapter
 from .fetal_planes_db            import FetalPlanesDBAdapter
 from .focus                      import FOCUSAdapter
 from .fpus23                     import FPUS23Adapter
+from .fugc                       import FUGCAdapter
 from .fh_ps_aop                  import FHPSAOPAdapter
 from .hc18                       import HC18Adapter
 from .iugc2024                   import IUGC2024Adapter
@@ -21,6 +22,7 @@ __all__ = [
     "FetalPlanesDBAdapter",
     "FOCUSAdapter",
     "FPUS23Adapter",
+    "FUGCAdapter",
     "FHPSAOPAdapter",
     "HC18Adapter",
     "IUGC2024Adapter",

@@ -33,6 +33,7 @@ from .maternal_fetal.fetal_abdominal_structures import FASSAdapter
 from .maternal_fetal.fetal_planes_db            import FetalPlanesDBAdapter
 from .maternal_fetal.focus                      import FOCUSAdapter
 from .maternal_fetal.fpus23                     import FPUS23Adapter
+from .maternal_fetal.fugc                       import FUGCAdapter
 from .maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
 from .maternal_fetal.hc18                       import HC18Adapter
 from .maternal_fetal.iugc2024                   import IUGC2024Adapter
@@ -66,6 +67,7 @@ ADAPTER_REGISTRY = {
     "FETAL_PLANES_DB":          FetalPlanesDBAdapter,
     "FOCUS":                    FOCUSAdapter,
     "FPUS23":                   FPUS23Adapter,
+    "FUGC":                     FUGCAdapter,
     "FH-PS-AOP":                FHPSAOPAdapter,
     "HC18":                     HC18Adapter,
     "IUGC2024":                 IUGC2024Adapter,
@@ -117,7 +119,7 @@ __all__ = [
     "BeninLUSAdapter", "RSALUSAdapter",
     # Maternal / fetal
     "ACOUSLICAIAdapter", "FASSAdapter", "FetalPlanesDBAdapter",
-    "FOCUSAdapter", "FPUS23Adapter", "FHPSAOPAdapter", "HC18Adapter",
+    "FOCUSAdapter", "FPUS23Adapter", "FUGCAdapter", "FHPSAOPAdapter", "HC18Adapter",
     "IUGC2024Adapter", "JNUIFMAdapter", "LargeScaleFetalHeadBiometryAdapter",
     "MaternalFetalUSVideoIntrapartumAdapter", "PSFHSAdapter",
     # Helpers
