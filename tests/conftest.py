@@ -470,6 +470,77 @@ def build_iugc2024(root: Path):
         w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
                     "pos_index": "ALL", "neg_index": "NONE"})
 
+def build_large_scale_fetal_head_biometry(root: Path):
+    """
+    Synthetic Large-Scale Fetal Head Biometry layout.
+
+    Uses the resized image folders as primary data and creates extracted
+    segmentation-mask PNG folders for Brain, CSP, and LV.  Original-size
+    folders are populated with files that the adapter must ignore.
+    """
+    rgb = np.stack([_gray(8, 8)] * 3, axis=-1)
+    samples = {
+        "Trans-thalamic": {
+            "subdir": "Trans-thalamic",
+            "csv": "Trans-Thalamic-Pixel-Size.csv",
+            "images": [
+                ("Patient00001_Plane3_1_of_2", "0.21"),
+                ("Patient00001_Plane3_2_of_2", "0.22"),
+            ],
+        },
+        "Trans-cerebellum": {
+            "subdir": "Trans-cerebellum",
+            "csv": "Trans-cerebellum-Pixel-Size.csv",
+            "images": [("Patient00002_Plane3_1_of_1", "0.31")],
+        },
+        "Trans-ventricular": {
+            "subdir": "Trans-ventricular",
+            "csv": "Trans-ventricular-Pixel-Size.csv",
+            "images": [("Patient00003_Plane3_1_of_1", "0.41")],
+        },
+    }
+
+    for group_name, info in samples.items():
+        group = root / group_name
+        image_dir = group / info["subdir"]
+        image_dir.mkdir(parents=True, exist_ok=True)
+        for stem, _px in info["images"]:
+            _save_png(rgb, image_dir / f"{stem}.png")
+
+        with open(group / info["csv"], "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["Label", "Pixel  in mm"])
+            w.writeheader()
+            for stem, px in info["images"]:
+                w.writerow({"Label": f"{stem}.png", "Pixel  in mm": px})
+
+    # Three extracted structure masks for one thalamic image.
+    thalamic = root / "Trans-thalamic"
+    for folder_name, suffix in (("Brain masks", "Brain"), ("CSP masks", "CSP"), ("LV masks", "LV")):
+        mask_dir = thalamic / folder_name
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        _save_png(
+            _mask(8, 8),
+            mask_dir / f"Patient00001_Plane3_1_of_2_{suffix}.png",
+        )
+
+    diverse = root / "Diverse Fetal Head Images"
+    diverse_img_dir = diverse / "Orginal_train_images_to_959_661"
+    diverse_img_dir.mkdir(parents=True, exist_ok=True)
+    _save_png(rgb, diverse_img_dir / "001_HC.png")
+    diverse_mask_dir = diverse / "Brain masks"
+    diverse_mask_dir.mkdir(parents=True, exist_ok=True)
+    _save_png(_mask(8, 8), diverse_mask_dir / "001_HC_Brain.png")
+
+    # Original-size folders must not be indexed as primary images.
+    for original_dir in (
+        root / "Trans-thalamic-orginal-size",
+        root / "Trans-cerebellum-orginal-size",
+        root / "Trans-ventricular-orginal-size",
+        root / "Diverse Fetal Head Images-orginal-image",
+    ):
+        original_dir.mkdir(parents=True, exist_ok=True)
+        _save_png(rgb, original_dir / "ignored_original_size.png")
+
 def build_hc18(root: Path):
     """
     Synthetic HC18 dataset using the real naming convention.
@@ -721,6 +792,12 @@ def jnu_ifm_root(data_root):
 @pytest.fixture(scope="session")
 def iugc2024_root(data_root):
     r = data_root / "IUGC2024"; build_iugc2024(r); return r
+
+@pytest.fixture(scope="session")
+def large_scale_fhb_root(data_root):
+    r = data_root / "large-scale-fetal-head-biometry"
+    build_large_scale_fetal_head_biometry(r)
+    return r
 
 @pytest.fixture(scope="session")
 def hc18_root(data_root):

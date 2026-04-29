@@ -22,6 +22,7 @@ from data.adapters.maternal_fetal.fh_ps_aop                  import FHPSAOPAdapt
 from data.adapters.maternal_fetal.hc18                       import HC18Adapter
 from data.adapters.maternal_fetal.iugc2024                   import IUGC2024Adapter
 from data.adapters.maternal_fetal.jnu_ifm                    import JNUIFMAdapter
+from data.adapters.maternal_fetal.large_scale_fetal_head_biometry import LargeScaleFetalHeadBiometryAdapter
 from data.adapters.maternal_fetal.psfhs                      import PSFHSAdapter
 
 
@@ -912,3 +913,125 @@ def test_iugc2024_resolve_new_root_direct(iugc2024_root: Path):
 def test_iugc2024_split_override(iugc2024_root: Path):
     entries = list(IUGC2024Adapter(iugc2024_root, split_override="test").iter_entries())
     assert all(e.split == "test" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Large-Scale Fetal Head Biometry
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_large_scale_fhb_uses_only_resized_primary_images(large_scale_fhb_root: Path):
+    entries = list(LargeScaleFetalHeadBiometryAdapter(large_scale_fhb_root).iter_entries())
+
+    assert len(entries) == 5
+    assert all("orginal-size" not in e.image_paths[0] for e in entries)
+    assert all("orginal-image" not in e.image_paths[0] for e in entries)
+
+
+def test_large_scale_fhb_schema(large_scale_fhb_root: Path):
+    entries = list(LargeScaleFetalHeadBiometryAdapter(large_scale_fhb_root).iter_entries())
+
+    for e in entries:
+        assert e.dataset_id == "Large-Scale-Fetal-Head-Biometry"
+        assert e.anatomy_family == "fetal_head"
+        assert e.modality_type == "image"
+        assert e.ssl_stream == "image"
+        assert e.curriculum_tier in (1, 2, 3)
+        assert len(e.instances) >= 1
+        assert e.instances[0].label_ontology == "fetal_head_plane"
+
+
+def test_large_scale_fhb_pixel_size_csv_double_space_column(large_scale_fhb_root: Path):
+    entries = {
+        e.series_id: e
+        for e in LargeScaleFetalHeadBiometryAdapter(large_scale_fhb_root).iter_entries()
+    }
+
+    assert entries["Patient00001_Plane3_1_of_2"].source_meta["pixel_size_mm"] == pytest.approx(0.21)
+    assert entries["Patient00002_Plane3_1_of_1"].source_meta["pixel_size_mm"] == pytest.approx(0.31)
+    assert entries["001_HC"].source_meta["pixel_size_mm"] is None
+
+
+def test_large_scale_fhb_extracted_mask_instances(large_scale_fhb_root: Path):
+    entries = {
+        e.series_id: e
+        for e in LargeScaleFetalHeadBiometryAdapter(large_scale_fhb_root).iter_entries()
+    }
+    e = entries["Patient00001_Plane3_1_of_2"]
+
+    assert e.has_mask is True
+    assert e.task_type == "segmentation"
+    assert e.is_promptable is True
+    assert len(e.instances) == 4  # plane classification + 3 segmentation structures
+
+    seg_instances = [
+        inst for inst in e.instances
+        if inst.label_ontology != "fetal_head_plane"
+    ]
+    assert {inst.label_ontology for inst in seg_instances} == {
+        "fetal_brain", "cavum_septi_pellucidi", "lateral_ventricle"
+    }
+    assert {inst.mask_channel for inst in seg_instances} == {0, 1, 2}
+    assert all(inst.mask_path and Path(inst.mask_path).exists() for inst in seg_instances)
+    assert e.source_meta["annotation_source"] == "extracted_png_masks"
+    assert e.source_meta["annotation_geometries"] == {
+        "brain": "ellipse",
+        "csp": "oriented_rectangle",
+        "lv": "oriented_rectangle",
+    }
+
+
+def test_large_scale_fhb_classification_only_without_masks(large_scale_fhb_root: Path):
+    entries = {
+        e.series_id: e
+        for e in LargeScaleFetalHeadBiometryAdapter(large_scale_fhb_root).iter_entries()
+    }
+    e = entries["Patient00001_Plane3_2_of_2"]
+
+    assert e.has_mask is False
+    assert e.task_type == "classification"
+    assert e.is_promptable is False
+    assert len(e.instances) == 1
+    assert e.instances[0].label_raw == "Trans-thalamic"
+    assert e.instances[0].classification_label == 0
+    assert e.source_meta["missing_mask_classes"] == ["brain", "csp", "lv"]
+
+
+def test_large_scale_fhb_diverse_hc18_subset(large_scale_fhb_root: Path):
+    entries = {
+        e.series_id: e
+        for e in LargeScaleFetalHeadBiometryAdapter(large_scale_fhb_root).iter_entries()
+    }
+    e = entries["001_HC"]
+
+    assert e.study_id == "001"
+    assert e.source_meta["source_subset"] == "HC18"
+    assert e.source_meta["brain_plane"] == "Diverse fetal head"
+    assert e.has_mask is True
+    seg_ontologies = {
+        inst.label_ontology for inst in e.instances
+        if inst.label_ontology != "fetal_head_plane"
+    }
+    assert seg_ontologies == {"fetal_brain"}
+
+
+def test_large_scale_fhb_patient_level_splitting(large_scale_fhb_root: Path):
+    entries = {
+        e.series_id: e
+        for e in LargeScaleFetalHeadBiometryAdapter(large_scale_fhb_root).iter_entries()
+    }
+
+    assert entries["Patient00001_Plane3_1_of_2"].split == entries["Patient00001_Plane3_2_of_2"].split
+    assert entries["Patient00001_Plane3_1_of_2"].study_id == "00001"
+    assert entries["Patient00001_Plane3_2_of_2"].study_id == "00001"
+
+
+def test_large_scale_fhb_resolve_from_parent(large_scale_fhb_root: Path):
+    entries = list(LargeScaleFetalHeadBiometryAdapter(large_scale_fhb_root.parent).iter_entries())
+    assert len(entries) == 5
+
+
+def test_large_scale_fhb_split_override(large_scale_fhb_root: Path):
+    entries = list(
+        LargeScaleFetalHeadBiometryAdapter(large_scale_fhb_root, split_override="val").iter_entries()
+    )
+    assert all(e.split == "val" for e in entries)
