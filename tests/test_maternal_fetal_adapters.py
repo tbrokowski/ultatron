@@ -25,6 +25,7 @@ from data.adapters.maternal_fetal.iugc2024                   import IUGC2024Adap
 from data.adapters.maternal_fetal.jnu_ifm                    import JNUIFMAdapter
 from data.adapters.maternal_fetal.large_scale_fetal_head_biometry import LargeScaleFetalHeadBiometryAdapter
 from data.adapters.maternal_fetal.maternal_fetal_us_video_intrapartum import MaternalFetalUSVideoIntrapartumAdapter
+from data.adapters.maternal_fetal.pbf_us1                    import PBFUS1Adapter
 from data.adapters.maternal_fetal.psfhs                      import PSFHSAdapter
 
 
@@ -1287,4 +1288,80 @@ def test_large_scale_fhb_split_override(large_scale_fhb_root: Path):
     entries = list(
         LargeScaleFetalHeadBiometryAdapter(large_scale_fhb_root, split_override="val").iter_entries()
     )
+    assert all(e.split == "val" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PBF-US1
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_pbf_us1_yields_all_frames(pbf_us1_root: Path):
+    entries = list(PBFUS1Adapter(pbf_us1_root).iter_entries())
+    # 7 images exist; 1 extra resume.csv row points to a missing file → skipped.
+    assert len(entries) == 7
+
+
+def test_pbf_us1_schema(pbf_us1_root: Path):
+    entries = list(PBFUS1Adapter(pbf_us1_root).iter_entries())
+    for e in entries:
+        assert e.dataset_id == "PBF-US1"
+        assert e.anatomy_family == "fetal_planes"
+        assert e.modality_type == "image"
+        assert e.ssl_stream == "image"
+        assert e.height == 500
+        assert e.width == 700
+        assert e.curriculum_tier in (1, 2, 3)
+
+
+def test_pbf_us1_classification_instances(pbf_us1_root: Path):
+    entries = list(PBFUS1Adapter(pbf_us1_root).iter_entries())
+    for e in entries:
+        assert e.task_type == "classification"
+        assert e.has_mask is False
+        assert e.is_promptable is False
+        assert len(e.instances) == 1
+        inst = e.instances[0]
+        assert inst.label_ontology == "pbf_us1_planes"
+        assert 0 <= inst.classification_label <= 5
+
+
+def test_pbf_us1_label_values(pbf_us1_root: Path):
+    entries = {e.series_id: e for e in PBFUS1Adapter(pbf_us1_root).iter_entries()}
+
+    # exam-A frames
+    assert entries["cineframe_1_2023-01-01T100000"].instances[0].classification_label == 0
+    assert entries["cineframe_1_2023-01-01T100000"].instances[0].label_raw == "Biparietal standard plane"
+    assert entries["cineframe_2_2023-01-01T100041"].instances[0].classification_label == 2
+    # exam-C abdominal frame
+    assert entries["cineframe_1_2023-01-03T120000"].instances[0].classification_label == 1
+
+
+def test_pbf_us1_study_level_splitting(pbf_us1_root: Path):
+    entries = list(PBFUS1Adapter(pbf_us1_root).iter_entries())
+    by_study: dict = {}
+    for e in entries:
+        by_study.setdefault(e.study_id, set()).add(e.split)
+    for study, splits in by_study.items():
+        assert len(splits) == 1, f"Study {study!r} has mixed splits"
+
+
+def test_pbf_us1_source_meta(pbf_us1_root: Path):
+    entries = {e.series_id: e for e in PBFUS1Adapter(pbf_us1_root).iter_entries()}
+    e = entries["cineframe_1_2023-01-01T100000"]
+    assert e.source_meta["studie"] == "Obstetrics Exam - 01-Jan-2023_10_AM"
+    assert e.source_meta["protocol"] == "Vertical"
+    assert e.source_meta["position"] == "OP"
+
+
+def test_pbf_us1_resolve_root_nested(pbf_us1_root: Path):
+    # Adapter must also accept a parent directory containing PBF-US1/resume.csv.
+    parent = pbf_us1_root.parent
+    # Temporarily rename folder to "PBF-US1" if needed — fixture already is PBF-US1.
+    # Test that passing pbf_us1_root directly works (resume.csv present).
+    entries = list(PBFUS1Adapter(pbf_us1_root).iter_entries())
+    assert len(entries) == 7
+
+
+def test_pbf_us1_split_override(pbf_us1_root: Path):
+    entries = list(PBFUS1Adapter(pbf_us1_root, split_override="val").iter_entries())
     assert all(e.split == "val" for e in entries)

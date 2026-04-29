@@ -939,6 +939,10 @@ def large_scale_fhb_root(data_root):
     return r
 
 @pytest.fixture(scope="session")
+def pbf_us1_root(data_root):
+    r = data_root / "PBF-US1"; build_pbf_us1(r); return r
+
+@pytest.fixture(scope="session")
 def hc18_root(data_root):
     r = data_root / "HC18"; build_hc18(r); return r
 
@@ -1095,6 +1099,73 @@ def fh_ps_aop_root(data_root):
     r = data_root / "FH-PS-AOP"
     build_fh_ps_aop(r)
     return r
+
+
+def build_pbf_us1(root: Path):
+    """
+    Synthetic PBF-US1 dataset.
+
+    3 exam folders, 7 frames total:
+      Exam-A: 3 frames (class 0, 2, 5)
+      Exam-B: 2 frames (class 5, 5)
+      Exam-C: 2 frames (class 1, 5)
+    metadata.csv has per-exam protocol/position.
+    One extra resume.csv row points to a missing image — must be skipped.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    rgb = np.stack([_gray(8, 8)] * 3, axis=-1)
+
+    exam_a = "Obstetrics Exam - 01-Jan-2023_10_AM"
+    exam_b = "Obstetrics Exam - 02-Jan-2023_11_AM"
+    exam_c = "Obstetrics Exam - 03-Jan-2023_12_PM"
+
+    frames = [
+        (exam_a, "cineframe_1_2023-01-01T100000.jpeg", "Biparietal standard plane", "0"),
+        (exam_a, "cineframe_2_2023-01-01T100041.jpeg", "Heart standard plane",      "2"),
+        (exam_a, "cineframe_3_2023-01-01T100123.jpeg", "No plane",                  "5"),
+        (exam_b, "cineframe_1_2023-01-02T110000.jpeg", "No plane",                  "5"),
+        (exam_b, "cineframe_2_2023-01-02T110041.jpeg", "No plane",                  "5"),
+        (exam_c, "cineframe_1_2023-01-03T120000.jpeg", "Abdominal standard plane",  "1"),
+        (exam_c, "cineframe_2_2023-01-03T120041.jpeg", "No plane",                  "5"),
+    ]
+
+    for studie, file_name, _, _ in frames:
+        exam_dir = root / studie
+        exam_dir.mkdir(exist_ok=True)
+        img_path = exam_dir / file_name
+        if PIL_OK:
+            from PIL import Image as PILImage
+            PILImage.fromarray(rgb).save(img_path, format="JPEG")
+        else:
+            img_path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 64)
+
+    resume_rows = [
+        {"file_name": fn, "studie": st, "class": cls, "value": val, "image": ""}
+        for st, fn, cls, val in frames
+    ]
+    # row pointing to a missing image — must be skipped
+    resume_rows.append({
+        "file_name": "cineframe_99_missing.jpeg",
+        "studie": exam_a,
+        "class": "No plane",
+        "value": "5",
+        "image": "",
+    })
+
+    with open(root / "resume.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["file_name", "studie", "class", "value", "image"])
+        w.writeheader()
+        w.writerows(resume_rows)
+
+    meta_rows = [
+        {"Study Name": exam_a, "protocol": "Vertical",   "position": "OP"},
+        {"Study Name": exam_b, "protocol": "Horizontal",  "position": "SP"},
+        {"Study Name": exam_c, "protocol": "Diagonal /",  "position": "OA"},
+    ]
+    with open(root / "metadata.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["Study Name", "protocol", "position"])
+        w.writeheader()
+        w.writerows(meta_rows)
 
 
 @pytest.fixture
