@@ -28,7 +28,8 @@ from .lung.benin_lus import BeninLUSAdapter
 from .lung.rsa_lus   import RSALUSAdapter
 
 # ── Liver ─────────────────────────────────────────────────────────────────────
-from .liver.aul import AULAdapter
+from .liver.aul   import AULAdapter
+from .liver.us105 import US105Adapter
 
 # Registry: dataset_id -> adapter class
 ADAPTER_REGISTRY = {
@@ -51,6 +52,7 @@ ADAPTER_REGISTRY = {
     "RSA-LUS":                  RSALUSAdapter,
     # Liver
     "AUL":                      AULAdapter,
+    "105US":                    US105Adapter,
 }
 
 
@@ -94,7 +96,7 @@ __all__ = [
     # Lung
     "BeninLUSAdapter", "RSALUSAdapter",
     # Liver
-    "AULAdapter",
+    "AULAdapter", "US105Adapter",
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
 ]

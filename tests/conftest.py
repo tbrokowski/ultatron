@@ -371,6 +371,34 @@ def aul_root(data_root):
     r = data_root / "AUL"; build_aul(r); return r
 
 
+def build_us105(root: Path):
+    """
+    Synthetic 105US dataset.
+
+    4 images: 001, 002, 003, 004
+    Masks for 001, 002, 003 only — 004 has no mask (ssl_only path).
+    """
+    img_dir  = root / "105 US Images"
+    mask_dir = root / "105 US Masks"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    for stem in ("001", "002", "003", "004"):
+        _save_png(_gray(8, 8), img_dir / f"{stem}.png")
+
+    gray_mask = _gray(8, 8)
+    for stem in ("001", "002", "003"):
+        _save_png(gray_mask, mask_dir / f"{stem} G man.png")
+
+    # readme.txt present in real dataset — adapter must ignore it
+    (img_dir / "readme.txt").write_text("placeholder")
+
+
+@pytest.fixture(scope="session")
+def us105_root(data_root):
+    r = data_root / "105US"; build_us105(r); return r
+
+
 @pytest.fixture
 def tmp_manifest_with_masks(tmp_path):
     """A tiny manifest file with train/val entries and mask data."""

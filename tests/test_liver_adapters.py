@@ -13,7 +13,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from data.adapters.liver.aul import AULAdapter
+from data.adapters.liver.aul   import AULAdapter
+from data.adapters.liver.us105 import US105Adapter
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -155,3 +156,74 @@ def test_aul_resolve_root_nested(aul_root: Path):
 def test_aul_split_override(aul_root: Path):
     entries = list(AULAdapter(aul_root, split_override="val").iter_entries())
     assert all(e.split == "val" for e in entries)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 105US
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_us105_yields_all_images(us105_root: Path):
+    entries = list(US105Adapter(us105_root).iter_entries())
+    # 4 PNG images; readme.txt must be ignored
+    assert len(entries) == 4
+
+
+def test_us105_schema(us105_root: Path):
+    entries = list(US105Adapter(us105_root).iter_entries())
+    for e in entries:
+        assert e.dataset_id == "105US"
+        assert e.anatomy_family == "liver"
+        assert e.modality_type == "image"
+        assert e.view_type == "liver_bmode"
+        assert e.ssl_stream == "image"
+        assert e.curriculum_tier in (1, 2, 3)
+        assert e.study_id == e.series_id == e.instances[0].instance_id
+
+
+def test_us105_segmentation_entries(us105_root: Path):
+    entries = {e.series_id: e for e in US105Adapter(us105_root).iter_entries()}
+
+    for img_id in ("001", "002", "003"):
+        e = entries[img_id]
+        assert e.has_mask is True
+        assert e.task_type == "segmentation"
+        assert e.is_promptable is True
+        assert len(e.instances) == 1
+        inst = e.instances[0]
+        assert inst.label_ontology == "liver_lesion"
+        assert inst.label_raw == "liver_metastasis"
+        assert inst.mask_path is not None
+        assert inst.mask_path.endswith(f"{img_id} G man.png")
+
+
+def test_us105_ssl_only_entry(us105_root: Path):
+    entries = {e.series_id: e for e in US105Adapter(us105_root).iter_entries()}
+    e = entries["004"]
+    assert e.has_mask is False
+    assert e.task_type == "ssl_only"
+    assert e.is_promptable is False
+    assert e.instances[0].mask_path is None
+
+
+def test_us105_source_meta(us105_root: Path):
+    entries = {e.series_id: e for e in US105Adapter(us105_root).iter_entries()}
+
+    e = entries["001"]
+    assert e.source_meta["image_id"] == "001"
+    assert e.source_meta["mask_type"] == "grayscale_contour"
+    assert e.source_meta["mask_name"] == "001 G man.png"
+
+    e = entries["004"]
+    assert e.source_meta["mask_type"] is None
+    assert e.source_meta["mask_name"] is None
+
+
+def test_us105_resolve_root_nested(us105_root: Path):
+    # Adapter must accept parent containing 105US/
+    entries = list(US105Adapter(us105_root.parent).iter_entries())
+    assert len(entries) == 4
+
+
+def test_us105_split_override(us105_root: Path):
+    entries = list(US105Adapter(us105_root, split_override="test").iter_entries())
+    assert all(e.split == "test" for e in entries)
