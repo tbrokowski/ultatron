@@ -138,7 +138,16 @@ def test_covidx_adapter(covidx_root):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def test_fetal_planes_adapter(fetal_planes_root):
-    pytest.skip("FetalPlanesDBAdapter not yet ported to new subpackage layout")
+    from data.adapters import ADAPTER_REGISTRY
+
+    adapter_cls = ADAPTER_REGISTRY["FETAL_PLANES_DB"]
+    entries = list(adapter_cls(fetal_planes_root).iter_entries())
+    _validate_entries(entries, min_count=6)
+
+    assert {e.split for e in entries} == {"train", "test"}
+    assert all(e.anatomy_family == "fetal_planes" for e in entries)
+    assert all(e.task_type == "classification" for e in entries)
+    assert {e.instances[0].classification_label for e in entries} == set(range(6))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

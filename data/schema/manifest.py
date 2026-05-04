@@ -36,7 +36,7 @@ ANATOMY_FAMILIES = {
     "breast",
     "thyroid",
     "fetal_head", "fetal_abdomen", "fetal_brain", "fetal_cardiac",
-    "fetal_femur", "fetal_thorax", "intrapartum", "cervix",
+    "fetal_femur", "fetal_thorax", "fetal_planes", "intrapartum", "cervix",
     "prostate", "ovarian",
     "liver", "pancreas", "gallbladder", "abdomen", "kidney", "colon",
     "muscle", "spine", "nerve", "joint",

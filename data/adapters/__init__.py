@@ -42,6 +42,22 @@ from .lung.rsa_lus   import RSALUSAdapter
 from .liver.aul   import AULAdapter
 from .liver.us105 import US105Adapter
 
+# ── Maternal / fetal ──────────────────────────────────────────────────────────
+from .maternal_fetal.acouslic                   import ACOUSLICAIAdapter
+from .maternal_fetal.fetal_abdominal_structures import FASSAdapter
+from .maternal_fetal.fetal_planes_db            import FetalPlanesDBAdapter
+from .maternal_fetal.focus                      import FOCUSAdapter
+from .maternal_fetal.fpus23                     import FPUS23Adapter
+from .maternal_fetal.fugc                       import FUGCAdapter
+from .maternal_fetal.fh_ps_aop                  import FHPSAOPAdapter
+from .maternal_fetal.hc18                       import HC18Adapter
+from .maternal_fetal.iugc2024                   import IUGC2024Adapter
+from .maternal_fetal.jnu_ifm                    import JNUIFMAdapter
+from .maternal_fetal.large_scale_fetal_head_biometry import LargeScaleFetalHeadBiometryAdapter
+from .maternal_fetal.maternal_fetal_us_video_intrapartum import MaternalFetalUSVideoIntrapartumAdapter
+from .maternal_fetal.pbf_us1                    import PBFUS1Adapter
+from .maternal_fetal.psfhs                      import PSFHSAdapter
+
 # Registry: dataset_id -> adapter class
 ADAPTER_REGISTRY = {
     # Cardiac — fully labelled
@@ -77,6 +93,21 @@ ADAPTER_REGISTRY = {
     # Liver
     "AUL":                      AULAdapter,
     "105US":                    US105Adapter,
+    # Maternal / fetal
+    "ACOUSLIC-AI":              ACOUSLICAIAdapter,
+    "FASS":                     FASSAdapter,
+    "FETAL_PLANES_DB":          FetalPlanesDBAdapter,
+    "FOCUS":                    FOCUSAdapter,
+    "FPUS23":                   FPUS23Adapter,
+    "FUGC":                     FUGCAdapter,
+    "FH-PS-AOP":                FHPSAOPAdapter,
+    "HC18":                     HC18Adapter,
+    "IUGC2024":                 IUGC2024Adapter,
+    "JNU-IFM":                  JNUIFMAdapter,
+    "Large-Scale-Fetal-Head-Biometry": LargeScaleFetalHeadBiometryAdapter,
+    "maternal-fetal-us-video-intrapartum": MaternalFetalUSVideoIntrapartumAdapter,
+    "PBF-US1":                  PBFUS1Adapter,
+    "PSFHS":                    PSFHSAdapter,
 }
 
 
@@ -126,6 +157,11 @@ __all__ = [
     "BeninLUSAdapter", "RSALUSAdapter",
     # Liver
     "AULAdapter", "US105Adapter",
+    # Maternal / fetal
+    "ACOUSLICAIAdapter", "FASSAdapter", "FetalPlanesDBAdapter",
+    "FOCUSAdapter", "FPUS23Adapter", "FUGCAdapter", "FHPSAOPAdapter", "HC18Adapter",
+    "IUGC2024Adapter", "JNUIFMAdapter", "LargeScaleFetalHeadBiometryAdapter",
+    "MaternalFetalUSVideoIntrapartumAdapter", "PBFUS1Adapter", "PSFHSAdapter",
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
 ]

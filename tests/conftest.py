@@ -62,6 +62,50 @@ def _touch(path: Path, payload: bytes = b"synthetic-data"):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
 
+def _save_mha(arr, path: Path, *, vector_rgb: bool = False):
+    """Write a minimal uncompressed uint8 MHA file for adapter/loader tests."""
+    arr = np.asarray(arr, dtype=np.uint8)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if vector_rgb:
+        if arr.ndim != 3 or arr.shape[-1] not in (3, 4):
+            raise ValueError("vector_rgb expects H x W x C input")
+        h, w, c = arr.shape
+        header = (
+            "ObjectType = Image\n"
+            "NDims = 2\n"
+            f"DimSize = {w} {h}\n"
+            "ElementType = MET_UCHAR\n"
+            f"ElementNumberOfChannels = {c}\n"
+            "ElementSpacing = 1 1\n"
+            "Offset = 0 0\n"
+            "ElementDataFile = LOCAL\n"
+        )
+        payload = arr.tobytes(order="C")
+    else:
+        if arr.ndim == 2:
+            h, w = arr.shape
+            dim_size = f"{w} {h}"
+            spacing = "1 1"
+            offset = "0 0"
+        elif arr.ndim == 3:
+            z, h, w = arr.shape
+            dim_size = f"{w} {h} {z}"
+            spacing = "1 1 1"
+            offset = "0 0 0"
+        else:
+            raise ValueError("arr must be 2-D or 3-D")
+        header = (
+            "ObjectType = Image\n"
+            f"NDims = {arr.ndim}\n"
+            f"DimSize = {dim_size}\n"
+            "ElementType = MET_UCHAR\n"
+            f"ElementSpacing = {spacing}\n"
+            f"Offset = {offset}\n"
+            "ElementDataFile = LOCAL\n"
+        )
+        payload = arr.tobytes(order="C")
+    path.write_bytes(header.encode("ascii") + payload)
+
 
 # ── dataset layout builders ───────────────────────────────────────────────────
 def build_camus(root: Path, n=4):
@@ -105,24 +149,592 @@ def build_covidx(root: Path, n=4):
 
 def build_fetal_planes(root: Path, n=12):
     (root / "Images").mkdir(parents=True, exist_ok=True)
-    planes = ["Fetal abdomen","Fetal brain","Fetal femur","Fetal thorax","Maternal cervix","Other"]
+    planes = [
+        ("Patient00001_Plane1_1_of_2", "Other",           "Not A Brain",       "1", "Op. 1", "Voluson E6"),
+        ("Patient00001_Plane2_2_of_2", "Fetal brain",     "Trans-thalamic",    "1", "Op. 1", "Voluson E6"),
+        ("Patient00002_Plane3_1_of_1", "Fetal abdomen",   "Not A Brain",       "1", "Op. 2", "Aloka"),
+        ("Patient00003_Plane4_1_of_1", "Fetal femur",     "Not A Brain",       "1", "Op. 3", "Voluson S10"),
+        ("Patient00004_Plane5_1_of_1", "Fetal thorax",    "Not A Brain",       "0", "Other", "Other"),
+        ("Patient00005_Plane6_1_of_1", "Maternal cervix", "Not A Brain",       "0", "Op. 2", "Aloka"),
+    ]
     rows = []
-    for i in range(n):
-        stem = f"img_{i:04d}"
-        _save_png(_gray(), root / "Images" / f"{stem}.png")
-        rows.append({"Image_name": stem, "Plane": planes[i % len(planes)],
-                     "Patient_num": str(i // 2), "Train": "1" if i < 9 else "0"})
+    for idx, (stem, plane, brain_plane, train_flag, operator, machine) in enumerate(planes, start=1):
+        if PIL_OK:
+            Image.fromarray(np.zeros((8, 8, 4), dtype=np.uint8)).save(
+                root / "Images" / f"{stem}.png"
+            )
+        else:
+            _save_png(_gray(8, 8), root / "Images" / f"{stem}.png")
+        rows.append({
+            "Image_name": stem,
+            "Patient_num": str(idx if idx > 2 else 1),
+            "Plane": plane,
+            "Brain_plane": brain_plane,
+            "Operator": operator,
+            "US_Machine": machine,
+            "Train ": f"{train_flag} ",
+        })
+
+    # This metadata row should be ignored because its image is absent.
+    rows.append({
+        "Image_name": "Patient99999_Plane1_1_of_1",
+        "Patient_num": "99999",
+        "Plane": "Other",
+        "Brain_plane": "Not A Brain",
+        "Operator": "Other",
+        "US_Machine": "Other",
+        "Train ": "1 ",
+    })
     with open(root / "FETAL_PLANES_DB_data.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["Image_name","Plane","Patient_num","Train"], delimiter=";")
+        w = csv.DictWriter(
+            f,
+            fieldnames=[
+                "Image_name", "Patient_num", "Plane", "Brain_plane",
+                "Operator", "US_Machine", "Train ",
+            ],
+            delimiter=";",
+        )
         w.writeheader(); w.writerows(rows)
 
+def build_fpus23(root: Path):
+    """
+    Synthetic FPUS23 archive with both sub-datasets:
+      - Dataset/four_poses: 3 streams, 2 frames each, CVAT XML annotations.
+      - Dataset_Plane: 4 classes, 2 images each.
+    """
+    archive = root / "archive"
+    poses_root = archive / "Dataset" / "four_poses"
+    boxes_root = archive / "Dataset" / "boxes" / "annotation"
+    annos_root = archive / "Dataset" / "annos" / "annotation"
+    plane_root = archive / "Dataset_Plane"
+
+    streams = [
+        ("stream_hdvb_aroundabd_h", "hdvb", "h"),
+        ("stream_huvb_aroundhead_v", "huvb", "v"),
+        ("stream_hdvf_longrec_h", "hdvf", "h"),
+    ]
+
+    rgb = np.stack([_gray(8, 8)] * 3, axis=-1)
+    for stream_name, pose, probe in streams:
+        stream_dir = poses_root / stream_name
+        box_dir = boxes_root / stream_name
+        anno_dir = annos_root / stream_name
+        stream_dir.mkdir(parents=True, exist_ok=True)
+        box_dir.mkdir(parents=True, exist_ok=True)
+        anno_dir.mkdir(parents=True, exist_ok=True)
+
+        for i in range(2):
+            _save_png(rgb, stream_dir / f"frame_{i:06d}.png")
+
+        boxes_xml = f"""<annotations>
+  <image id="0" name="frame_000000.png" width="8" height="8">
+    <box label="abdomen" xtl="1.0" ytl="1.0" xbr="5.0" ybr="6.0" />
+    <box label="arm" xtl="2.0" ytl="2.0" xbr="4.0" ybr="4.0" />
+    <tag label="Orientation"><attribute name="Pose">{pose}</attribute></tag>
+    <tag label="Probe"><attribute name="orientation">{probe}</attribute></tag>
+    <tag label="location"><attribute name="View_fetus">abdomen</attribute></tag>
+  </image>
+  <image id="1" name="frame_000001.png" width="8" height="8">
+    <tag label="Orientation"><attribute name="Pose">{pose}</attribute></tag>
+    <tag label="Probe"><attribute name="orientation">{probe}</attribute></tag>
+  </image>
+</annotations>
+"""
+        annos_xml = f"""<annotations>
+  <image id="0" name="frame_000000.png" width="8" height="8">
+    <tag label="Orientation"><attribute name="Pose">{pose}</attribute></tag>
+  </image>
+  <image id="1" name="frame_000001.png" width="8" height="8">
+    <tag label="Orientation"><attribute name="Pose">{pose}</attribute></tag>
+  </image>
+</annotations>
+"""
+        (box_dir / "annotations.xml").write_text(boxes_xml)
+        (anno_dir / "annotations.xml").write_text(annos_xml)
+
+    for class_name in ("AC_PLANE", "BPD_PLANE", "FL_PLANE", "NO_PLANE"):
+        class_dir = plane_root / class_name
+        class_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(2):
+            _save_png(rgb, class_dir / f"{class_name.lower()}_{i}.png")
+
+def build_focus(root: Path):
+    """
+    Synthetic FOCUS dataset across official split folders.
+
+    training/001 has both masks.
+    training/002 has only cardiac mask to test zero-filled missing thorax.
+    validation/003 has only thorax mask.
+    testing/004 has no masks but has rectangle annotations.
+    """
+    samples = [
+        ("training", "001", ("cardiac", "thorax"), True),
+        ("training", "002", ("cardiac",), True),
+        ("validation", "003", ("thorax",), True),
+        ("testing", "004", (), False),
+    ]
+
+    for split_dir, stem, masks, grayscale in samples:
+        base = root / split_dir
+        img_dir = base / "images"
+        mask_dir = base / "annfiles_mask"
+        ellipse_dir = base / "annfiles_ellipse"
+        rectangle_dir = base / "annfiles_rectangle"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        ellipse_dir.mkdir(parents=True, exist_ok=True)
+        rectangle_dir.mkdir(parents=True, exist_ok=True)
+
+        if grayscale:
+            _save_png(_gray(8, 8), img_dir / f"{stem}.png")
+        else:
+            rgb = np.stack([_gray(8, 8)] * 3, axis=-1)
+            _save_png(rgb, img_dir / f"{stem}.png")
+
+        for mask_name in masks:
+            mask = np.zeros((8, 8), dtype=np.uint8)
+            if mask_name == "cardiac":
+                mask[1:4, 1:4] = 255
+            else:
+                mask[4:7, 4:7] = 255
+            _save_png(mask, mask_dir / f"{stem}-{mask_name}.png")
+
+        (ellipse_dir / f"{stem}.txt").write_text(
+            "[4, 4, 2, 3, 15] cardiac\n"
+            "[5, 5, 3, 2, 20] thorax\n"
+        )
+        (rectangle_dir / f"{stem}.txt").write_text(
+            "[1, 1, 4, 1, 4, 5, 1, 5] cardiac 0\n"
+            "[3, 3, 7, 3, 7, 7, 3, 7] thorax 1\n"
+        )
+
+def build_fugc(root: Path):
+    """
+    Synthetic FUGC dataset with predefined semi-supervised splits.
+
+    train/labeled_data: 2 image/mask pairs
+    train/unlabeled_data: 3 image-only samples
+    val: 2 image/mask pairs
+    test: 2 image/mask pairs
+    """
+    dataset = root / "dataset"
+    rgb = np.stack([_gray(8, 8)] * 3, axis=-1)
+    mask = np.zeros((8, 8), dtype=np.uint8)
+    mask[1:4, 1:4] = 1
+    mask[4:7, 4:7] = 2
+
+    labeled = dataset / "train" / "labeled_data"
+    (labeled / "images").mkdir(parents=True, exist_ok=True)
+    (labeled / "labels").mkdir(parents=True, exist_ok=True)
+    for stem in ("0001", "0002"):
+        _save_png(rgb, labeled / "images" / f"{stem}.png")
+        _save_png(mask, labeled / "labels" / f"{stem}.png")
+
+    unlabeled = dataset / "train" / "unlabeled_data" / "images"
+    unlabeled.mkdir(parents=True, exist_ok=True)
+    for stem in ("0003", "0004", "0005"):
+        _save_png(rgb, unlabeled / f"{stem}.png")
+
+    for split, stems in (("val", ("0101", "0102")), ("test", ("0201", "0202"))):
+        images_dir = dataset / split / "images"
+        labels_dir = dataset / split / "labels"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        for stem in stems:
+            _save_png(rgb, images_dir / f"{stem}.png")
+            _save_png(mask, labels_dir / f"{stem}.png")
+
+def build_psfhs(root: Path):
+    """
+    Synthetic PSFHS layout nested under PSFHS/.
+
+    00001 uses a vector RGB MHA image.
+    00002 uses a 3-plane MHA image to exercise channel-first handling.
+    00003 has no label mask to exercise the ssl_only path.
+    """
+    inner = root / "PSFHS"
+    img_dir = inner / "image_mha"
+    label_dir = inner / "label_mha"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    label_dir.mkdir(parents=True, exist_ok=True)
+
+    rgb_hwc = np.zeros((8, 8, 3), dtype=np.uint8)
+    rgb_hwc[..., 0] = 10
+    rgb_hwc[..., 1] = 80
+    rgb_hwc[..., 2] = 200
+    _save_mha(rgb_hwc, img_dir / "00001.mha", vector_rgb=True)
+
+    rgb_chw = np.zeros((3, 8, 8), dtype=np.uint8)
+    rgb_chw[0] = 20
+    rgb_chw[1] = 90
+    rgb_chw[2] = 220
+    _save_mha(rgb_chw, img_dir / "00002.mha")
+
+    _save_mha(rgb_hwc, img_dir / "00003.mha", vector_rgb=True)
+
+    for stem in ("00001", "00002"):
+        label = np.zeros((8, 8), dtype=np.uint8)
+        label[1:4, 1:4] = 1
+        label[4:7, 4:7] = 2
+        _save_mha(label, label_dir / f"{stem}.mha")
+
+def build_jnu_ifm(root: Path):
+    """
+    Synthetic JNU-IFM us_data layout with two video/session folders.
+
+    CSV rows are the source of truth; one extra image outside the CSV is ignored.
+    Raw mask values use 7 for SP and 8 for fetal head.
+    """
+    us_data = root / "us_data"
+    sessions = {
+        "20190830T115515": [(169, 3), (170, 4), (171, 6)],
+        "20190918T123342": [(10, 5), (11, 6)],
+    }
+
+    for video_id, rows in sessions.items():
+        session = us_data / video_id
+        image_dir = session / "image"
+        mask_dir = session / "mask"
+        enhance_dir = session / "mask_enhance"
+        image_dir.mkdir(parents=True, exist_ok=True)
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        enhance_dir.mkdir(parents=True, exist_ok=True)
+
+        with open(session / "frame_label.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["", "frame_id", "frame_label"])
+            w.writeheader()
+            for idx, (frame_id, frame_label) in enumerate(rows):
+                stem = f"{video_id}_{frame_id}"
+                _save_png(_gray(8, 8), image_dir / f"{stem}.png")
+
+                mask = np.zeros((8, 8), dtype=np.uint8)
+                if frame_label in (4, 6):
+                    mask[1:4, 1:4] = 7
+                if frame_label in (5, 6):
+                    mask[4:7, 4:7] = 8
+                _save_png(mask, mask_dir / f"{stem}_mask.png")
+
+                enhanced = np.zeros((8, 8, 3), dtype=np.uint8)
+                enhanced[..., 0] = (mask == 7) * 128
+                enhanced[..., 1] = (mask == 8) * 255
+                _save_png(enhanced, enhance_dir / f"{stem}_mask.png")
+
+                w.writerow({"": idx, "frame_id": frame_id, "frame_label": frame_label})
+
+        # Extra image/mask not listed in CSV; adapter should ignore it.
+        extra_stem = f"{video_id}_999"
+        _save_png(_gray(8, 8), image_dir / f"{extra_stem}.png")
+        _save_png(np.zeros((8, 8), dtype=np.uint8), mask_dir / f"{extra_stem}_mask.png")
+
+def build_iugc2024(root: Path):
+    """
+    Synthetic IUGC2024 `new/` layout covering train/val/test differences.
+    """
+    new_root = root / "new"
+
+    # Train: nested per-video mask folder and multiple labelled indices.
+    train = new_root / "train"
+    (train / "videos").mkdir(parents=True, exist_ok=True)
+    (train / "seg" / "trainvid" / "mask").mkdir(parents=True, exist_ok=True)
+    (train / "cls").mkdir(parents=True, exist_ok=True)
+    (train / "videos" / "trainvid.avi").write_bytes(b"\x00" * 64)
+    for frame_idx in (0, 9):
+        _save_png(_mask(8, 8), train / "seg" / "trainvid" / "mask" / f"trainvid_{frame_idx}_6.png")
+    with open(train / "train_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "pos", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "trainvid.avi", "pos": "TRUE", "frame_count": "80",
+                    "labeled_frame_count": "2", "labeled_frame_index": "0,9"})
+    with open(train / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_index"])
+        w.writeheader()
+        w.writerow({"filename": "trainvid.avi", "frame_count": "80",
+                    "labeled_frame_count": "2", "labeled_index": "0,9"})
+    with open(train / "cls" / "class_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "trainvid.avi", "frame_count": "80",
+                    "pos_index": "0,9", "neg_index": "NONE"})
+    (train / "seg" / "landmark.json").write_text(json.dumps({
+        "trainvid_0_6.png": {
+            "ps_points": [["69", "198"], ["84", "299"]],
+            "hsd_point": ["147", "294"],
+            "aop_tangency": ["174", "339"],
+            "hsd": 63.2,
+            "aop": 122.4,
+        }
+    }))
+
+    # Val: flat mask named <video>_<frame>.png and one labelled frame.
+    val = new_root / "val"
+    (val / "videos").mkdir(parents=True, exist_ok=True)
+    (val / "seg").mkdir(parents=True, exist_ok=True)
+    (val / "cls").mkdir(parents=True, exist_ok=True)
+    (val / "videos" / "valvid.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), val / "seg" / "valvid_6.png")
+    with open(val / "val_info.csv", "w", newline="") as f:
+        fields = ["filename", "SP_count", "NSP_count", "frame_count", "labeled_frame_count",
+                  "labeled_frame_index", "SP_index", "NSP_index"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({"filename": "valvid.avi", "SP_count": "2", "NSP_count": "1",
+                    "frame_count": "20", "labeled_frame_count": "1",
+                    "labeled_frame_index": "6", "SP_index": "[6, 7]", "NSP_index": "[0]"})
+    with open(val / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "valvid.avi", "frame_count": "20",
+                    "labeled_frame_count": "1", "labeled_frame_index": "6"})
+    with open(val / "cls" / "cls_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "valvid.avi", "frame_count": "20",
+                    "pos_index": "[6, 7]", "neg_index": "[0]"})
+    (val / "seg" / "landmark.json").write_text(json.dumps({
+        "valvid_6.png": {
+            "ps_points": [["10", "20"], ["11", "21"]],
+            "hsd_point": ["12", "22"],
+            "aop_tangency": ["13", "23"],
+            "hsd": 50.0,
+            "aop": 110.0,
+        }
+    }))
+
+    # Test: flat mask named <video>.png; stem contains frame index.
+    test = new_root / "test"
+    (test / "videos").mkdir(parents=True, exist_ok=True)
+    (test / "seg").mkdir(parents=True, exist_ok=True)
+    (test / "cls").mkdir(parents=True, exist_ok=True)
+    (test / "videos" / "test_10_80.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), test / "seg" / "test_10_80.png")
+    with open(test / "test_info.csv", "w", newline="") as f:
+        fields = ["filename", "SP_count", "NSP_count", "frame_count", "labeled_frame_count",
+                  "labeled_frame_index", "SP_index", "NSP_index"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "SP_count": "72", "NSP_count": "9",
+                    "frame_count": "81", "labeled_frame_count": "1",
+                    "labeled_frame_index": "80", "SP_index": "[9, 10, 80]", "NSP_index": "[0, 1]"})
+    with open(test / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
+                    "labeled_frame_count": "1", "labeled_frame_index": "80"})
+    with open(test / "cls" / "cls_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
+                    "pos_index": "ALL", "neg_index": "NONE"})
+
+def build_maternal_fetal_us_video_intrapartum(root: Path):
+    """
+    Synthetic Maternal-Fetal US Video Intrapartum `DatasetV3/` layout.
+
+    This intentionally differs from the IUGC2024 fixture so the adapter remains
+    separate: root/DatasetV3 instead of root/new, empty val landmark JSON, and
+    split-specific mask naming.
+    """
+    dataset = root / "DatasetV3"
+
+    train = dataset / "train"
+    (train / "videos").mkdir(parents=True, exist_ok=True)
+    (train / "seg" / "240604102919" / "mask").mkdir(parents=True, exist_ok=True)
+    (train / "cls").mkdir(parents=True, exist_ok=True)
+    (train / "videos" / "240604102919.avi").write_bytes(b"\x00" * 64)
+    for frame_idx in (0, 19):
+        _save_png(_mask(8, 8), train / "seg" / "240604102919" / "mask" / f"240604102919_{frame_idx}_6.png")
+    with open(train / "train_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "pos", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "240604102919.avi", "pos": "TRUE", "frame_count": "80",
+                    "labeled_frame_count": "2", "labeled_frame_index": "0,19"})
+    with open(train / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_index"])
+        w.writeheader()
+        w.writerow({"filename": "240604102919.avi", "frame_count": "80",
+                    "labeled_frame_count": "2", "labeled_index": "0,19"})
+    with open(train / "cls" / "class_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "240604102919.avi", "frame_count": "80",
+                    "pos_index": "0,19", "neg_index": "NONE"})
+    (train / "seg" / "landmark.json").write_text(json.dumps({
+        "240604102919_0_6.png": {
+            "ps_points": [["69", "198"], ["84", "299"]],
+            "hsd_point": ["147", "294"],
+            "aop_tangency": ["174", "339"],
+            "hsd": 63.2,
+            "aop": 122.4,
+        }
+    }))
+
+    val = dataset / "val"
+    (val / "videos").mkdir(parents=True, exist_ok=True)
+    (val / "seg").mkdir(parents=True, exist_ok=True)
+    (val / "cls").mkdir(parents=True, exist_ok=True)
+    (val / "videos" / "20190909T155747I1.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), val / "seg" / "20190909T155747I1_6.png")
+    with open(val / "val_info.csv", "w", newline="") as f:
+        fields = ["filename", "SP_count", "NSP_count", "frame_count", "labeled_frame_count",
+                  "labeled_frame_index", "SP_index", "NSP_index"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({"filename": "20190909T155747I1.avi", "SP_count": "2", "NSP_count": "1",
+                    "frame_count": "20", "labeled_frame_count": "1",
+                    "labeled_frame_index": "6", "SP_index": "[6, 7]", "NSP_index": "[0]"})
+    with open(val / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "20190909T155747I1.avi", "frame_count": "20",
+                    "labeled_frame_count": "1", "labeled_frame_index": "6"})
+    with open(val / "cls" / "cls_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "20190909T155747I1.avi", "frame_count": "20",
+                    "pos_index": "[6, 7]", "neg_index": "[0]"})
+    (val / "seg" / "landmark.json").write_text("{}")
+
+    test = dataset / "test"
+    (test / "videos").mkdir(parents=True, exist_ok=True)
+    (test / "seg").mkdir(parents=True, exist_ok=True)
+    (test / "cls").mkdir(parents=True, exist_ok=True)
+    (test / "videos" / "test_10_80.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), test / "seg" / "test_10_80.png")
+    with open(test / "test_info.csv", "w", newline="") as f:
+        fields = ["filename", "SP_count", "NSP_count", "frame_count", "labeled_frame_count",
+                  "labeled_frame_index", "SP_index", "NSP_index"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "SP_count": "72", "NSP_count": "9",
+                    "frame_count": "81", "labeled_frame_count": "1",
+                    "labeled_frame_index": "80", "SP_index": "[9, 10, 80]", "NSP_index": "[0, 1]"})
+    with open(test / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
+                    "labeled_frame_count": "1", "labeled_frame_index": "80"})
+    with open(test / "cls" / "cls_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
+                    "pos_index": "ALL", "neg_index": "NONE"})
+
+def build_large_scale_fetal_head_biometry(root: Path):
+    """
+    Synthetic Large-Scale Fetal Head Biometry layout.
+
+    Uses the resized image folders as primary data and creates extracted
+    segmentation-mask PNG folders for Brain, CSP, and LV.  Original-size
+    folders are populated with files that the adapter must ignore.
+    """
+    rgb = np.stack([_gray(8, 8)] * 3, axis=-1)
+    samples = {
+        "Trans-thalamic": {
+            "subdir": "Trans-thalamic",
+            "csv": "Trans-Thalamic-Pixel-Size.csv",
+            "images": [
+                ("Patient00001_Plane3_1_of_2", "0.21"),
+                ("Patient00001_Plane3_2_of_2", "0.22"),
+            ],
+        },
+        "Trans-cerebellum": {
+            "subdir": "Trans-cerebellum",
+            "csv": "Trans-cerebellum-Pixel-Size.csv",
+            "images": [("Patient00002_Plane3_1_of_1", "0.31")],
+        },
+        "Trans-ventricular": {
+            "subdir": "Trans-ventricular",
+            "csv": "Trans-ventricular-Pixel-Size.csv",
+            "images": [("Patient00003_Plane3_1_of_1", "0.41")],
+        },
+    }
+
+    for group_name, info in samples.items():
+        group = root / group_name
+        image_dir = group / info["subdir"]
+        image_dir.mkdir(parents=True, exist_ok=True)
+        for stem, _px in info["images"]:
+            _save_png(rgb, image_dir / f"{stem}.png")
+
+        with open(group / info["csv"], "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["Label", "Pixel  in mm"])
+            w.writeheader()
+            for stem, px in info["images"]:
+                w.writerow({"Label": f"{stem}.png", "Pixel  in mm": px})
+
+    # Three extracted structure masks for one thalamic image.
+    thalamic = root / "Trans-thalamic"
+    for folder_name, suffix in (("Brain masks", "Brain"), ("CSP masks", "CSP"), ("LV masks", "LV")):
+        mask_dir = thalamic / folder_name
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        _save_png(
+            _mask(8, 8),
+            mask_dir / f"Patient00001_Plane3_1_of_2_{suffix}.png",
+        )
+
+    diverse = root / "Diverse Fetal Head Images"
+    diverse_img_dir = diverse / "Orginal_train_images_to_959_661"
+    diverse_img_dir.mkdir(parents=True, exist_ok=True)
+    _save_png(rgb, diverse_img_dir / "001_HC.png")
+    diverse_mask_dir = diverse / "Brain masks"
+    diverse_mask_dir.mkdir(parents=True, exist_ok=True)
+    _save_png(_mask(8, 8), diverse_mask_dir / "001_HC_Brain.png")
+
+    # Original-size folders must not be indexed as primary images.
+    for original_dir in (
+        root / "Trans-thalamic-orginal-size",
+        root / "Trans-cerebellum-orginal-size",
+        root / "Trans-ventricular-orginal-size",
+        root / "Diverse Fetal Head Images-orginal-image",
+    ):
+        original_dir.mkdir(parents=True, exist_ok=True)
+        _save_png(rgb, original_dir / "ignored_original_size.png")
+
 def build_hc18(root: Path):
-    for d, n in (("training", 6), ("test", 3)):
-        (root / d).mkdir(parents=True, exist_ok=True)
-        for i in range(n):
-            _save_png(_gray(), root / d / f"{i:03d}.png")
-            if d == "training":
-                _save_png(_mask(), root / d / f"{i:03d}_Annotation.png")
+    """
+    Synthetic HC18 dataset using the real naming convention.
+
+    Training patients and sweeps:
+      001_HC    patient 001, sweep 1  — image + annotation + CSV row
+      001_2HC   patient 001, sweep 2  — image + annotation + CSV row
+      002_HC    patient 002           — image + annotation + CSV row
+      003_HC    patient 003           — image + annotation + CSV row (no mask for ssl path)
+    Test set:
+      004_HC, 005_HC  — images only + pixel-size CSV
+    """
+    train_dir = root / "training_set"
+    test_dir  = root / "test_set"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    test_dir.mkdir(parents=True, exist_ok=True)
+
+    train_samples = [
+        ("001_HC",  True,  0.154, 178.3),
+        ("001_2HC", True,  0.154, 179.1),
+        ("002_HC",  True,  0.161, 185.0),
+        ("003_HC",  False, 0.160, None),   # no annotation → ssl_only
+    ]
+    for stem, has_ann, _px, _hc in train_samples:
+        _save_png(_gray(), train_dir / f"{stem}.png")
+        if has_ann:
+            _save_png(_mask(), train_dir / f"{stem}_Annotation.png")
+
+    with open(root / "training_set_pixel_size_and_HC.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "pixel size(mm)", "head circumference (mm)"])
+        w.writeheader()
+        for stem, _ann, px, hc in train_samples:
+            w.writerow({"filename": f"{stem}.png",
+                        "pixel size(mm)": str(px) if px else "",
+                        "head circumference (mm)": str(hc) if hc else ""})
+
+    test_samples = [("004_HC", 0.158), ("005_HC", 0.162)]
+    for stem, px in test_samples:
+        _save_png(_gray(), test_dir / f"{stem}.png")
+
+    with open(root / "test_set_pixel_size.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "pixel size(mm)"])
+        w.writeheader()
+        for stem, px in test_samples:
+            w.writerow({"filename": f"{stem}.png", "pixel size(mm)": str(px)})
 
 def build_lus_multicenter(root: Path, n=5):
     for cls in ("a_lines", "b_lines"):
@@ -455,6 +1067,46 @@ def fetal_planes_root(data_root):
     r = data_root / "FETAL_PLANES_DB"; build_fetal_planes(r); return r
 
 @pytest.fixture(scope="session")
+def fpus23_root(data_root):
+    r = data_root / "FPUS23"; build_fpus23(r); return r
+
+@pytest.fixture(scope="session")
+def focus_root(data_root):
+    r = data_root / "FOCUS"; build_focus(r); return r
+
+@pytest.fixture(scope="session")
+def fugc_root(data_root):
+    r = data_root / "FUGC"; build_fugc(r); return r
+
+@pytest.fixture(scope="session")
+def psfhs_root(data_root):
+    r = data_root / "PSFHS-parent"; build_psfhs(r); return r
+
+@pytest.fixture(scope="session")
+def jnu_ifm_root(data_root):
+    r = data_root / "JNU-IFM"; build_jnu_ifm(r); return r
+
+@pytest.fixture(scope="session")
+def iugc2024_root(data_root):
+    r = data_root / "IUGC2024"; build_iugc2024(r); return r
+
+@pytest.fixture(scope="session")
+def maternal_fetal_us_video_intrapartum_root(data_root):
+    r = data_root / "maternal-fetal-us-video-intrapartum"
+    build_maternal_fetal_us_video_intrapartum(r)
+    return r
+
+@pytest.fixture(scope="session")
+def large_scale_fhb_root(data_root):
+    r = data_root / "large-scale-fetal-head-biometry"
+    build_large_scale_fetal_head_biometry(r)
+    return r
+
+@pytest.fixture(scope="session")
+def pbf_us1_root(data_root):
+    r = data_root / "PBF-US1"; build_pbf_us1(r); return r
+
+@pytest.fixture(scope="session")
 def hc18_root(data_root):
     r = data_root / "HC18"; build_hc18(r); return r
 
@@ -605,6 +1257,199 @@ def build_us105(root: Path):
 @pytest.fixture(scope="session")
 def us105_root(data_root):
     r = data_root / "105US"; build_us105(r); return r
+
+
+def build_acouslic(root: Path):
+    """
+    Synthetic ACOUSLIC-AI dataset.
+
+    4 sweeps across 3 subjects:
+      sweep-aaa  subject 01  ac_mm=250.0  image+mask
+      sweep-bbb  subject 01  ac_mm=252.0  image+mask  (same patient, two sweeps)
+      sweep-ccc  subject 02  ac_mm=270.0  image+mask
+      sweep-ddd  subject 03  no ac data   image only   (mask absent → ssl_only)
+    """
+    train_set = root / "acouslic-ai-train-set"
+    img_dir  = train_set / "images" / "stacked_fetal_ultrasound"
+    mask_dir = train_set / "masks"  / "stacked_fetal_abdomen"
+    circ_dir = train_set / "circumferences"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    circ_dir.mkdir(parents=True, exist_ok=True)
+
+    sweeps = [
+        ("sweep-aaa", "01", "250.0", ""),
+        ("sweep-bbb", "01", "",      "252.0"),
+        ("sweep-ccc", "02", "270.0", ""),
+        ("sweep-ddd", "03", "",      ""),
+    ]
+    for uuid, _sid, _ac1, _ac2 in sweeps:
+        (img_dir / f"{uuid}.mha").write_bytes(b"MHA-stub")
+
+    for uuid, _sid, _ac1, _ac2 in sweeps[:3]:  # sweep-ddd has no mask
+        (mask_dir / f"{uuid}.mha").write_bytes(b"MHA-stub")
+
+    rows = [
+        {"uuid": uuid, "subject_id": sid,
+         "sweep_1_ac_mm": ac1, "sweep_2_ac_mm": ac2,
+         "sweep_3_ac_mm": "", "sweep_4_ac_mm": "",
+         "sweep_5_ac_mm": "", "sweep_6_ac_mm": ""}
+        for uuid, sid, ac1, ac2 in sweeps
+    ]
+    fields = ["uuid", "subject_id",
+              "sweep_1_ac_mm", "sweep_2_ac_mm", "sweep_3_ac_mm",
+              "sweep_4_ac_mm", "sweep_5_ac_mm", "sweep_6_ac_mm"]
+    with open(circ_dir / "fetal_abdominal_circumferences_per_sweep.csv",
+              "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerows(rows)
+
+
+@pytest.fixture(scope="session")
+def acouslic_root(data_root):
+    r = data_root / "ACOUSLIC-AI"
+    build_acouslic(r)
+    return r
+
+
+def build_fass(root: Path):
+    """
+    Synthetic FASS dataset inside the long-named subdirectory.
+
+    6 images across 3 patients (P01, P02, P03), 2 images each.
+    All 6 have paired NPY files except the last one (ssl_only path).
+    """
+    inner = root / "Fetal Abdominal Structures Segmentation Dataset Using Ultrasonic Images"
+    img_dir  = inner / "IMAGES"
+    mask_dir = inner / "ARRAY_FORMAT"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    samples = [
+        ("P01_IMG1", True),
+        ("P01_IMG2", True),
+        ("P02_IMG1", True),
+        ("P02_IMG2", True),
+        ("P03_IMG1", True),
+        ("P03_IMG2", False),  # no NPY → ssl_only
+    ]
+
+    h, w = 4, 4
+    for stem, has_npy in samples:
+        _save_png(_gray(h, w), img_dir / f"{stem}.png")
+        if has_npy:
+            data = {
+                "image": np.zeros((h, w, 3), dtype=np.uint8),
+                "structures": {
+                    "artery":  np.zeros((h, w), dtype=np.uint8),
+                    "liver":   np.zeros((h, w), dtype=np.uint8),
+                    "stomach": np.zeros((h, w), dtype=np.uint8),
+                    "vein":    np.zeros((h, w), dtype=np.uint8),
+                },
+            }
+            np.save(str(mask_dir / f"{stem}.npy"), np.array(data, dtype=object))
+
+
+@pytest.fixture(scope="session")
+def fass_root(data_root):
+    r = data_root / "FASS"
+    build_fass(r)
+    return r
+
+
+def build_fh_ps_aop(root: Path):
+    """
+    Synthetic FH-PS-AOP dataset inside the long-named subdirectory.
+
+    5 image/mask pairs (00001–00005) plus one image with no mask (00006)
+    to exercise the ssl_only path.
+    """
+    inner    = root / "Pubic Symphysis-Fetal Head Segmentation and Angle of Progression"
+    img_dir  = inner / "image_mha"
+    mask_dir = inner / "label_mha"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    for i in range(1, 7):
+        stem = f"{i:05d}"
+        (img_dir / f"{stem}.mha").write_bytes(b"MHA-stub")
+        if i < 6:  # 00006 has no mask → ssl_only
+            (mask_dir / f"{stem}.mha").write_bytes(b"MHA-stub")
+
+
+@pytest.fixture(scope="session")
+def fh_ps_aop_root(data_root):
+    r = data_root / "FH-PS-AOP"
+    build_fh_ps_aop(r)
+    return r
+
+
+def build_pbf_us1(root: Path):
+    """
+    Synthetic PBF-US1 dataset.
+
+    3 exam folders, 7 frames total:
+      Exam-A: 3 frames (class 0, 2, 5)
+      Exam-B: 2 frames (class 5, 5)
+      Exam-C: 2 frames (class 1, 5)
+    metadata.csv has per-exam protocol/position.
+    One extra resume.csv row points to a missing image — must be skipped.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    rgb = np.stack([_gray(8, 8)] * 3, axis=-1)
+
+    exam_a = "Obstetrics Exam - 01-Jan-2023_10_AM"
+    exam_b = "Obstetrics Exam - 02-Jan-2023_11_AM"
+    exam_c = "Obstetrics Exam - 03-Jan-2023_12_PM"
+
+    frames = [
+        (exam_a, "cineframe_1_2023-01-01T100000.jpeg", "Biparietal standard plane", "0"),
+        (exam_a, "cineframe_2_2023-01-01T100041.jpeg", "Heart standard plane",      "2"),
+        (exam_a, "cineframe_3_2023-01-01T100123.jpeg", "No plane",                  "5"),
+        (exam_b, "cineframe_1_2023-01-02T110000.jpeg", "No plane",                  "5"),
+        (exam_b, "cineframe_2_2023-01-02T110041.jpeg", "No plane",                  "5"),
+        (exam_c, "cineframe_1_2023-01-03T120000.jpeg", "Abdominal standard plane",  "1"),
+        (exam_c, "cineframe_2_2023-01-03T120041.jpeg", "No plane",                  "5"),
+    ]
+
+    for studie, file_name, _, _ in frames:
+        exam_dir = root / studie
+        exam_dir.mkdir(exist_ok=True)
+        img_path = exam_dir / file_name
+        if PIL_OK:
+            from PIL import Image as PILImage
+            PILImage.fromarray(rgb).save(img_path, format="JPEG")
+        else:
+            img_path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 64)
+
+    resume_rows = [
+        {"file_name": fn, "studie": st, "class": cls, "value": val, "image": ""}
+        for st, fn, cls, val in frames
+    ]
+    # row pointing to a missing image — must be skipped
+    resume_rows.append({
+        "file_name": "cineframe_99_missing.jpeg",
+        "studie": exam_a,
+        "class": "No plane",
+        "value": "5",
+        "image": "",
+    })
+
+    with open(root / "resume.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["file_name", "studie", "class", "value", "image"])
+        w.writeheader()
+        w.writerows(resume_rows)
+
+    meta_rows = [
+        {"Study Name": exam_a, "protocol": "Vertical",   "position": "OP"},
+        {"Study Name": exam_b, "protocol": "Horizontal",  "position": "SP"},
+        {"Study Name": exam_c, "protocol": "Diagonal /",  "position": "OA"},
+    ]
+    with open(root / "metadata.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["Study Name", "protocol", "position"])
+        w.writeheader()
+        w.writerows(meta_rows)
 
 
 @pytest.fixture
