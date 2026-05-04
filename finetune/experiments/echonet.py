@@ -175,11 +175,9 @@ class EchoNetFinetune(FinetuneExperiment):
                 pred = self.head(vid_out["clip_cls"])
                 loss = self.compute_loss(batch, {}, pred)
 
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimiser)
-            torch.nn.utils.clip_grad_norm_(self.head.parameters(), 1.0)
-            scaler.step(optimiser)
-            scaler.update()
+            self._backward_step_with_scaler(
+                loss, optimiser, scaler, self.head.parameters()
+            )
             optimiser.zero_grad(set_to_none=True)
 
             total_loss += loss.item()
@@ -218,6 +216,22 @@ class EchoNetFinetune(FinetuneExperiment):
             "val_r2":    round(r2_score(pred_arr, true_arr), 4),
             "val_r":     round(pearson_r(pred_arr, true_arr), 4),
         }
+
+    def evaluate(self, split: str = "test") -> dict:
+        """Override to instantiate EchoNetBenchmark with vid_branch instead of img_branch."""
+        assert self.head is not None, "Call setup() and run() first"
+        self.head.eval()
+        benchmark = EchoNetBenchmark(
+            vid_branch=self.vid_branch,
+            reg_head=self.head,
+            device=self.device,
+            batch_size=self.cfg.batch_size,
+            num_workers=self.cfg.num_workers,
+        )
+        results = benchmark.run(str(self.data_root), split=split.upper())
+        results["experiment"] = self.EXPERIMENT_NAME
+        self._save_results(results)
+        return results
 
     def run_viz(self, results: dict, output_dir: Path) -> None:
         try:

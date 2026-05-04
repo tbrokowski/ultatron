@@ -195,10 +195,9 @@ class EchoNetLVHFinetune(FinetuneExperiment):
                     vid_out = self.vid_branch.forward_teacher(batch["clip"])
                 pred = self.head(vid_out["clip_cls"])
                 loss = self.compute_loss(batch, {}, pred)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimiser)
-            torch.nn.utils.clip_grad_norm_(self.head.parameters(), 1.0)
-            scaler.step(optimiser); scaler.update()
+            self._backward_step_with_scaler(
+                loss, optimiser, scaler, self.head.parameters()
+            )
             optimiser.zero_grad(set_to_none=True)
             total_loss += loss.item(); n += 1
         return total_loss / max(n, 1)

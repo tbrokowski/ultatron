@@ -29,7 +29,7 @@ finetune:
   head_type:  linear
 
   # ── Early stopping ─────────────────────────────────────────────────────────
-  patience:      8
+  patience:      40
   monitor:       val_auc_macro   # patient-level macro AUC across 3 tasks
   monitor_mode:  max
 

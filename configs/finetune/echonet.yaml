@@ -30,7 +30,7 @@ finetune:
   # Note: uses video branch (vid_branch), not image branch.
 
   # ── Early stopping ───────────────────────────────────────────────────────────
-  patience:      10
+  patience:      50
   monitor:       val_mae      # metric key in compute_val_metrics() output
   monitor_mode:  min          # "max" for dice/auc, "min" for loss/mae
 

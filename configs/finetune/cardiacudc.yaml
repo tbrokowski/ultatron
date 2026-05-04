@@ -14,7 +14,7 @@ finetune:
   batch_size:   8
   num_workers:  2
   head_type:    mlp
-  patience:     10
+  patience:     50
   monitor:      val_auc
   monitor_mode: max
   freeze_backbone: true

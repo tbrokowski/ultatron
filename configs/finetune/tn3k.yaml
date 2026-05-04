@@ -28,7 +28,7 @@ finetune:
   # Thyroid nodule boundary — DPT recommended for thin structures.
 
   # ── Early stopping ───────────────────────────────────────────────────────────
-  patience:      10
+  patience:      50
   monitor:       val_dice      # metric key in compute_val_metrics() output
   monitor_mode:  max          # "max" for dice/auc, "min" for loss/mae
 

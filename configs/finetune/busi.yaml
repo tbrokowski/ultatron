@@ -16,9 +16,9 @@ model:
 
 finetune:
   # ── Optimiser ───────────────────────────────────────────────────────────────
-  lr:           1.0e-4
+  lr:           3.0e-5      # was 1e-4; lower LR for smoother convergence + cosine schedule
   weight_decay: 0.01
-  max_epochs:   50
+  max_epochs:   150         # was 50; cosine schedule fills the budget
   batch_size:   16
   num_workers:  4
 
@@ -31,7 +31,7 @@ finetune:
   # The second head (LinearClsHead) uses default params.
 
   # ── Early stopping ───────────────────────────────────────────────────────────
-  patience:      10
+  patience:      100          # was 10; allow longer plateau before giving up
   monitor:       val_dice      # metric key in compute_val_metrics() output
   monitor_mode:  max          # "max" for dice/auc, "min" for loss/mae
 

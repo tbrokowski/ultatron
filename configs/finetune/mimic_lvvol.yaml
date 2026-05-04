@@ -14,7 +14,7 @@ finetune:
   batch_size:   8       # DICOM loading is slow; smaller batch is safer
   num_workers:  2
   head_type:    linear
-  patience:     10
+  patience:     50
   monitor:      val_mae
   monitor_mode: min
   freeze_backbone: true

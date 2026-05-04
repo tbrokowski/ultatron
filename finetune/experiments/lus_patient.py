@@ -396,11 +396,9 @@ class LUSPatientFinetune(FinetuneExperiment):
             logits = torch.stack(logits_list)           # (B,)
 
             loss = F.binary_cross_entropy_with_logits(logits, labels)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimiser)
-            torch.nn.utils.clip_grad_norm_(self.head.parameters(), 1.0)
-            scaler.step(optimiser)
-            scaler.update()
+            self._backward_step_with_scaler(
+                loss, optimiser, scaler, self.head.parameters()
+            )
             optimiser.zero_grad(set_to_none=True)
 
             total_loss += loss.item()

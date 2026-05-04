@@ -128,7 +128,10 @@ class BaseBenchmark(ABC):
         loader       = self.build_dataloader(root, split)
         per_sample   = []
 
-        self.img_branch.teacher.eval()
+        if self.img_branch is not None:
+            self.img_branch.teacher.eval()
+        if getattr(self, "vid_branch", None) is not None:
+            self.vid_branch.teacher.eval()
         if self.head is not None:
             self.head.eval()
 
@@ -141,7 +144,8 @@ class BaseBenchmark(ABC):
                 }
                 outputs     = self.predict(batch)
                 pred        = outputs["pred"]
-                target      = batch.get("mask") or batch.get("target") or batch.get("label")
+                target      = next((batch[k] for k in ("mask", "target", "label")
+                                    if batch.get(k) is not None), None)
                 sample_ids  = batch.get("sample_id", [""] * pred.shape[0])
                 metrics     = self.compute_metrics(pred, target, sample_ids)
                 per_sample.extend(metrics)

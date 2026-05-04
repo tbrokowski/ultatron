@@ -236,7 +236,9 @@ class FinetuneExperiment(ABC):
             lr=self.cfg.lr,
             weight_decay=self.cfg.weight_decay,
         )
-        scaler = GradScaler(enabled=torch.cuda.is_available())
+        # BF16 does not need loss scaling; GradScaler unscale is not implemented for BF16 on some CUDA builds.
+        use_amp_scaler = next(self.head.parameters()).dtype != torch.bfloat16
+        scaler = GradScaler(enabled=torch.cuda.is_available() and use_amp_scaler)
 
         log.info(f"[{self.EXPERIMENT_NAME}] Training for up to "
                  f"{self.cfg.max_epochs} epochs on {self.DATASET_ID}")
@@ -273,13 +275,33 @@ class FinetuneExperiment(ABC):
                              f"(patience={self.cfg.patience})")
                     break
 
-        # Reload best head
+        # Reload best head (uses overridable load_head so subclasses can restore
+        # multiple heads from the same checkpoint file)
         best_path = self.output_dir / "best_head.pt"
         if best_path.exists():
-            self.head.load_state_dict(torch.load(best_path, map_location=self.device))
+            self.load_head(str(best_path))
 
         self._save_log()
         return {"train_log": self._train_log, "best_metric": self._best_metric}
+
+    def _backward_step_with_scaler(
+        self,
+        loss: torch.Tensor,
+        optimiser: torch.optim.Optimizer,
+        scaler: GradScaler,
+        clip_params,
+    ) -> None:
+        """Backward, grad clip, optimizer step. Scaler is off when training heads in BF16."""
+        if scaler.is_enabled():
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimiser)
+            torch.nn.utils.clip_grad_norm_(clip_params, 1.0)
+            scaler.step(optimiser)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(clip_params, 1.0)
+            optimiser.step()
 
     def _train_epoch(
         self,
@@ -311,11 +333,9 @@ class FinetuneExperiment(ABC):
 
                 loss = self.compute_loss(batch, feats, head_out)
 
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimiser)
-            torch.nn.utils.clip_grad_norm_(self.head.parameters(), 1.0)
-            scaler.step(optimiser)
-            scaler.update()
+            self._backward_step_with_scaler(
+                loss, optimiser, scaler, self.head.parameters()
+            )
             optimiser.zero_grad(set_to_none=True)
 
             total_loss += loss.item()

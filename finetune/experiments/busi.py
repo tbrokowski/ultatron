@@ -28,12 +28,15 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import random
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
+from torchvision.transforms import functional as TF
 
 from finetune.base import FinetuneExperiment, FinetuneConfig
 from models.heads import build_seg_head, build_cls_head
@@ -44,6 +47,36 @@ log = logging.getLogger(__name__)
 
 CLASS_NAMES = ["benign", "malignant", "normal"]
 IMG_SIZE    = 224
+
+
+def _augment(img: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply consistent spatial + colour augmentations to image+mask pairs.
+    All transforms that change geometry are applied identically to both.
+    """
+    # Random horizontal flip
+    if random.random() < 0.5:
+        img  = TF.hflip(img)
+        mask = TF.hflip(mask)
+
+    # Random vertical flip
+    if random.random() < 0.3:
+        img  = TF.vflip(img)
+        mask = TF.vflip(mask)
+
+    # Random rotation ±15°
+    if random.random() < 0.5:
+        angle = random.uniform(-15, 15)
+        img  = TF.rotate(img,  angle, interpolation=TF.InterpolationMode.BILINEAR)
+        mask = TF.rotate(mask, angle, interpolation=TF.InterpolationMode.NEAREST)
+
+    # Random brightness / contrast (image only)
+    if random.random() < 0.5:
+        img = TF.adjust_brightness(img, random.uniform(0.7, 1.3))
+    if random.random() < 0.5:
+        img = TF.adjust_contrast(img, random.uniform(0.7, 1.3))
+
+    return img, mask
 
 
 class BUSIFinetuneDataset(Dataset):
@@ -65,6 +98,7 @@ class BUSIFinetuneDataset(Dataset):
 
     def __init__(self, root: str, split: str = "train", test_frac: float = 0.20):
         self.root    = Path(root)
+        self.split   = split
         self.samples = self._collect(split, test_frac)
 
     def _collect(self, split: str, test_frac: float) -> list[dict]:
@@ -112,6 +146,9 @@ class BUSIFinetuneDataset(Dataset):
             m_t = F.interpolate(m_t, size=(IMG_SIZE, IMG_SIZE), mode="nearest").squeeze(0)
             mask = (m_t > 0.5).float()
 
+        if self.split == "train":
+            img_t, mask = _augment(img_t, mask)
+
         return {
             "image":     img_t,
             "mask":      mask,
@@ -119,6 +156,15 @@ class BUSIFinetuneDataset(Dataset):
             "cls_name":  s["cls_name"],
             "sample_id": s["sample_id"],
         }
+
+    def class_weights(self) -> torch.Tensor:
+        """Inverse-frequency class weights for balanced CrossEntropy."""
+        counts = torch.zeros(len(CLASS_NAMES))
+        for s in self.samples:
+            counts[s["cls_label"]] += 1
+        counts = counts.clamp(min=1)
+        weights = counts.sum() / (len(CLASS_NAMES) * counts)
+        return weights
 
 
 class BUSIFinetune(FinetuneExperiment):
@@ -150,9 +196,12 @@ class BUSIFinetune(FinetuneExperiment):
         log.info(f"[BUSI] Cls head: {self.head2} (dtype={backbone_dtype})")
 
     def build_dataloader(self, split: str) -> DataLoader:
+        ds = BUSIFinetuneDataset(str(self.data_root), split)
+        if split == "train" and not hasattr(self, "_cls_weights"):
+            self._cls_weights = ds.class_weights().to(self.device)
+            log.info(f"[BUSI] class weights: {self._cls_weights.tolist()}")
         return DataLoader(
-            BUSIFinetuneDataset(str(self.data_root), split),
-            batch_size=self.cfg.batch_size, shuffle=(split == "train"),
+            ds, batch_size=self.cfg.batch_size, shuffle=(split == "train"),
             num_workers=self.cfg.num_workers, pin_memory=True,
         )
 
@@ -173,22 +222,54 @@ class BUSIFinetune(FinetuneExperiment):
             denom= p_s.sum(dim=(1, 2, 3)) + target_mask[has_tumour].sum(dim=(1, 2, 3))
             seg_loss = bce + (1.0 - (2 * inter + 1) / (denom + 1)).mean()
 
-        # Classification loss
+        # Classification loss — class-weighted to counter benign-heavy imbalance
         cls_logits = self.head2(feats["cls"])
-        cls_loss   = F.cross_entropy(cls_logits, target_cls)
+        weight = getattr(self, "_cls_weights", None)
+        if weight is not None:
+            weight = weight.to(device=cls_logits.device, dtype=cls_logits.dtype)
+        cls_loss = F.cross_entropy(cls_logits, target_cls, weight=weight)
 
         # Weighted sum: equal weight by default
         return seg_loss + cls_loss
 
+    def _save_head(self, name: str = "best_head.pt"):
+        """Save both seg head and cls head together."""
+        path = self.output_dir / name
+        torch.save({
+            "head":  self.head.state_dict(),
+            "head2": self.head2.state_dict(),
+        }, path)
+
+    def load_head(self, path: str):
+        """Load both seg head and cls head."""
+        ckpt = torch.load(path, map_location=self.device)
+        if isinstance(ckpt, dict) and "head" in ckpt:
+            self.head.load_state_dict(ckpt["head"])
+            if "head2" in ckpt and self.head2 is not None:
+                self.head2.load_state_dict(ckpt["head2"])
+        else:
+            self.head.load_state_dict(ckpt)
+
+    def _reload_best_heads(self):
+        """Called after training to restore best checkpoint into both heads."""
+        best_path = self.output_dir / "best_head.pt"
+        if best_path.exists():
+            self.load_head(str(best_path))
+
     def _train_epoch(self, loader, optimiser, scaler) -> float:
-        """Override to include head2 in the optimiser."""
-        # Rebuild optimiser to include both heads
+        """Override to include head2 in the optimiser with cosine LR schedule."""
+        # Rebuild optimiser to include both heads on first call
         if not hasattr(self, "_multi_optim"):
             self._multi_optim = torch.optim.AdamW(
                 list(self.head.parameters()) + list(self.head2.parameters()),
                 lr=self.cfg.lr, weight_decay=self.cfg.weight_decay,
             )
             self._multi_scaler = scaler
+            self._multi_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self._multi_optim,
+                T_max=self.cfg.max_epochs,
+                eta_min=self.cfg.lr * 0.01,
+            )
 
         self.head.train()
         self.head2.train()
@@ -207,18 +288,18 @@ class BUSIFinetune(FinetuneExperiment):
                 head_out = self.head(feats["patch_tokens"])
                 loss     = self.compute_loss(batch, feats, head_out)
 
-            self._multi_scaler.scale(loss).backward()
-            self._multi_scaler.unscale_(self._multi_optim)
-            torch.nn.utils.clip_grad_norm_(
-                list(self.head.parameters()) + list(self.head2.parameters()), 1.0
+            self._backward_step_with_scaler(
+                loss,
+                self._multi_optim,
+                self._multi_scaler,
+                list(self.head.parameters()) + list(self.head2.parameters()),
             )
-            self._multi_scaler.step(self._multi_optim)
-            self._multi_scaler.update()
             self._multi_optim.zero_grad(set_to_none=True)
 
             total_loss += loss.item()
             n          += 1
 
+        self._multi_scheduler.step()
         return total_loss / max(n, 1)
 
     @torch.no_grad()

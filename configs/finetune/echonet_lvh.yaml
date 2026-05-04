@@ -14,7 +14,7 @@ finetune:
   batch_size:   16
   num_workers:  4
   head_type:    linear
-  patience:     10
+  patience:     50
   monitor:      val_mae
   monitor_mode: min
   freeze_backbone: true

@@ -52,18 +52,25 @@ class RegressionHead(nn.Module):
         super().__init__()
         self.output_min = output_min
         self.output_max = output_max
+        output_layer = nn.Linear(hidden_dim, 1)
+        if output_min is not None and output_max is not None:
+            nn.init.constant_(output_layer.bias, (output_min + output_max) / 2.0)
         self.net = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, 1),
+            output_layer,
         )
 
     def forward(self, cls: torch.Tensor) -> torch.Tensor:
-        # cls: (B, D) → (B, 1) → clamped scalar
+        # cls: (B, D) → (B, 1) → optionally clamped scalar
         out = self.net(cls)                      # (B, 1)
-        if self.output_min is not None or self.output_max is not None:
-            out = torch.clamp(out, self.output_min, self.output_max)
+        # Only clamp at inference — during training the raw logit must stay
+        # unclamped so gradients flow freely.  Hard-clamping to [10, 85] kills
+        # all gradients when random-init outputs land below the lower bound.
+        if not self.training:
+            if self.output_min is not None or self.output_max is not None:
+                out = torch.clamp(out, self.output_min, self.output_max)
         return out.squeeze(-1)                   # (B,)
 
     def __repr__(self):
