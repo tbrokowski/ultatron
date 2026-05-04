@@ -38,6 +38,10 @@ from .stu_hospital import STUHospitalAdapter
 from .lung.benin_lus import BeninLUSAdapter
 from .lung.rsa_lus   import RSALUSAdapter
 
+# ── Liver ─────────────────────────────────────────────────────────────────────
+from .liver.aul   import AULAdapter
+from .liver.us105 import US105Adapter
+
 # Registry: dataset_id -> adapter class
 ADAPTER_REGISTRY = {
     # Cardiac — fully labelled
@@ -70,6 +74,9 @@ ADAPTER_REGISTRY = {
     # Lung
     "Benin-LUS":                BeninLUSAdapter,
     "RSA-LUS":                  RSALUSAdapter,
+    # Liver
+    "AUL":                      AULAdapter,
+    "105US":                    US105Adapter,
 }
 
 
@@ -117,6 +124,8 @@ __all__ = [
     "DermatologicSkinLesionsAdapter",
     # Lung
     "BeninLUSAdapter", "RSALUSAdapter",
+    # Liver
+    "AULAdapter", "US105Adapter",
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
 ]

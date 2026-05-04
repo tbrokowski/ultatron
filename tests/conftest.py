@@ -531,6 +531,82 @@ def mimic_lvvol_a4c_root(data_root):
     r = data_root / "MIMIC-IV-Echo-LVVol-A4C"; build_mimic_lvvol_a4c(r); return r
 
 
+def build_aul(root: Path):
+    """
+    Synthetic AUL dataset.
+
+    Benign:    3 images, all 3 segmentation types (liver, outline, mass)
+    Malignant: 3 images, liver JSON missing for image 3
+    Normal:    1 image,  liver + outline only (no mass/ folder)
+    Total: 7 images
+    """
+    polygon = [[10.0, 10.0], [50.0, 10.0], [50.0, 50.0], [10.0, 50.0]]
+    polygon_json = json.dumps(polygon)
+
+    classes = {
+        "Benign":    {"stems": ["1", "2", "3"], "seg_types": ["liver", "outline", "mass"]},
+        "Malignant": {"stems": ["1", "2", "3"], "seg_types": ["liver", "outline", "mass"],
+                      "skip_liver": {"3"}},
+        "Normal":    {"stems": ["1"],            "seg_types": ["liver", "outline"]},
+    }
+
+    for cls_name, cfg in classes.items():
+        img_dir = root / cls_name / "image"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        for seg_type in cfg["seg_types"]:
+            (root / cls_name / "segmentation" / seg_type).mkdir(parents=True, exist_ok=True)
+
+        for stem in cfg["stems"]:
+            # JPEG image
+            img_path = img_dir / f"{stem}.jpg"
+            if PIL_OK:
+                from PIL import Image as PILImage
+                PILImage.fromarray(_gray(8, 8)).save(img_path, format="JPEG")
+            else:
+                img_path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 64)
+
+            # Segmentation JSONs
+            skip_liver = cfg.get("skip_liver", set())
+            for seg_type in cfg["seg_types"]:
+                if seg_type == "liver" and stem in skip_liver:
+                    continue
+                json_path = root / cls_name / "segmentation" / seg_type / f"{stem}.json"
+                json_path.write_text(polygon_json)
+
+
+@pytest.fixture(scope="session")
+def aul_root(data_root):
+    r = data_root / "AUL"; build_aul(r); return r
+
+
+def build_us105(root: Path):
+    """
+    Synthetic 105US dataset.
+
+    4 images: 001, 002, 003, 004
+    Masks for 001, 002, 003 only — 004 has no mask (ssl_only path).
+    """
+    img_dir  = root / "105 US Images"
+    mask_dir = root / "105 US Masks"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    for stem in ("001", "002", "003", "004"):
+        _save_png(_gray(8, 8), img_dir / f"{stem}.png")
+
+    gray_mask = _gray(8, 8)
+    for stem in ("001", "002", "003"):
+        _save_png(gray_mask, mask_dir / f"{stem} G man.png")
+
+    # readme.txt present in real dataset — adapter must ignore it
+    (img_dir / "readme.txt").write_text("placeholder")
+
+
+@pytest.fixture(scope="session")
+def us105_root(data_root):
+    r = data_root / "105US"; build_us105(r); return r
+
+
 @pytest.fixture
 def tmp_manifest_with_masks(tmp_path):
     """A tiny manifest file with train/val entries and mask data."""
