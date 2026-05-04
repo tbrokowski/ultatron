@@ -7,6 +7,9 @@ from typing import Optional
 
 from .base import BaseAdapter
 
+
+
+
 # ── Cardiac ───────────────────────────────────────────────────────────────────
 from .cardiac.camus             import CAMUSAdapter
 from .cardiac.echonet           import EchoNetDynamicAdapter
@@ -33,6 +36,17 @@ from .remind2reg import ReMIND2RegAdapter
 from .remind_brain_ius import REMINDBrainIUSAdapter
 from .resect import RESECTAdapter
 from .stu_hospital import STUHospitalAdapter
+
+# ── Breast ────────────────────────────────────────────────────────────────────
+from .breast.breast_adapter             import BrEaSTAdapter
+from .breast.buid_adapter               import BUIDAdapter
+from .breast.bus_bra_adapter            import BUSBRAAdapter
+from .breast.bus_uc_adapter             import BUSUCAdapter
+from .breast.bus_uclm_adapter           import BUSUCLMAdapter
+from .breast.busv_adapter               import BUSVAdapter
+from .breast.chinese_us_report_adapter  import ChineseUSReportBreastAdapter
+from .breast.gdph_sysucc_adapter        import GDPHSYSUCCAdapter
+from .breast.s1_adapter                 import S1Adapter
 
 # ── Lung ──────────────────────────────────────────────────────────────────────
 from .lung.benin_lus import BeninLUSAdapter
@@ -72,8 +86,17 @@ ADAPTER_REGISTRY = {
     "CardiacUDC":               CardiacUDCAdapter,
     "EchoCP":                   EchoCPAdapter,
     # Breast / thyroid
-    "BUSI":                     BUSIAdapter,
-    "TN3K":                     TN3KAdapter,
+    "BUSI":                             BUSIAdapter,
+    "TN3K":                             TN3KAdapter,
+    "BrEaST":                           BrEaSTAdapter,
+    "BUID":                             BUIDAdapter,
+    "BUS-BRA":                          BUSBRAAdapter,
+    "BUS-UC":                           BUSUCAdapter,
+    "BUS-UCLM":                         BUSUCLMAdapter,
+    "BUSV":                             BUSVAdapter,
+    "GDPH-SYSUCC":                      GDPHSYSUCCAdapter,
+    "Chinese-US-Report-Breast":         ChineseUSReportBreastAdapter,
+    "S1":                               S1Adapter,
     # Vascular / carotid
     "CUBS":                     CUBSAdapter,
     "Common-Carotid-Artery-Ultrasound-Images": CommonCarotidArteryImagesAdapter,
@@ -153,6 +176,10 @@ __all__ = [
     "RESECTAdapter", "ReMIND2RegAdapter", "STUHospitalAdapter",
     "AnnotatedHeterogeneousUSDBAdapter", "ERDESAdapter",
     "DermatologicSkinLesionsAdapter",
+    # Breast
+    "BUSBRAAdapter", "BUSUCAdapter", "BUSUCLMAdapter", "BrEaSTAdapter",
+    "BUIDAdapter", "S1Adapter", "BUSVAdapter", "GDPHSYSUCCAdapter",
+    "ChineseUSReportBreastAdapter",
     # Lung
     "BeninLUSAdapter", "RSALUSAdapter",
     # Liver
