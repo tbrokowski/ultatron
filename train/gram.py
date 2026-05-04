@@ -14,7 +14,9 @@ gram_refresh_interval steps.
 
 gram_loss
 ---------
-L_gram = (1/B) Σ_b ||X_S_b @ X_S_b.T  −  X_G_b @ X_G_b.T||_F²
+L_gram = (1/B) Σ_b mean_valid_pairs(
+    (X_S_b @ X_S_b.T - X_G_b @ X_G_b.T)^2
+)
 
 where X_S and X_G are L2-normalised patch token matrices.
 Padding tokens are zeroed before computing Gram matrices.
@@ -123,17 +125,24 @@ def gram_loss(
     padding_mask: Optional[torch.Tensor] = None,  # (B, ph, pw)
 ) -> torch.Tensor:
     """
-    L_gram = (1/B) Σ_b ||X_S_b @ X_S_b.T  −  X_G_b @ X_G_b.T||_F²
+    L_gram = (1/B) Σ_b mean_valid_pairs(
+        (X_S_b @ X_S_b.T - X_G_b @ X_G_b.T)^2
+    )
 
     Padding tokens are zeroed before Gram matrix computation.
     """
+    pair_mask = None
     if padding_mask is not None:
         flat = padding_mask.flatten(1).unsqueeze(-1).float()  # (B, N, 1)
         X_S  = X_S * flat
         X_G  = X_G * flat
+        pair_mask = flat * flat.transpose(1, 2)
 
     G_S  = torch.bmm(X_S, X_S.transpose(1, 2))   # (B, N, N)
     G_G  = torch.bmm(X_G, X_G.transpose(1, 2))
 
-    diff = G_S - G_G
-    return (diff * diff).sum(dim=(1, 2)).mean()
+    sq = (G_S - G_G).pow(2)
+    if pair_mask is not None:
+        denom = pair_mask.sum(dim=(1, 2)).clamp_min(1.0)
+        return (sq * pair_mask).sum(dim=(1, 2)).div(denom).mean()
+    return sq.mean(dim=(1, 2)).mean()
