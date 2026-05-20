@@ -172,26 +172,3 @@ This is the single source of truth for the baseline and the one-change-at-a-time
 | `model.trainable_image_layers` | Image backbone trainability. | `4` | `image_full_backbone=null`, `image_last8_layers=8`, `heads_only_phase3=0` | URFM/UltraFedFM fine-tuning; local last-K support |
 | `model.trainable_video_layers` | Video backbone trainability. | `4` | `video_full_backbone=null`, `video_last8_layers=8`, `heads_only_phase3=0` | V-JEPA scaling cost; local last-K support |
 | `anatomy_weights` | Anatomy-family sampler weights. | cardiac `0.8`, breast/brain `1.0`, fetal/intrapartum `1.2`, lung `1.3` | none configured | USFM organ balancing; URFM/EchoCare multi-organ caution |
-
-## Removed Or Not Yet Configured
-
-| params | short and precise explanation | values | references |
-|---|---|---|---|
-| `train.force_stage` | Removed because it was not consumed by `TrainConfig`; `heads_only_phase3` now uses phase fractions only. | removed | Local code audit |
-| DINOv3-B image backbone | Curated as the first serious image-branch target, but not configured in this runnable sweep because the gated HF model is not present in the shared cache. | not configured until cached/authenticated | DINOv3; local CSCS cache audit |
-| Patch size 8 | Curated as high-value for ultrasound fine structures, but not enabled here because current DINOv3/V-JEPA wrappers are patch-16. | not configured | DINOv3/V-JEPA2 patch-16 compatibility |
-| V-JEPA 2.1 dense variant | Worth tracking for dense ultrasound tokens, but no local `vjepa2_1_*` registry key exists yet. | not configured | V-JEPA2 GitHub update |
-| MedSAM-3 / UltraSam knobs | Downstream Phase 4 segmentation/agent settings, not part of this SSL launcher. | not configured here | MedSAM-3, UltraSam |
-
-## Source Notes
-
-References in the tables use the curated notes from the current request plus local code inspection. Direct links provided in the request:
-
-- V-JEPA2 config: https://raw.githubusercontent.com/facebookresearch/vjepa2/main/configs/train/vitg16/pretrain-256px-16f.yaml
-- V-JEPA2 repo: https://github.com/facebookresearch/vjepa2
-- DISCOVR arXiv: https://arxiv.org/html/2506.11777v3
-- DISCOVR repo: https://github.com/mdivyanshu97/DISCOVR
-- DISCOVR pretraining parser: https://raw.githubusercontent.com/mdivyanshu97/DISCOVR/master/scripts/run_mae_pretraining.py
-- OpenUS repo: https://github.com/XZheng0427/OpenUS
-
-Other source labels refer to the user-curated paper notes for DINOv3, UltraSam, MedSAM-3, USFM, UltraFedFM, URFM, EchoCare, and USF-MAE.
