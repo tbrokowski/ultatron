@@ -1,79 +1,8 @@
-# Default hyperparameter tuning definitions for submit_hparam_tuning.sh.
-#
-# Add new variants under `variants` and optionally include them in one or more
-# `profiles`. Each variant is a deep override on top of `defaults`.
-
-profiles:
-  single:
-    - stable_baseline
-  sentinel:
-    - stable_baseline
-    - lr_5e6
-    - video_mask_065
-    - cross_loss_half
-  optimizer:
-    - lr_5e6
-    - lr_2e5
-    - wd_001
-    - wd_008
-    - clip_05
-    - ema_9995
-  masking:
-    - img_mask_030
-    - img_mask_050
-    - video_mask_065
-    - video_mask_080
-    - video_frames_32
-  loss:
-    - cross_loss_half
-    - no_proto
-    - nce_025
-    - nce_temp_010
-    - cross_koleo_005
-    - no_cross_koleo
-  architecture:
-    - align_dim_512
-    - proto_128
-  trainability:
-    - full_backbones
-    - last8_layers
-    - last4_layers
-    - heads_only_phase3
-  all:
-    - stable_baseline
-    - lr_5e6
-    - lr_2e5
-    - wd_001
-    - wd_008
-    - clip_05
-    - ema_9995
-    - img_mask_030
-    - img_mask_050
-    - video_mask_065
-    - video_mask_080
-    - video_frames_32
-    - cross_loss_half
-    - no_proto
-    - nce_025
-    - nce_temp_010
-    - cross_koleo_005
-    - no_cross_koleo
-    - align_dim_512
-    - proto_128
-    - full_backbones
-    - last8_layers
-    - last4_layers
-    - heads_only_phase3
-
 defaults:
   seed: 42
   manifest:
-    # submit_hparam_tuning.sh passes --manifest explicitly. This path is only
-    # the fallback if someone runs scripts/train.py directly from a generated
-    # config without --manifest.
-    path: "manifests/cardiac_breast_brain_maternal_lung_train.jsonl"
+    path: manifests/cardiac_breast_brain_maternal_lung_train.jsonl
     val_path: null
-    # Keep Store paths from the manifest as-is. Do not auto-remap to Scratch.
     root_remap: {}
   curriculum:
     total_training_steps: 8000
@@ -87,32 +16,32 @@ defaults:
   transforms:
     patch_size: 16
     image:
-      n_global_crops: 4
+      n_global_crops: 2
       n_local_crops: 8
       max_global_crop_px: 256
       mask_strategy: freq
       freq_mask:
-        mask_ratio: 0.40
+        mask_ratio: 0.4
         n_bands: 1
         use_alp_bias: false
-      spatial_mask_ratio: 0.40
+      spatial_mask_ratio: 0.4
     video:
       n_frames: 16
       temporal_stride: 4
-      tube_size: 4
+      tube_size: 2
       tube_mask_ratio: 0.75
       mask_strategy: freq
       max_crop_px: 112
-      spatial_mask_ratio: 0.40
+      spatial_mask_ratio: 0.4
       freq_mask:
         mask_ratio: 0.75
         n_bands: 1
         use_alp_bias: false
   train:
     phase1_frac: 0.15
-    phase2_frac: 0.40
+    phase2_frac: 0.4
     phase3_frac: 1.0
-    base_lr: 0.00001
+    base_lr: 1.0e-05
     weight_decay: 0.04
     beta1: 0.9
     beta2: 0.95
@@ -131,37 +60,34 @@ defaults:
     lam6_nce_temp: 0.07
     lam7: 0.5
     lam_7b: 0.0
-    lam_gram: 0.0
+    lam_gram: 1.0
     lam_koleo: 0.1
     lam_koleo_cross: 0.1
     use_koleo: false
-    gram_start_step: 999999
-    gram_refresh_interval: 50000
-    res_step_1: 30000
-    res_step_2: 45000
+    gram_start_step: 4000
+    gram_refresh_interval: 2000
+    res_step_1: 6000
+    res_step_2: 7600
     res_px_1: 256
     res_px_2: 384
     res_px_3: 512
-    res_vid_step_1: 30000
-    res_vid_step_2: 45000
+    res_vid_step_1: 6000
+    res_vid_step_2: 7600
     res_vid_px_1: 112
     res_vid_px_2: 128
     res_vid_px_3: 160
     checkpoint_every: 1000
     log_every: 25
-    force_stage: null
   model:
-    image_backbone: dinov3_l
+    image_backbone: dinov3_s
     video_backbone: vjepa2_l
     frozen_teacher: null
     ema_momentum: 0.999
-    n_prototypes: 64
+    n_prototypes: 256
     align_dim: 1024
     dtype: bfloat16
     hf_cache_dir: null
     use_gradient_checkpointing: true
-    # null = full backbone fine-tuning. 0 = frozen backbone. K > 0 = train
-    # only the last K transformer blocks plus final norms.
     trainable_image_layers: 4
     trainable_video_layers: 4
   anatomy_weights:
@@ -174,61 +100,124 @@ defaults:
     fetal_cardiac: 1.2
     intrapartum: 1.2
     lung: 1.3
-
 variants:
   stable_baseline:
-    description: "Default 12h confirmation shape: 8k steps, full image crops, 15/25/60 phase split, last-4 backbone unfreezing."
+    description: 'Curated 8k-step partial-tuning baseline: cached DINOv3-S image branch,
+      V-JEPA-L video branch, 2+8 image crops, tube size 2, US frequency/spatial masking,
+      Gram enabled at 50%.'
     overrides: {}
   lr_5e6:
-    description: "Lower LR to test whether instability is optimizer-driven."
+    description: Lower LR to test whether instability is optimizer-driven.
     overrides:
       train:
-        base_lr: 0.000005
+        base_lr: 5.0e-06
   lr_2e5:
-    description: "Higher LR boundary test; reject if early spikes or skipped steps appear."
+    description: Higher LR boundary test; reject if early spikes or skipped steps
+      appear.
     overrides:
       train:
-        base_lr: 0.00002
+        base_lr: 2.0e-05
+  lr_5e5:
+    description: Moderate partial-finetune LR; bridges the conservative baseline and
+      paper-scale SSL LRs.
+    overrides:
+      train:
+        base_lr: 5.0e-05
+  lr_1e4:
+    description: Paper-anchor lower bound for DINO/V-JEPA/URFM-style SSL; high-risk
+      for partial large-backbone tuning.
+    overrides:
+      train:
+        base_lr: 0.0001
   wd_001:
-    description: "Lower weight decay."
+    description: Lower weight decay.
     overrides:
       train:
         weight_decay: 0.01
   wd_008:
-    description: "Higher weight decay."
+    description: Higher weight decay.
     overrides:
       train:
         weight_decay: 0.08
   clip_05:
-    description: "Stronger gradient clipping for phase-transition stability."
+    description: Stronger gradient clipping for phase-transition stability.
     overrides:
       train:
         grad_clip: 0.5
   ema_9995:
-    description: "Slower EMA teacher update."
+    description: Slower EMA teacher update.
     overrides:
       train:
         ema_momentum: 0.9995
       model:
         ema_momentum: 0.9995
+  ema_9998:
+    description: Very slow EMA teacher update for longer stable runs.
+    overrides:
+      train:
+        ema_momentum: 0.9998
+      model:
+        ema_momentum: 0.9998
+  img_mask_025:
+    description: USF-MAE-style low image masking to protect fine ultrasound detail.
+    overrides:
+      transforms:
+        image:
+          freq_mask:
+            mask_ratio: 0.25
+          spatial_mask_ratio: 0.25
   img_mask_030:
-    description: "Easier image frequency masking."
+    description: Easier image frequency masking.
     overrides:
       transforms:
         image:
           freq_mask:
-            mask_ratio: 0.30
-          spatial_mask_ratio: 0.30
+            mask_ratio: 0.3
+          spatial_mask_ratio: 0.3
   img_mask_050:
-    description: "Harder image frequency masking."
+    description: Harder image frequency masking.
     overrides:
       transforms:
         image:
           freq_mask:
-            mask_ratio: 0.50
-          spatial_mask_ratio: 0.50
+            mask_ratio: 0.5
+          spatial_mask_ratio: 0.5
+  img_mask_080:
+    description: OpenUS high image mask-ratio boundary; keep only if dense probes
+      do not degrade.
+    overrides:
+      transforms:
+        image:
+          freq_mask:
+            mask_ratio: 0.8
+          spatial_mask_ratio: 0.5
+  image_bands_2:
+    description: 'USFM-style image frequency stress: mask two image spectral bands
+      instead of one.'
+    overrides:
+      transforms:
+        image:
+          freq_mask:
+            n_bands: 2
+  video_bands_2:
+    description: 'USFM-style video frequency stress: mask two video spectral bands
+      instead of one.'
+    overrides:
+      transforms:
+        video:
+          freq_mask:
+            n_bands: 2
+  video_mask_050:
+    description: Easy V-JEPA/Ultratron video tube masking for early stability.
+    overrides:
+      transforms:
+        video:
+          tube_mask_ratio: 0.5
+          spatial_mask_ratio: 0.3
+          freq_mask:
+            mask_ratio: 0.5
   video_mask_065:
-    description: "Easier video masking; useful if Phase 2 or Phase 3 video losses spike."
+    description: Easier video masking; useful if Phase 2 or Phase 3 video losses spike.
     overrides:
       transforms:
         video:
@@ -237,90 +226,163 @@ variants:
           freq_mask:
             mask_ratio: 0.65
   video_mask_080:
-    description: "Harder video masking boundary test."
+    description: Harder video masking boundary test.
     overrides:
       transforms:
         video:
-          tube_mask_ratio: 0.80
+          tube_mask_ratio: 0.8
           spatial_mask_ratio: 0.45
           freq_mask:
-            mask_ratio: 0.80
-  video_frames_32:
-    description: "Longer temporal context; higher memory and harder tube prediction."
+            mask_ratio: 0.8
+  video_mask_090:
+    description: DISCOVR-style very high video masking boundary; use only after stable
+      lower-mask runs.
     overrides:
-      loaders:
-        video_batch_size: 16
+      transforms:
+        video:
+          tube_mask_ratio: 0.9
+          spatial_mask_ratio: 0.5
+          freq_mask:
+            mask_ratio: 0.9
+  video_frames_32:
+    description: Longer temporal context; higher memory and harder tube prediction.
+    overrides:
       transforms:
         video:
           n_frames: 32
-          temporal_stride: 8
-          tube_size: 8
+  video_stride_2:
+    description: Denser temporal sampling for faster cardiac/fetal motion.
+    overrides:
+      transforms:
+        video:
+          temporal_stride: 2
+  gram_off:
+    description: Disable Gram anchoring; included only as the required dense-feature
+      ablation.
+    overrides:
+      train:
+        lam_gram: 0.0
+  gram_w05:
+    description: Light Gram anchoring.
+    overrides:
+      train:
+        lam_gram: 0.5
+  gram_w2:
+    description: DINOv3 Gram anchor weight.
+    overrides:
+      train:
+        lam_gram: 2.0
+  gram_start_30:
+    description: Start Gram anchoring early, at 30% of the default 8k-step schedule.
+    overrides:
+      train:
+        gram_start_step: 2400
+  gram_start_70:
+    description: Start Gram anchoring late, at 70% of the default 8k-step schedule.
+    overrides:
+      train:
+        gram_start_step: 5600
+  gram_refresh_1000:
+    description: Refresh Gram teacher every 1k steps for short pilot schedules.
+    overrides:
+      train:
+        gram_refresh_interval: 1000
   cross_loss_half:
-    description: "Reduce Phase 3 FILIP/prototype pressure."
+    description: Reduce Phase 3 FILIP cross-distillation pressure.
     overrides:
       train:
         lam6: 0.5
-        lam7: 0.25
+  cross_loss_025:
+    description: DISCOVR/Oura-style light patch-to-tube distillation pressure.
+    overrides:
+      train:
+        lam6: 0.25
   no_proto:
-    description: "Disable prototype loss to isolate FILIP coupling."
+    description: Disable prototype loss to isolate FILIP coupling.
     overrides:
       train:
         lam7: 0.0
+  proto_025:
+    description: Light prototype consistency regularizer.
+    overrides:
+      train:
+        lam7: 0.25
   nce_025:
-    description: "Reduce Phase 3 InfoNCE pressure."
+    description: Reduce Phase 3 InfoNCE pressure.
     overrides:
       train:
         lam6_nce: 0.25
   nce_temp_010:
-    description: "Soften Phase 3 InfoNCE contrastive targets."
+    description: Soften Phase 3 InfoNCE contrastive targets.
     overrides:
       train:
-        lam6_nce_temp: 0.10
+        lam6_nce_temp: 0.1
   cross_koleo_005:
-    description: "Reduce cross-branch KoLeo uniformity pressure."
+    description: Reduce cross-branch KoLeo uniformity pressure.
     overrides:
       train:
         lam_koleo_cross: 0.05
   no_cross_koleo:
-    description: "Disable cross-branch KoLeo uniformity."
+    description: Disable cross-branch KoLeo uniformity.
     overrides:
       train:
         lam_koleo_cross: 0.0
   align_dim_512:
-    description: "Smaller cross-branch projection space."
+    description: Smaller cross-branch projection space.
     overrides:
       model:
         align_dim: 512
+  align_dim_256:
+    description: Compact cross-branch projection for memory and regularization.
+    overrides:
+      model:
+        align_dim: 256
   proto_128:
-    description: "More prototypes; only keep if loss_proto remains smooth."
+    description: Lower prototype count for stability and smaller-batch pilots.
     overrides:
       model:
         n_prototypes: 128
-  full_backbones:
-    description: "Expensive upper-bound trainability test; fine-tune both full student backbones."
+  proto_512:
+    description: Higher Oura/DISCOVR prototype-count test.
+    overrides:
+      model:
+        n_prototypes: 512
+  image_backbone_l:
+    description: DINOv3 ViT-L/16 image branch for teacher-quality or scale-up comparison.
+    overrides:
+      model:
+        image_backbone: dinov3_l
+  image_full_backbone:
+    description: Fine-tune the full image student backbone; video trainability stays
+      at baseline.
     overrides:
       model:
         trainable_image_layers: null
+  video_full_backbone:
+    description: Fine-tune the full video student backbone; image trainability stays
+      at baseline.
+    overrides:
+      model:
         trainable_video_layers: null
-  last8_layers:
-    description: "Freeze early backbone blocks; train only the last 8 image/video transformer blocks."
+  image_last8_layers:
+    description: Train the last 8 image transformer blocks; video trainability stays
+      at baseline.
     overrides:
       model:
         trainable_image_layers: 8
-        trainable_video_layers: 8
-  last4_layers:
-    description: "Explicit default trainability; train only the last 4 image/video transformer blocks."
+  video_last8_layers:
+    description: Train the last 8 video transformer blocks; image trainability stays
+      at baseline.
     overrides:
       model:
-        trainable_image_layers: 4
-        trainable_video_layers: 4
+        trainable_video_layers: 8
   heads_only_phase3:
-    description: "Freeze both backbones and train only cross-branch/prototype heads in Phase 3."
+    description: Freeze both backbones and train only cross-branch/prototype heads
+      in Phase 3.
     overrides:
       train:
         phase1_frac: 0.0
         phase2_frac: 0.0
-        force_stage: 3
       model:
         trainable_image_layers: 0
         trainable_video_layers: 0
