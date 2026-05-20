@@ -24,6 +24,7 @@ Usage (multi-node via torchrun, called by run_training_job.sh):
 Flags:
     --config   Path to experiment YAML (inherits from base configs)
     --resume   Path to checkpoint .pt (auto-detects latest.pt if not given)
+    --log-dir  Directory for metrics.jsonl
     --phase    Force-start at this phase number (1–4)
     --no-7b    Skip loading the DINOv3-7B frozen teacher (~14 GB saved)
 """
@@ -75,6 +76,23 @@ def _deep_merge(base: dict, override: dict):
             _deep_merge(base[k], v)
         else:
             base[k] = v
+
+
+def _select_hf_cache(cscs) -> str:
+    """Prefer a non-empty HF cache so gated models can load offline on compute nodes."""
+    scratch_hf = cscs.scratch_path("hf_cache")
+    store_hf = cscs.store_path("hf_cache")
+
+    def has_cached_models(path: Path) -> bool:
+        return path.exists() and any(path.glob("models--*"))
+
+    if has_cached_models(scratch_hf):
+        return str(scratch_hf)
+    if has_cached_models(store_hf):
+        return str(store_hf)
+    if scratch_hf.exists():
+        return str(scratch_hf)
+    return str(store_hf)
 
 
 def _build_finetune_experiments(cfg: dict, ckpt_dir: Path, log) -> list:
@@ -171,6 +189,8 @@ def main():
                         help="Checkpoint .pt to resume from")
     parser.add_argument("--ckpt-dir", default=None,
                         help="Directory to save checkpoints (overrides default current_run/)")
+    parser.add_argument("--log-dir",  default=None,
+                        help="Directory to write metrics.jsonl (overrides default current_run/)")
     parser.add_argument("--phase",    type=int, default=None,
                         help="Force-start at phase number (1–4)")
     parser.add_argument("--no-7b",    action="store_true",
@@ -209,12 +229,9 @@ def main():
     torch.backends.cudnn.allow_tf32       = True
 
     cscs     = CSCSConfig.from_env()
-    # Prefer scratch HF cache (no store quota issues); fall back to store
-    _scratch_hf = cscs.scratch_path("hf_cache")
-    _store_hf   = cscs.store_path("hf_cache")
-    hf_cache = str(_scratch_hf if _scratch_hf.exists() else _store_hf)
+    hf_cache = _select_hf_cache(cscs)
     ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else cscs.checkpoints_dir(phase=1).parent / "current_run"
-    log_dir  = cscs.scratch_path("logs") / "current_run"
+    log_dir  = Path(args.log_dir) if args.log_dir else cscs.scratch_path("logs") / "current_run"
 
     # ── Build models ──────────────────────────────────────────────────────────
     model_cfg = ModelConfig.from_dict(cfg.get("model", {}))
@@ -237,16 +254,25 @@ def main():
     ).to(device=device, dtype=dtype)
 
     # ── DDP wrap ──────────────────────────────────────────────────────────────
+    def _has_trainable_params(module) -> bool:
+        return any(p.requires_grad for p in module.parameters())
+
     if world_size > 1:
         # Image branch: some params (e.g. DINOv3 registers) may be unused in Phase 1 loss.
-        img_branch.student = DDP(
-            img_branch.student, device_ids=[local_rank],
-            find_unused_parameters=True,
-        )
-        vid_branch.student = DDP(
-            vid_branch.student, device_ids=[local_rank],
-            find_unused_parameters=True,
-        )
+        if _has_trainable_params(img_branch.student):
+            img_branch.student = DDP(
+                img_branch.student, device_ids=[local_rank],
+                find_unused_parameters=True,
+            )
+        else:
+            log.info("Image student is frozen; skipping DDP wrapper for it.")
+        if _has_trainable_params(vid_branch.student):
+            vid_branch.student = DDP(
+                vid_branch.student, device_ids=[local_rank],
+                find_unused_parameters=True,
+            )
+        else:
+            log.info("Video student is frozen; skipping DDP wrapper for it.")
         cross_distill = DDP(cross_distill, device_ids=[local_rank],
                             find_unused_parameters=True)
         proto_head    = DDP(proto_head,    device_ids=[local_rank],
