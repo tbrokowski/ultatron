@@ -56,7 +56,8 @@ class TrainConfig:
 
     Loss weights
     ------------
-    lam1 – lam7, lam_7b, lam_gram:  see phase_steps.py docstring.
+    lam1 – lam7, lam_7b, lam_gram, lam_koleo_cross:
+        see phase_steps.py docstring.
 
     Phase boundaries
     ----------------
@@ -101,6 +102,7 @@ class TrainConfig:
     lam_7b:   float = 0.5   # 7B teacher distillation
     lam_gram: float = 1.0   # Gram anchoring
     lam_koleo:float = 0.1   # KoLeo uniformity
+    lam_koleo_cross: float = 0.1  # cross-branch KoLeo uniformity
 
     # Gram anchoring
     gram_start_step:      int = 100_000
@@ -140,7 +142,7 @@ class TrainConfig:
         for key in ("base_lr", "phase4_lr", "weight_decay", "phase4_weight_decay",
                     "beta1", "beta2", "grad_clip", "ema_momentum",
                     "lam1", "lam2", "lam3", "lam4", "lam5", "lam6", "lam7",
-                    "lam_7b", "lam_gram", "lam_koleo",
+                    "lam_7b", "lam_gram", "lam_koleo", "lam_koleo_cross",
                     "phase1_frac", "phase2_frac", "phase3_frac"):
             if key in filtered and isinstance(filtered[key], str):
                 filtered[key] = float(filtered[key])
@@ -169,6 +171,7 @@ class TrainConfig:
             "lam_7b":    0.0 if no_7b else self.lam_7b,
             "lam_gram":  self.lam_gram,
             "lam_koleo": self.lam_koleo,
+            "lam_koleo_cross": self.lam_koleo_cross,
         }
 
 
