@@ -56,6 +56,7 @@ from .muscle.stmus_nda import STMUSNDAAdapter
 from .muscle.fallmud import FALLMUDAdapter
 from .muscle.luminous import LUMINOUSAdapter
 from .muscle.deep_mtj import DeepMTJAdapter
+from .muscle.knee_us_jocohS import KneeUSJoCoHSAdapter
 
 
 
@@ -91,6 +92,7 @@ ADAPTER_REGISTRY = {
 
 
 
+
     "TN3K":                     TN3KAdapter,
     # Lung
     "Benin-LUS":                BeninLUSAdapter,
@@ -104,6 +106,7 @@ ADAPTER_REGISTRY = {
     "FALLMUD": FALLMUDAdapter,
     "LUMINOUS": LUMINOUSAdapter,
     "deepMTJ": DeepMTJAdapter,
+    "KneeUSJoCoHS": KneeUSJoCoHSAdapter,
 }
 
 
@@ -156,4 +159,5 @@ __all__ = [
     "FALLMUDAdapter",
     "LUMINOUSAdapter",
     "DeepMTJAdapter",
+    "KneeUSJoCoHSAdapter",
 ]
