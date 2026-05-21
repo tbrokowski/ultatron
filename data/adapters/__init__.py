@@ -55,6 +55,7 @@ from .lung.rsa_lus   import RSALUSAdapter
 from .muscle.stmus_nda import STMUSNDAAdapter
 from .muscle.fallmud import FALLMUDAdapter
 from .muscle.luminous import LUMINOUSAdapter
+from .muscle.deep_mtj import DeepMTJAdapter
 
 
 
@@ -102,6 +103,7 @@ ADAPTER_REGISTRY = {
     
     "FALLMUD": FALLMUDAdapter,
     "LUMINOUS": LUMINOUSAdapter,
+    "deepMTJ": DeepMTJAdapter,
 }
 
 
@@ -153,4 +155,5 @@ __all__ = [
     "STMUSNDAAdapter",
     "FALLMUDAdapter",
     "LUMINOUSAdapter",
+    "DeepMTJAdapter",
 ]
