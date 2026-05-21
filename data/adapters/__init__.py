@@ -53,6 +53,8 @@ from .lung.rsa_lus   import RSALUSAdapter
 
 # imports
 from .muscle.stmus_nda import STMUSNDAAdapter
+from .muscle.fallmud import FALLMUDAdapter
+
 
 
 
@@ -96,6 +98,8 @@ ADAPTER_REGISTRY = {
     # Fetal
     "FETAL_PLANES_DB":          FetalPlanesDBAdapter,
     "HC18":                     HC18Adapter,
+    
+    "FALLMUD": FALLMUDAdapter,
 }
 
 
@@ -145,4 +149,5 @@ __all__ = [
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
     "STMUSNDAAdapter",
+    "FALLMUDAdapter",
 ]
