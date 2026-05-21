@@ -54,6 +54,7 @@ from .lung.rsa_lus   import RSALUSAdapter
 # imports
 from .muscle.stmus_nda import STMUSNDAAdapter
 from .muscle.fallmud import FALLMUDAdapter
+from .muscle.luminous import LUMINOUSAdapter
 
 
 
@@ -100,6 +101,7 @@ ADAPTER_REGISTRY = {
     "HC18":                     HC18Adapter,
     
     "FALLMUD": FALLMUDAdapter,
+    "LUMINOUS": LUMINOUSAdapter,
 }
 
 
@@ -150,4 +152,5 @@ __all__ = [
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
     "STMUSNDAAdapter",
     "FALLMUDAdapter",
+    "LUMINOUSAdapter",
 ]
