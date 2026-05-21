@@ -15,8 +15,16 @@ from .breast.busv_adapter import BUSVAdapter
 from .breast.gdph_sysucc_adapter import GDPHSYSUCCAdapter
 from .breast.chinese_us_report_adapter import ChineseUSReportBreastAdapter
 
+# ── Fetal ─────────────────────────────────────────────────────────────────────
+from .fetal.fetal_planes import FetalPlanesDBAdapter
+from .fetal.hc18 import HC18Adapter
 
+# ── Lung (extended) ───────────────────────────────────────────────────────────
+from .lung.covidx_us import COVIDxUSAdapter
+from .lung.lus_multicenter import LUSMulticenterAdapter
 
+# ── Generic mask-pair factory ─────────────────────────────────────────────────
+from .generic_mask import GenericMaskPairAdapter, _make_generic
 
 
 
@@ -43,6 +51,11 @@ from .breast.bus_uc_adapter import BUSUCAdapter
 from .lung.benin_lus import BeninLUSAdapter
 from .lung.rsa_lus   import RSALUSAdapter
 
+# imports
+from .muscle.stmus_nda import STMUSNDAAdapter
+
+
+
 # Registry: dataset_id -> adapter class
 ADAPTER_REGISTRY = {
     # Cardiac — fully labelled
@@ -67,6 +80,7 @@ ADAPTER_REGISTRY = {
     "BUSV": BUSVAdapter,
     "GDPH-SYSUCC": GDPHSYSUCCAdapter,
     "Chinese-US-Report-Breast": ChineseUSReportBreastAdapter,
+    "STMUS-NDA": STMUSNDAAdapter,
 
 
 
@@ -77,6 +91,11 @@ ADAPTER_REGISTRY = {
     # Lung
     "Benin-LUS":                BeninLUSAdapter,
     "RSA-LUS":                  RSALUSAdapter,
+    "COVIDx-US":                COVIDxUSAdapter,
+    "LUS-multicenter-2025":     LUSMulticenterAdapter,
+    # Fetal
+    "FETAL_PLANES_DB":          FetalPlanesDBAdapter,
+    "HC18":                     HC18Adapter,
 }
 
 
@@ -118,7 +137,12 @@ __all__ = [
     # Non-cardiac
     "BUSIAdapter", "TN3KAdapter", "BUSBRAAdapter","BUSUCAdapter","BUSUCLMAdapter","BrEaSTAdapter","BUIDAdapter","S1Adapter","BUSVAdapter","GDPHSYSUCCAdapter","ChineseUSReportBreastAdapter",
     # Lung
-    "BeninLUSAdapter", "RSALUSAdapter",
+    "BeninLUSAdapter", "RSALUSAdapter", "COVIDxUSAdapter", "LUSMulticenterAdapter",
+    # Fetal
+    "FetalPlanesDBAdapter", "HC18Adapter",
+    # Generic
+    "GenericMaskPairAdapter", "_make_generic",
     # Helpers
     "ADAPTER_REGISTRY", "build_adapter", "build_manifest_for_dataset",
+    "STMUSNDAAdapter",
 ]
