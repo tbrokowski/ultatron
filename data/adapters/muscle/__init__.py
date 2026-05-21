@@ -6,4 +6,5 @@ from .deep_mtj import DeepMTJAdapter
 from .knee_us_jocohS import KneeUSJoCoHSAdapter
 from .tus_rec import TUSRECAdapter
 from .tus_rec_val import TUSRECValAdapter
-__all__ = ["STMUSNDAAdapter","FALLMUDAdapter","LUMINOUSAdapter","DeepMTJAdapter","KneeUSJoCoHSAdapter"]
+from .spinal_cord_injury_us import SpinalCordInjuryUSAdapter
+__all__ = ["STMUSNDAAdapter","FALLMUDAdapter","LUMINOUSAdapter","DeepMTJAdapter","KneeUSJoCoHSAdapter","TUSRECAdapter","TUSRECValAdapter","SpinalCordInjuryUSAdapter"]

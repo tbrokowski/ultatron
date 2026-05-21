@@ -59,6 +59,8 @@ from .muscle.deep_mtj import DeepMTJAdapter
 from .muscle.knee_us_jocohS import KneeUSJoCoHSAdapter
 from .muscle.tus_rec import TUSRECAdapter
 from .muscle.tus_rec_val import TUSRECValAdapter
+from .muscle.spinal_cord_injury_us import SpinalCordInjuryUSAdapter
+
 
 
 
@@ -112,6 +114,8 @@ ADAPTER_REGISTRY = {
     "KneeUSJoCoHS": KneeUSJoCoHSAdapter,
     "TUS-REC": TUSRECAdapter,
     "TUS-REC-Val": TUSRECValAdapter,
+    "SpinalCordInjuryUS": SpinalCordInjuryUSAdapter,
+    
 }
 
 
@@ -167,5 +171,6 @@ __all__ = [
     "KneeUSJoCoHSAdapter",
     "TUSRECAdapter",
     "TUSRECValAdapter",
+    "SpinalCordInjuryUSAdapter",
 
 ]
