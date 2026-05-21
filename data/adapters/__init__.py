@@ -60,6 +60,11 @@ from .muscle.knee_us_jocohS import KneeUSJoCoHSAdapter
 from .muscle.tus_rec import TUSRECAdapter
 from .muscle.tus_rec_val import TUSRECValAdapter
 from .muscle.spinal_cord_injury_us import SpinalCordInjuryUSAdapter
+from .gallbladder.gist514_db import GIST514DBAdapter
+
+
+
+
 
 
 
@@ -115,6 +120,7 @@ ADAPTER_REGISTRY = {
     "TUS-REC": TUSRECAdapter,
     "TUS-REC-Val": TUSRECValAdapter,
     "SpinalCordInjuryUS": SpinalCordInjuryUSAdapter,
+    "GIST514-DB": GIST514DBAdapter,
     
 }
 
@@ -172,5 +178,6 @@ __all__ = [
     "TUSRECAdapter",
     "TUSRECValAdapter",
     "SpinalCordInjuryUSAdapter",
+    "GIST514DBAdapter",
 
 ]
