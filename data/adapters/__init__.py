@@ -58,6 +58,8 @@ from .muscle.luminous import LUMINOUSAdapter
 from .muscle.deep_mtj import DeepMTJAdapter
 from .muscle.knee_us_jocohS import KneeUSJoCoHSAdapter
 from .muscle.tus_rec import TUSRECAdapter
+from .muscle.tus_rec_val import TUSRECValAdapter
+
 
 
 
@@ -109,6 +111,7 @@ ADAPTER_REGISTRY = {
     "deepMTJ": DeepMTJAdapter,
     "KneeUSJoCoHS": KneeUSJoCoHSAdapter,
     "TUS-REC": TUSRECAdapter,
+    "TUS-REC-Val": TUSRECValAdapter,
 }
 
 
@@ -163,4 +166,6 @@ __all__ = [
     "DeepMTJAdapter",
     "KneeUSJoCoHSAdapter",
     "TUSRECAdapter",
+    "TUSRECValAdapter",
+
 ]
