@@ -14,6 +14,7 @@ from .breast.s1_adapter import S1Adapter
 from .breast.busv_adapter import BUSVAdapter
 from .breast.gdph_sysucc_adapter import GDPHSYSUCCAdapter
 from .breast.chinese_us_report_adapter import ChineseUSReportBreastAdapter
+from .breast.bus_b_adapter import BUSBAdapter
 
 # ── Fetal ─────────────────────────────────────────────────────────────────────
 from .fetal.fetal_planes import FetalPlanesDBAdapter
@@ -122,6 +123,7 @@ ADAPTER_REGISTRY = {
     "SpinalCordInjuryUS": SpinalCordInjuryUSAdapter,
     "GIST514-DB": GIST514DBAdapter,
     "RegensburgPedAppend": RegensburgPediatricAppendicitisAdapter,
+    "BUS-B": BUSBAdapter,
     
 }
 
@@ -180,5 +182,7 @@ __all__ = [
     "TUSRECValAdapter",
     "SpinalCordInjuryUSAdapter",
     "GIST514DBAdapter",
-    "RegensburgPediatricAppendicitisAdapter"
+    "RegensburgPediatricAppendicitisAdapter",
+    "BUSBAdapter",
+
 ]
