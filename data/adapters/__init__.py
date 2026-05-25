@@ -63,6 +63,7 @@ from .muscle.tus_rec_val import TUSRECValAdapter
 from .muscle.spinal_cord_injury_us import SpinalCordInjuryUSAdapter
 from .gallbladder.gist514_db import GIST514DBAdapter
 from .gallbladder.regensburg_pediatric_appendicitis import RegensburgPediatricAppendicitisAdapter
+from .lung.open_pocus import OpenPOCUSAdapter
 
 
 
@@ -124,6 +125,7 @@ ADAPTER_REGISTRY = {
     "GIST514-DB": GIST514DBAdapter,
     "RegensburgPedAppend": RegensburgPediatricAppendicitisAdapter,
     "BUS-B": BUSBAdapter,
+    "OpenPOCUS": OpenPOCUSAdapter,
     
 }
 
@@ -184,5 +186,6 @@ __all__ = [
     "GIST514DBAdapter",
     "RegensburgPediatricAppendicitisAdapter",
     "BUSBAdapter",
+    "OpenPOCUSAdapter",
 
 ]
