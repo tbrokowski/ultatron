@@ -107,6 +107,22 @@ def _read_mhd_array(path: str) -> np.ndarray:
 
 # ── Image / video loading ─────────────────────────────────────────────────────
 
+def _read_dicom_dataset(path: str):
+    try:
+        import pydicom
+        from pydicom.dataset import FileMetaDataset
+        from pydicom.uid import ImplicitVRLittleEndian
+    except ImportError:
+        raise RuntimeError("pydicom required for DICOM files")
+
+    ds = pydicom.dcmread(path, force=True)
+    if not hasattr(ds, "file_meta") or ds.file_meta is None:
+        ds.file_meta = FileMetaDataset()
+    if "TransferSyntaxUID" not in ds.file_meta:
+        ds.file_meta.TransferSyntaxUID = ImplicitVRLittleEndian
+    return ds
+
+
 def load_image(path: str) -> np.ndarray:
     """
     Load an image and return a uint8 numpy array preserving available channels.
@@ -148,14 +164,15 @@ def load_image(path: str) -> np.ndarray:
         return img
 
     if ext in (".dcm",):
-        try:
-            import pydicom
-            ds  = pydicom.dcmread(path)
-            arr = ds.pixel_array.astype(float)
-            arr = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
-            return arr   # (H, W) for monochrome DICOM; to_canonical_tensor expands to RGB
-        except ImportError:
-            raise RuntimeError("pydicom required for DICOM files")
+        ds  = _read_dicom_dataset(path)
+        arr = np.asarray(ds.pixel_array)
+        if arr.ndim == 3 and arr.shape[-1] not in (3, 4):
+            arr = arr[0]
+        elif arr.ndim == 4 and arr.shape[-1] in (3, 4):
+            arr = arr[0, ..., :3]
+        arr = arr.astype(float)
+        arr = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
+        return arr   # (H, W) for monochrome DICOM; to_canonical_tensor expands to RGB
 
     if ext in (".nii.gz", ".nii"):
         arr = _read_nifti_array(path)
@@ -177,6 +194,34 @@ def load_video_frames(path: str, max_frames: Optional[int] = None) -> List[np.nd
     transforms.py converts each frame to a (3, H, W) float32 tensor.
     """
     ext = Path(path).suffix.lower()
+
+    if ext in (".dcm",):
+        ds = _read_dicom_dataset(path)
+        arr = ds.pixel_array
+
+        def _as_uint8(x: np.ndarray) -> np.ndarray:
+            if x.dtype == np.uint8:
+                return x
+            x = x.astype(np.float32)
+            return ((x - x.min()) / (x.max() - x.min() + 1e-8) * 255).astype(np.uint8)
+
+        arr = _as_uint8(np.asarray(arr))
+        if arr.ndim == 2:
+            frames = [arr]
+        elif arr.ndim == 3:
+            if arr.shape[-1] in (3, 4):
+                frames = [arr[..., :3]]
+            else:
+                frames = [arr[i] for i in range(arr.shape[0])]
+        elif arr.ndim == 4 and arr.shape[-1] in (3, 4):
+            frames = [arr[i, ..., :3] for i in range(arr.shape[0])]
+        else:
+            raise ValueError(f"Unsupported DICOM video pixel array shape: {arr.shape}")
+
+        if max_frames and len(frames) > max_frames:
+            step = max(1, len(frames) // max_frames)
+            frames = frames[::step][:max_frames]
+        return frames
 
     if ext in (".avi", ".mp4", ".mov", ".mkv", ".gif"):
         try:
@@ -216,18 +261,53 @@ def load_video_frames(path: str, max_frames: Optional[int] = None) -> List[np.nd
     raise ValueError(f"Unsupported video format: {ext}")
 
 
-def load_mask(path: str, frame_idx: int = 0) -> np.ndarray:
+def _select_mask_plane(arr: np.ndarray, frame_idx: int = 0, mask_channel: Optional[int] = None) -> np.ndarray:
+    arr = np.asarray(arr)
+    if arr.ndim <= 2:
+        return arr
+
+    if mask_channel is not None:
+        if arr.shape[0] > mask_channel and arr.shape[0] <= 32:
+            return arr[mask_channel]
+        if arr.shape[-1] > mask_channel and arr.shape[-1] <= 32:
+            return arr[..., mask_channel]
+
+    return arr[min(frame_idx, arr.shape[0] - 1)]
+
+
+def load_mask(path: str, frame_idx: int = 0, mask_channel: Optional[int] = None) -> np.ndarray:
     suffixes = Path(path).suffixes
     ext = "".join(suffixes[-2:]).lower() if len(suffixes) >= 2 else (suffixes[-1].lower() if suffixes else "")
+    if ext in (".npy",):
+        loaded = np.load(path, allow_pickle=True)
+        if loaded.shape == () and loaded.dtype == object:
+            loaded = loaded.item()
+        if isinstance(loaded, dict):
+            if "structures" in loaded:
+                structures = loaded["structures"]
+                keys = list(structures.keys())
+                key = keys[mask_channel] if mask_channel is not None and mask_channel < len(keys) else keys[0]
+                arr = np.asarray(structures[key])
+            elif "mask" in loaded:
+                arr = np.asarray(loaded["mask"])
+            else:
+                raise ValueError(f"Unsupported NumPy mask dict keys for {path}: {sorted(loaded.keys())}")
+        else:
+            arr = np.asarray(loaded)
+        arr = _select_mask_plane(arr, frame_idx=frame_idx, mask_channel=mask_channel)
+        return (arr > 0).astype(np.uint8)
+    if ext in (".npz",):
+        data = np.load(path)
+        arr = data[list(data.keys())[0]]
+        arr = _select_mask_plane(arr, frame_idx=frame_idx, mask_channel=mask_channel)
+        return (arr > 0).astype(np.uint8)
     if ext in (".nii.gz", ".nii"):
         arr = _read_nifti_array(path)
-        if arr.ndim == 3:
-            arr = arr[min(frame_idx, arr.shape[0] - 1)]
+        arr = _select_mask_plane(arr, frame_idx=frame_idx, mask_channel=mask_channel)
         return (arr > 0).astype(np.uint8)
     if ext in (".mhd", ".mha"):
         arr = _read_mhd_array(path)
-        if arr.ndim == 3:
-            arr = arr[min(frame_idx, arr.shape[0] - 1)]
+        arr = _select_mask_plane(arr, frame_idx=frame_idx, mask_channel=mask_channel)
         return (arr > 0).astype(np.uint8)
     from PIL import Image
     mask = np.array(Image.open(path).convert("L"), dtype=np.uint8)
@@ -255,7 +335,7 @@ class USFoundationDataset(Dataset):
                    max_frames: Optional[int] = None) -> List[np.ndarray]:
         paths = [self._remap_path(p) for p in entry.image_paths]
         if len(paths) == 1 and Path(paths[0]).suffix.lower() in \
-                (".avi", ".mp4", ".mov", ".mkv", ".gif"):
+                (".avi", ".mp4", ".mov", ".mkv", ".gif", ".dcm"):
             return load_video_frames(paths[0], max_frames)
         frames = [load_image(p) for p in paths]
         if max_frames and len(frames) > max_frames:
@@ -267,7 +347,9 @@ class USFoundationDataset(Dataset):
         if inst.mask_path is None: return None
         mp = self._remap_path(inst.mask_path)
         if not Path(mp).exists(): return None
-        return torch.from_numpy(load_mask(mp, frame_idx=frame_idx)).float().unsqueeze(0)
+        return torch.from_numpy(
+            load_mask(mp, frame_idx=frame_idx, mask_channel=getattr(inst, "mask_channel", None))
+        ).float().unsqueeze(0)
 
     def __len__(self):  return len(self.entries)
     def __getitem__(self, idx): raise NotImplementedError
