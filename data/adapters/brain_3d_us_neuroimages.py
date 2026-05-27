@@ -17,6 +17,11 @@ from data.schema.manifest import USManifestEntry
 
 log = logging.getLogger(__name__)
 
+# Keep this dataset out of generated training manifests until the runtime
+# loader gains explicit NRRD (.nrrd) support. Emitting these entries currently
+# produces unsupported-format failures in ImageSSLDataset.
+EMIT_NRRD_ENTRIES = False
+
 
 class ThreeDUSNeuroimagesAdapter(BaseAdapter):
     DATASET_ID = "3D-US-Neuroimages-Dataset"
@@ -26,13 +31,35 @@ class ThreeDUSNeuroimagesAdapter(BaseAdapter):
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
         volumes = sorted(self.root.glob("*.nrrd"))
+        if EMIT_NRRD_ENTRIES:
+            split_map = self._group_split_map(self._study_id(p.stem) for p in volumes)
+
+            for vol_path in volumes:
+                study_id = self._study_id(vol_path.stem)
+                yield self._make_entry(
+                    str(vol_path),
+                    split=split_map.get(study_id, "train"),
+                    modality="volume",
+                    study_id=study_id,
+                    series_id=vol_path.stem,
+                    is_3d=True,
+                    view_type="intraoperative_3d",
+                    task_type="ssl_only",
+                    ssl_stream="image",
+                    is_promptable=False,
+                    source_meta={
+                        "study_id": study_id,
+                        "file_name": vol_path.name,
+                    },
+                )
+            return
+
         if volumes:
             log.warning(
                 "3D-US-Neuroimages-Dataset: skipped %d NRRD (.nrrd) files because "
                 "the training loader does not support NRRD yet.",
                 len(volumes),
             )
-        return iter(())
 
     def _group_split_map(self, group_ids) -> Dict[str, str]:
         groups = sorted(set(group_ids))

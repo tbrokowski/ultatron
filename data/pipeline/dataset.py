@@ -261,56 +261,130 @@ def load_video_frames(path: str, max_frames: Optional[int] = None) -> List[np.nd
     raise ValueError(f"Unsupported video format: {ext}")
 
 
-def _select_mask_plane(arr: np.ndarray, frame_idx: int = 0, mask_channel: Optional[int] = None) -> np.ndarray:
+_PICKLED_MASK_PATH_MARKERS = (
+    "Fetal Abdominal Structures Segmentation Dataset Using Ultrasonic Images",
+    "ARRAY_FORMAT",
+)
+
+
+def _load_numpy_mask(path: str):
+    try:
+        return np.load(path, allow_pickle=False)
+    except ValueError as exc:
+        if "Object arrays cannot be loaded" not in str(exc):
+            raise
+        if not all(marker in path for marker in _PICKLED_MASK_PATH_MARKERS):
+            raise ValueError(
+                f"Refusing to load pickled NumPy mask outside trusted legacy mask paths: {path}"
+            ) from exc
+        return np.load(path, allow_pickle=True)
+
+
+def _select_mask_plane(
+    arr: np.ndarray,
+    frame_idx: int = 0,
+    mask_channel: Optional[int] = None,
+    layout: str = "frame_first",
+) -> np.ndarray:
     arr = np.asarray(arr)
     if arr.ndim <= 2:
         return arr
 
     if mask_channel is not None:
-        if arr.shape[0] > mask_channel and arr.shape[0] <= 32:
+        if layout == "channel_first":
+            if mask_channel >= arr.shape[0]:
+                raise ValueError(f"mask_channel={mask_channel} out of range for shape={arr.shape}")
             return arr[mask_channel]
-        if arr.shape[-1] > mask_channel and arr.shape[-1] <= 32:
+        if layout == "channel_last":
+            if mask_channel >= arr.shape[-1]:
+                raise ValueError(f"mask_channel={mask_channel} out of range for shape={arr.shape}")
             return arr[..., mask_channel]
+        raise ValueError(f"mask_channel requires channel layout, got layout={layout!r}")
+
+    if layout != "frame_first":
+        raise ValueError(f"frame_idx selection requires frame_first layout, got layout={layout!r}")
 
     return arr[min(frame_idx, arr.shape[0] - 1)]
+
+
+def _select_npz_array(path: str, data) -> np.ndarray:
+    keys = sorted(data.files)
+    for key in ("mask", "masks", "segmentation", "label", "labels"):
+        if key in keys:
+            return data[key]
+    if len(keys) == 1:
+        return data[keys[0]]
+    raise ValueError(
+        f"Ambiguous NumPy mask archive {path}: expected one array or a key named "
+        f"'mask', 'masks', 'segmentation', 'label', or 'labels'; found {keys}"
+    )
 
 
 def load_mask(path: str, frame_idx: int = 0, mask_channel: Optional[int] = None) -> np.ndarray:
     suffixes = Path(path).suffixes
     ext = "".join(suffixes[-2:]).lower() if len(suffixes) >= 2 else (suffixes[-1].lower() if suffixes else "")
     if ext in (".npy",):
-        loaded = np.load(path, allow_pickle=True)
+        loaded = _load_numpy_mask(path)
         if loaded.shape == () and loaded.dtype == object:
             loaded = loaded.item()
+        selected_structure = False
         if isinstance(loaded, dict):
             if "structures" in loaded:
                 structures = loaded["structures"]
-                keys = list(structures.keys())
+                keys = sorted(structures.keys())
                 key = keys[mask_channel] if mask_channel is not None and mask_channel < len(keys) else keys[0]
                 arr = np.asarray(structures[key])
+                selected_structure = True
             elif "mask" in loaded:
                 arr = np.asarray(loaded["mask"])
             else:
                 raise ValueError(f"Unsupported NumPy mask dict keys for {path}: {sorted(loaded.keys())}")
         else:
             arr = np.asarray(loaded)
-        arr = _select_mask_plane(arr, frame_idx=frame_idx, mask_channel=mask_channel)
+        # NumPy mask stacks in the current manifest use channel-first layout
+        # when mask_channel is present. Other mask formats below treat
+        # mask_channel as a categorical label value after frame selection.
+        selected_channel_stack = mask_channel is not None and arr.ndim > 2
+        layout = "channel_first" if selected_channel_stack else "frame_first"
+        arr = _select_mask_plane(
+            arr,
+            frame_idx=frame_idx,
+            mask_channel=mask_channel if selected_channel_stack else None,
+            layout=layout,
+        )
+        if mask_channel is not None and not selected_channel_stack and not selected_structure:
+            return (arr == mask_channel).astype(np.uint8)
         return (arr > 0).astype(np.uint8)
     if ext in (".npz",):
         data = np.load(path)
-        arr = data[list(data.keys())[0]]
-        arr = _select_mask_plane(arr, frame_idx=frame_idx, mask_channel=mask_channel)
+        arr = _select_npz_array(path, data)
+        selected_channel_stack = mask_channel is not None and arr.ndim > 2
+        layout = "channel_first" if selected_channel_stack else "frame_first"
+        arr = _select_mask_plane(
+            arr,
+            frame_idx=frame_idx,
+            mask_channel=mask_channel if selected_channel_stack else None,
+            layout=layout,
+        )
+        if mask_channel is not None and not selected_channel_stack:
+            return (arr == mask_channel).astype(np.uint8)
         return (arr > 0).astype(np.uint8)
     if ext in (".nii.gz", ".nii"):
         arr = _read_nifti_array(path)
-        arr = _select_mask_plane(arr, frame_idx=frame_idx, mask_channel=mask_channel)
+        arr = _select_mask_plane(arr, frame_idx=frame_idx)
+        if mask_channel is not None:
+            return (arr == mask_channel).astype(np.uint8)
         return (arr > 0).astype(np.uint8)
     if ext in (".mhd", ".mha"):
         arr = _read_mhd_array(path)
-        arr = _select_mask_plane(arr, frame_idx=frame_idx, mask_channel=mask_channel)
+        arr = _select_mask_plane(arr, frame_idx=frame_idx)
+        if mask_channel is not None:
+            return (arr == mask_channel).astype(np.uint8)
         return (arr > 0).astype(np.uint8)
     from PIL import Image
     mask = np.array(Image.open(path).convert("L"), dtype=np.uint8)
+    if mask_channel is not None:
+        return (mask == mask_channel).astype(np.uint8)
     return (mask > 127).astype(np.uint8)
 
 
