@@ -8,11 +8,19 @@ ignored here; we expose only the ultrasound content for pretraining.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict, Iterator, List, Tuple
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry
+
+log = logging.getLogger(__name__)
+
+# Keep BITE out of generated training manifests until the runtime loader gains
+# explicit MINC (.mnc) support. Emitting these entries currently produces
+# unsupported-format failures in ImageSSLDataset.
+EMIT_MINC_ENTRIES = False
 
 
 class BITEAdapter(BaseAdapter):
@@ -25,47 +33,67 @@ class BITEAdapter(BaseAdapter):
         studies = self._study_dirs()
         split_map = self._group_split_map(study_id for study_id, _ in studies)
 
-        for study_id, study_dir in studies:
-            group_name, subject_id = study_id.split(":", 1)
+        if EMIT_MINC_ENTRIES:
+            for study_id, study_dir in studies:
+                group_name, subject_id = study_id.split(":", 1)
 
+                us3d_path = study_dir / "3D" / "US3DT.mnc"
+                if us3d_path.exists():
+                    yield self._make_entry(
+                        str(us3d_path),
+                        split=split_map.get(study_id, "train"),
+                        modality="volume",
+                        study_id=study_id,
+                        series_id=f"{study_id}:3d",
+                        is_3d=True,
+                        view_type="reconstructed_3d",
+                        task_type="ssl_only",
+                        ssl_stream="image",
+                        is_promptable=False,
+                        source_meta={
+                            "group": group_name,
+                            "subject_id": subject_id,
+                            "sample_kind": "3d_volume",
+                        },
+                    )
+
+                two_d_dir = study_dir / "2D"
+                for img_path in sorted(two_d_dir.glob("*.mnc")):
+                    yield self._make_entry(
+                        str(img_path),
+                        split=split_map.get(study_id, "train"),
+                        modality="image",
+                        study_id=study_id,
+                        series_id=img_path.stem,
+                        view_type="tracked_bmode_2d",
+                        task_type="ssl_only",
+                        ssl_stream="image",
+                        is_promptable=False,
+                        source_meta={
+                            "group": group_name,
+                            "subject_id": subject_id,
+                            "sample_kind": "2d_slice",
+                        },
+                    )
+            return
+
+        skipped_minc = 0
+
+        for study_id, study_dir in studies:
             us3d_path = study_dir / "3D" / "US3DT.mnc"
             if us3d_path.exists():
-                yield self._make_entry(
-                    str(us3d_path),
-                    split=split_map.get(study_id, "train"),
-                    modality="volume",
-                    study_id=study_id,
-                    series_id=f"{study_id}:3d",
-                    is_3d=True,
-                    view_type="reconstructed_3d",
-                    task_type="ssl_only",
-                    ssl_stream="image",
-                    is_promptable=False,
-                    source_meta={
-                        "group": group_name,
-                        "subject_id": subject_id,
-                        "sample_kind": "3d_volume",
-                    },
-                )
+                skipped_minc += 1
 
             two_d_dir = study_dir / "2D"
             for img_path in sorted(two_d_dir.glob("*.mnc")):
-                yield self._make_entry(
-                    str(img_path),
-                    split=split_map.get(study_id, "train"),
-                    modality="image",
-                    study_id=study_id,
-                    series_id=img_path.stem,
-                    view_type="tracked_bmode_2d",
-                    task_type="ssl_only",
-                    ssl_stream="image",
-                    is_promptable=False,
-                    source_meta={
-                        "group": group_name,
-                        "subject_id": subject_id,
-                        "sample_kind": "2d_slice",
-                    },
-                )
+                skipped_minc += 1
+
+        if skipped_minc:
+            log.warning(
+                "BITE: skipped %d MINC (.mnc) files because the training loader "
+                "does not support MINC yet.",
+                skipped_minc,
+            )
 
     def _study_dirs(self) -> List[Tuple[str, Path]]:
         out: List[Tuple[str, Path]] = []
