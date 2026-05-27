@@ -15,10 +15,9 @@ Actual layout after wget download:
     files/
       p{prefix}/p{subject_id}/s{study_id}/{study_id}_{series}.dcm
 
-The adapter is driven from echo-record-list.csv (not a disk scan) so the
-manifest reflects the full intended dataset even when the download is
-partial.  Files that do not yet exist on disk are still emitted — the
-dataloader should handle missing-file errors gracefully at read time.
+The adapter is driven from echo-record-list.csv (not a disk scan), but emits
+only DICOM files that are present on disk.  A partial download should produce a
+partial training manifest, not runtime missing-file failures in the dataloader.
 """
 from __future__ import annotations
 
@@ -38,11 +37,12 @@ _PHYSIONET_SUBPATH = Path("physionet.org") / "files" / "mimic-iv-echo" / "1.0"
 
 class MIMICEchoAdapter(BaseAdapter):
     """
-    MIMIC-IV-ECHO adapter — CSV-driven, full 525k entries.
+    MIMIC-IV-ECHO adapter — CSV-driven, available-file entries.
 
     Reads echo-record-list.csv to enumerate every DICOM record.  The
     dicom_filepath column is a path relative to the 1.0 base directory,
-    e.g. files/p10/p10002221/s94106955/94106955_0001.dcm.
+    e.g. files/p10/p10002221/s94106955/94106955_0001.dcm.  Missing files are
+    skipped so generated training manifests are directly trainable.
     """
 
     DATASET_ID     = "MIMIC-IV-ECHO"
@@ -59,6 +59,24 @@ class MIMICEchoAdapter(BaseAdapter):
         if (self.root / "echo-record-list.csv").exists():
             return self.root
         return deep  # will raise FileNotFoundError below
+
+    @staticmethod
+    def _has_pixel_data(path: Path) -> bool:
+        try:
+            import pydicom
+        except ImportError:
+            raise RuntimeError("pydicom required to validate MIMIC-IV-ECHO DICOM records")
+
+        try:
+            ds = pydicom.dcmread(
+                path,
+                force=True,
+                specific_tags=["PixelData", "FloatPixelData", "DoubleFloatPixelData"],
+            )
+        except Exception as exc:
+            log.warning("MIMIC-IV-ECHO: unreadable DICOM skipped: %s (%s)", path, exc)
+            return False
+        return "PixelData" in ds or "FloatPixelData" in ds or "DoubleFloatPixelData" in ds
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
         base = self._base_dir()
@@ -77,13 +95,24 @@ class MIMICEchoAdapter(BaseAdapter):
         n = len(rows)
         log.info(f"MIMIC-IV-ECHO: {n:,} records in echo-record-list.csv")
 
+        emitted = 0
+        missing = 0
+        no_pixels = 0
         for i, row in enumerate(rows):
             rel_path   = row["dicom_filepath"]          # e.g. files/p10/p10002221/s94106955/…
             abs_path   = base / rel_path
+            if not abs_path.exists():
+                missing += 1
+                continue
+            if not self._has_pixel_data(abs_path):
+                no_pixels += 1
+                continue
+
             study_id   = row["study_id"]
             subject_id = row["subject_id"]
             split      = self._infer_split(f"{subject_id}_{study_id}", i, n)
 
+            emitted += 1
             yield self._make_entry(
                 str(abs_path), split,
                 modality           = "video",
@@ -100,4 +129,16 @@ class MIMICEchoAdapter(BaseAdapter):
                     "acquisition_datetime": row.get("acquisition_datetime", ""),
                     "doi":                  self.DOI,
                 },
+            )
+
+        if missing:
+            log.warning(
+                "MIMIC-IV-ECHO: skipped %d missing DICOM records; emitted %d available records.",
+                missing,
+                emitted,
+            )
+        if no_pixels:
+            log.warning(
+                "MIMIC-IV-ECHO: skipped %d DICOM records without pixel data.",
+                no_pixels,
             )
