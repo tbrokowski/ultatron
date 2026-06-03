@@ -56,6 +56,7 @@ from .lung.rsa_lus   import RSALUSAdapter
 from .liver.aul              import AULAdapter
 from .liver.us105            import US105Adapter
 from .liver.fatty_liver_bmode import FattyLiverBmodeAdapter
+from .liver.liver_cv_project  import LiverCVProjectAdapter
 
 # ── Maternal / fetal ──────────────────────────────────────────────────────────
 from .maternal_fetal.acouslic                   import ACOUSLICAIAdapter
@@ -118,6 +119,7 @@ ADAPTER_REGISTRY = {
     "AUL":                      AULAdapter,
     "105US":                    US105Adapter,
     "fatty-liver-bmode":        FattyLiverBmodeAdapter,
+    "liver-CV-project":         LiverCVProjectAdapter,
     # Maternal / fetal
     "ACOUSLIC-AI":              ACOUSLICAIAdapter,
     "FASS":                     FASSAdapter,
@@ -185,7 +187,7 @@ __all__ = [
     # Lung
     "BeninLUSAdapter", "RSALUSAdapter",
     # Liver
-    "AULAdapter", "US105Adapter", "FattyLiverBmodeAdapter",
+    "AULAdapter", "US105Adapter", "FattyLiverBmodeAdapter", "LiverCVProjectAdapter",
     # Maternal / fetal
     "ACOUSLICAIAdapter", "FASSAdapter", "FetalPlanesDBAdapter",
     "FOCUSAdapter", "FPUS23Adapter", "FUGCAdapter", "FHPSAOPAdapter", "HC18Adapter",
