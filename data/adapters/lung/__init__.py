@@ -4,8 +4,10 @@ Re-exports all lung dataset adapters.
 """
 from .benin_lus import BeninLUSAdapter
 from .rsa_lus   import RSALUSAdapter
+from .open_pocus import OpenPOCUSAdapter
 
 __all__ = [
     "BeninLUSAdapter",
     "RSALUSAdapter",
+    "OpenPOCUSAdapter"
 ]
