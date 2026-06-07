@@ -1,11 +1,23 @@
 # configs/run1/data_run1.yaml
-# First run: all available cardiac + BUSI + Benin-LUS + RSA-LUS
+# Run 1: all available datasets across all anatomies
 # Single-node (4 GPUs), 10k steps (2k image / 4k video / 4k hybrid), dinov3_l + vjepa2_l
 #
-# Cardiac datasets added in this revision:
-#   CAMUS, EchoNet-Dynamic, EchoNet-Pediatric, EchoNet-LVH,
-#   MIMIC-IV-ECHO, MIMIC-IV-Echo-LVVol-A4C, TED, Unity-Echo,
-#   CardiacUDC, EchoCP
+# Cardiac:   CAMUS, EchoNet-Dynamic, EchoNet-Pediatric, EchoNet-LVH,
+#            MIMIC-IV-ECHO, MIMIC-IV-Echo-LVVol-A4C, TED, Unity-Echo,
+#            CardiacUDC, EchoCP
+# Breast:    BUSI, BrEaST, BUID, BUS-BRA, BUS-UC, BUS-UCLM, BUSV,
+#            GDPH-SYSUCC, Chinese-US-Report-Breast
+# Thyroid:   TN3K
+# Lung:      Benin-LUS, RSA-LUS
+# Liver:     AUL, 105US
+# Fetal:     ACOUSLIC-AI, FASS, FETAL_PLANES_DB, FOCUS, FPUS23, FUGC, FH-PS-AOP,
+#            HC18, IUGC2024, JNU-IFM, Large-Scale-Fetal-Head-Biometry,
+#            maternal-fetal-us-video-intrapartum, PBF-US1, PSFHS
+# Vascular:  CUBS, Common-Carotid-Artery-Ultrasound-Images
+# Brain:     3D-US-Neuroimages-Dataset, BITE, REMIND-Brain-iUS, RESECT, ReMIND2Reg
+# Multi:     STU-Hospital-master, annotated_heterogeneous_us_db
+# Ocular:    ERDES
+# Skin:      Dermatologic-US-Skin-Lesions
 # =============================================================================
 
 manifest:
@@ -94,10 +106,18 @@ gram_anchoring:
   lambda: 0.0
 
 anatomy_weights:
-  cardiac:  0.7   # down-weighted: cardiac is now the largest single anatomy group
-  thyroid:  1.0
-  breast:   1.2
-  lung:     1.5
+  cardiac:        0.7   # down-weighted: cardiac is now the largest single anatomy group
+  breast:         1.2
+  thyroid:        1.0
+  lung:           1.5
+  liver:          1.2
+  fetal_head:     1.5
+  fetal_abdomen:  1.5
+  intrapartum:    2.0
+  brain:          1.5
+  vascular:       1.5
+  skin:           2.0
+  ocular:         3.0
 
 datasets:
   # ── Cardiac ────────────────────────────────────────────────────────────────
@@ -113,9 +133,53 @@ datasets:
   EchoCP:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoCP"
   # ── Breast ────────────────────────────────────────────────────────────────
   BUSI:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
+  BrEaST:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BrEaST"
+  BUID:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUID"
+  BUS-BRA:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSBRA"
+  BUS-UC:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUS_UC"
+  BUS-UCLM:                 "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUS-UCLM/BUS-UCLM"
+  BUSV:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/Miccai 2022 BUV Dataset"
+  GDPH-SYSUCC:              "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/GDPH&SYSUCC"
+  Chinese-US-Report-Breast: "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/Chinese US-Report Dataset (Breast)"
+  # ── Thyroid ───────────────────────────────────────────────────────────────
+  TN3K:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/TN3K"
   # ── Lung ──────────────────────────────────────────────────────────────────
   Benin-LUS:                "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
   RSA-LUS:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
+  # ── Liver ─────────────────────────────────────────────────────────────────
+  AUL:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/AUL"
+  105US:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/105US"
+  # ── Fetal ─────────────────────────────────────────────────────────────────
+  ACOUSLIC-AI:              "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/ACOUSLIC"
+  FASS:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/fetal-abdominal-structures-segmentation"
+  FETAL_PLANES_DB:          "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FETAL-PLANES-DB"
+  FOCUS:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FOCUS"
+  FPUS23:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FPUS23"
+  FUGC:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FUGC"
+  FH-PS-AOP:                "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FH-PS-AOP"
+  HC18:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/HC18"
+  IUGC2024:                 "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/IUGC-2024"
+  JNU-IFM:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/JNU-IFM"
+  Large-Scale-Fetal-Head-Biometry: "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/large-scale-fetal-head-biometry"
+  maternal-fetal-us-video-intrapartum: "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/maternal-fetal-us-video-intrapartum"
+  PBF-US1:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/PBF-US1"
+  PSFHS:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/PSFHS"
+  # ── Vascular / Carotid ────────────────────────────────────────────────────
+  CUBS:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/vascular-carotid/CUBS"
+  Common-Carotid-Artery-Ultrasound-Images: "/capstor/store/cscs/swissai/a127/ultrasound/raw/vascular-carotid/Common-Carotid-Artery-Ultrasound-Images"
+  # ── Brain ─────────────────────────────────────────────────────────────────
+  3D-US-Neuroimages-Dataset: "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/3D-US-Neuroimages-Dataset"
+  BITE:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/BITE"
+  REMIND-Brain-iUS:         "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/REMIND-Brain-iUS"
+  RESECT:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/RESECT"
+  ReMIND2Reg:               "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/ReMIND2Reg"
+  # ── Multi-organ ───────────────────────────────────────────────────────────
+  STU-Hospital-master:      "/capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/STU-Hospital-master"
+  annotated_heterogeneous_us_db: "/capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/annotated_heterogeneous_us_db"
+  # ── Ocular ────────────────────────────────────────────────────────────────
+  ERDES:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/ocular/ERDES"
+  # ── Skin ──────────────────────────────────────────────────────────────────
+  Dermatologic-US-Skin-Lesions: "/capstor/store/cscs/swissai/a127/ultrasound/raw/skin/Dermatologic-US-Skin-Lesions"
 
 model:
   image_backbone:  dinov3_l

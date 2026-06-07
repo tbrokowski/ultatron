@@ -14,10 +14,14 @@ gram_refresh_interval steps.
 
 gram_loss
 ---------
-L_gram = (1/B) Σ_b ||X_S_b @ X_S_b.T  −  X_G_b @ X_G_b.T||_F²
+L_gram = (1/B) Σ_b (1/N²) ||X_S_b @ X_S_b.T  −  X_G_b @ X_G_b.T||_F²
 
-where X_S and X_G are L2-normalised patch token matrices.
-Padding tokens are zeroed before computing Gram matrices.
+where X_S and X_G are L2-normalised patch token matrices and N is the
+total number of patch tokens.  Normalising by N² keeps the loss
+scale-invariant with respect to image resolution / patch count.
+Padding tokens in X_S are zeroed before computing the Gram matrix.
+X_G is expected to arrive already zero-masked (GramTeacher.forward
+handles this), so gram_loss only needs to mask X_S.
 
 Purpose
 -------
@@ -119,21 +123,24 @@ class GramTeacher:
 
 def gram_loss(
     X_S: torch.Tensor,              # (B, N, D)  student patch tokens, L2-normed
-    X_G: torch.Tensor,              # (B, N, D)  Gram teacher tokens, L2-normed
+    X_G: torch.Tensor,              # (B, N, D)  Gram teacher tokens, L2-normed; already masked by GramTeacher.forward
     padding_mask: Optional[torch.Tensor] = None,  # (B, ph, pw)
 ) -> torch.Tensor:
     """
-    L_gram = (1/B) Σ_b ||X_S_b @ X_S_b.T  −  X_G_b @ X_G_b.T||_F²
+    L_gram = (1/B) Σ_b (1/N²) ||X_S_b @ X_S_b.T  −  X_G_b @ X_G_b.T||_F²
 
-    Padding tokens are zeroed before Gram matrix computation.
+    X_S padding tokens are zeroed here before Gram matrix computation.
+    X_G is expected to arrive pre-masked from GramTeacher.forward().
+    Normalising by N² (via .mean over the N×N dims) keeps the loss
+    scale-invariant regardless of image resolution or patch count.
     """
     if padding_mask is not None:
         flat = padding_mask.flatten(1).unsqueeze(-1).float()  # (B, N, 1)
-        X_S  = X_S * flat
-        X_G  = X_G * flat
+        X_S = X_S * flat
 
-    G_S  = torch.bmm(X_S, X_S.transpose(1, 2))   # (B, N, N)
-    G_G  = torch.bmm(X_G, X_G.transpose(1, 2))
+    G_S = torch.bmm(X_S, X_S.transpose(1, 2))   # (B, N, N)
+    G_G = torch.bmm(X_G, X_G.transpose(1, 2))
 
     diff = G_S - G_G
-    return (diff * diff).sum(dim=(1, 2)).mean()
+    # .mean() over (N, N) normalises by N², preventing explosion with large patch counts
+    return (diff * diff).mean(dim=(1, 2)).mean()

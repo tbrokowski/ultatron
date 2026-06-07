@@ -161,7 +161,11 @@ class AnnotatedHeterogeneousUSDBAdapter(BaseAdapter):
             return set()
 
         noise_entries: set[tuple[str, int]] = set()
-        for raw_line in noise_path.read_text().splitlines():
+        try:
+            text = noise_path.read_text()
+        except PermissionError:
+            return set()  # noise filter unavailable; all frames kept
+        for raw_line in text.splitlines():
             line = raw_line.strip()
             if not line:
                 continue

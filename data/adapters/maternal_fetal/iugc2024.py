@@ -62,7 +62,7 @@ class IUGC2024Adapter(BaseAdapter):
         root = Path(root)
         if cls._looks_like_dataset_root(root):
             return root
-        for name in ("new", "IUGC2024", "IUGC-2024"):
+        for name in ("new", "DatasetV3", "IUGC2024", "IUGC-2024"):
             candidate = root / name
             if cls._looks_like_dataset_root(candidate):
                 return candidate
@@ -75,14 +75,39 @@ class IUGC2024Adapter(BaseAdapter):
 
     @staticmethod
     def _looks_like_dataset_root(path: Path) -> bool:
-        return path.is_dir() and any((path / split / "videos").is_dir()
-                                     for split, *_rest in SPLITS)
+        """True if any split's videos/ dir exists, including through a timestamp wrapper."""
+        if not path.is_dir():
+            return False
+        for split_name, *_ in SPLITS:
+            # Flat layout: path/train/videos
+            if (path / split_name / "videos").is_dir():
+                return True
+            # Timestamp layout: path/train-<ts>/train/videos
+            for ts_dir in path.glob(f"{split_name}-*"):
+                if (ts_dir / split_name / "videos").is_dir():
+                    return True
+        return False
+
+    def _find_split_dir(self, split_name: str) -> "Path | None":
+        """
+        Return the split directory regardless of whether the layout is flat
+        (root/train/) or timestamp-wrapped (root/train-<ts>/train/).
+        """
+        flat = self.root / split_name
+        if flat.is_dir():
+            return flat
+        # Timestamp wrapper: root/train-<ts>/train/
+        for ts_dir in self.root.glob(f"{split_name}-*"):
+            candidate = ts_dir / split_name
+            if candidate.is_dir():
+                return candidate
+        return None
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
         found_any = False
         for split_name, info_csv_name, cls_csv_name, seg_index_col in SPLITS:
-            split_dir = self.root / split_name
-            if not split_dir.exists():
+            split_dir = self._find_split_dir(split_name)
+            if split_dir is None:
                 continue
             found_any = True
             yield from self._iter_split(

@@ -29,12 +29,24 @@ class ERDESAdapter(BaseAdapter):
     @classmethod
     def _resolve_dataset_root(cls, root: str | Path) -> Path:
         root = Path(root)
-        if (root / "erdes_metadata.csv").exists():
+        if cls._has_metadata(root):
             return root
         candidate = root / cls.DATASET_ID
-        if (candidate / "erdes_metadata.csv").exists():
+        if cls._has_metadata(candidate):
             return candidate
         raise FileNotFoundError(f"{cls.DATASET_ID}: expected metadata under {root}")
+
+    @staticmethod
+    def _has_metadata(path: Path) -> bool:
+        """True if erdes_metadata.csv exists and is readable."""
+        meta = path / "erdes_metadata.csv"
+        if not meta.exists():
+            return False
+        try:
+            meta.open().close()
+            return True
+        except PermissionError:
+            return False
 
     def _load_split_map(self) -> Dict[str, str]:
         split_dir = self.root / "splits" / self.split_variant
@@ -43,18 +55,26 @@ class ERDESAdapter(BaseAdapter):
             csv_path = split_dir / f"{split_name}.csv"
             if not csv_path.exists():
                 continue
-            with csv_path.open(newline="") as f:
-                for row in csv.DictReader(f):
-                    rel_path = row.get("path", "").strip()
-                    if rel_path:
-                        split_map[rel_path] = split_name
+            try:
+                with csv_path.open(newline="") as f:
+                    for row in csv.DictReader(f):
+                        rel_path = row.get("path", "").strip()
+                        if rel_path:
+                            split_map[rel_path] = split_name
+            except PermissionError:
+                continue
         return split_map
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
         metadata_path = self.root / "erdes_metadata.csv"
-        with metadata_path.open(newline="") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
+        try:
+            with metadata_path.open(newline="") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+        except PermissionError:
+            raise FileNotFoundError(
+                f"ERDES: {metadata_path} exists but is not readable (permission denied)"
+            )
 
         for idx, row in enumerate(rows):
             rel_path = row["file_path"].strip()

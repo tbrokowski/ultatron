@@ -85,14 +85,17 @@ class HC18Adapter(BaseAdapter):
         out: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
         if not csv_path.exists():
             return out
-        with csv_path.open(encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                fname = (row.get("filename") or "").strip()
-                px_s  = self._first_value(row, "pixel size(mm)", "pixel size (mm)", "pixel size")
-                hc_s  = self._first_value(row, "head circumference (mm)", "head circumference(mm)")
-                if not fname:
-                    continue
-                out[fname] = (self._to_float(px_s), self._to_float(hc_s))
+        try:
+            with csv_path.open(encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    fname = (row.get("filename") or "").strip()
+                    px_s  = self._first_value(row, "pixel size(mm)", "pixel size (mm)", "pixel size")
+                    hc_s  = self._first_value(row, "head circumference (mm)", "head circumference(mm)")
+                    if not fname:
+                        continue
+                    out[fname] = (self._to_float(px_s), self._to_float(hc_s))
+        except PermissionError:
+            pass  # CSV not readable; images are still accessible, metadata will be null
         return out
 
     def _load_test_csv(self) -> Dict[str, Optional[float]]:
@@ -101,13 +104,16 @@ class HC18Adapter(BaseAdapter):
         out: Dict[str, Optional[float]] = {}
         if not csv_path.exists():
             return out
-        with csv_path.open(encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                fname = (row.get("filename") or "").strip()
-                px_s  = self._first_value(row, "pixel size(mm)", "pixel size (mm)", "pixel size")
-                if not fname:
-                    continue
-                out[fname] = self._to_float(px_s)
+        try:
+            with csv_path.open(encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    fname = (row.get("filename") or "").strip()
+                    px_s  = self._first_value(row, "pixel size(mm)", "pixel size (mm)", "pixel size")
+                    if not fname:
+                        continue
+                    out[fname] = self._to_float(px_s)
+        except PermissionError:
+            pass  # CSV not readable; images are still accessible, metadata will be null
         return out
 
     def iter_entries(self) -> Iterator[USManifestEntry]:

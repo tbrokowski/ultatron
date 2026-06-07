@@ -4,14 +4,17 @@ data/adapters/tn3k.py  ·  TN3K thyroid nodule adapter
 
 TN3K: 3,493 thyroid ultrasound images with expert nodule segmentation.
   Format: JPG images + PNG masks
-  Layout:
-    {root}/image/*.jpg
-    {root}/label/*.png  (binary mask, same stem as image)
+  Layout on disk (store):
+    {root}/trainval-image/*.jpg   +  {root}/trainval-mask/*.png
+    {root}/test-image/*.jpg       +  {root}/test-mask/*.png
+
+  Legacy / flat layout also supported:
+    {root}/image/*.jpg            +  {root}/label/*.png
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, List, Tuple
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry
@@ -23,16 +26,46 @@ class TN3KAdapter(BaseAdapter):
     SONODQS        = "silver"
     DOI            = "https://github.com/haifangong/TRFE-Net-for-thyroid-nodule-segmentation"
 
-    def iter_entries(self) -> Iterator[USManifestEntry]:
-        img_dir = self.root / "image"
-        lbl_dir = self.root / "label"
-        imgs    = sorted(img_dir.glob("*.jpg")) + sorted(img_dir.glob("*.png"))
-        n       = len(imgs)
+    def _split_dirs(self) -> List[Tuple[Path, Path, str]]:
+        """
+        Return a list of (image_dir, mask_dir, split_name) tuples.
 
-        for i, img_path in enumerate(imgs):
-            lbl_path = lbl_dir / (img_path.stem + ".png")
+        Supports both the store layout (trainval-image / test-image)
+        and the legacy flat layout (image / label).
+        """
+        pairs: List[Tuple[Path, Path, str]] = []
+
+        # Store layout: {prefix}-image / {prefix}-mask
+        for img_dir in sorted(self.root.glob("*-image")):
+            prefix   = img_dir.name[: -len("-image")]   # e.g. "trainval", "test"
+            mask_dir = self.root / f"{prefix}-mask"
+            split    = "test" if "test" in prefix else "train"
+            pairs.append((img_dir, mask_dir, split))
+
+        # Legacy flat layout fallback
+        if not pairs:
+            img_dir  = self.root / "image"
+            mask_dir = self.root / "label"
+            if img_dir.exists():
+                pairs.append((img_dir, mask_dir, "train"))
+
+        return pairs
+
+    def iter_entries(self) -> Iterator[USManifestEntry]:
+        split_dirs = self._split_dirs()
+
+        # Collect all images first so total n is correct for split inference
+        all_images: List[Tuple[Path, Path, str]] = []
+        for img_dir, mask_dir, split_name in split_dirs:
+            for img_path in sorted(img_dir.glob("*.jpg")) + sorted(img_dir.glob("*.png")):
+                all_images.append((img_path, mask_dir, split_name))
+        n = len(all_images)
+
+        for i, (img_path, mask_dir, split_name) in enumerate(all_images):
+            lbl_path = mask_dir / (img_path.stem + ".png")
             has_mask = lbl_path.exists()
-            split    = self._infer_split(img_path.stem, i, n)
+            # Honour explicit split from directory name; fall back to ratio-based
+            split    = split_name if split_name else self._infer_split(img_path.stem, i, n)
 
             instances = []
             if has_mask:

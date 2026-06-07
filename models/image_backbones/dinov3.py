@@ -51,9 +51,36 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..base import ImageBackboneBase, FrozenTeacherBase
 from ..registry import register_image_backbone, register_frozen_teacher
+
+
+# ── Intermediate layer fusion ─────────────────────────────────────────────────
+
+class IntermediateLayerFusion(nn.Module):
+    """
+    Fuse k intermediate ViT layer outputs into a single representation.
+
+    Concatenates the patch tokens from each selected layer along the feature
+    dimension, then projects back to the original embedding size with a 2-layer
+    MLP.  Used for V-JEPA 2.1-style deep self-supervision.
+
+    Input : list of k tensors, each (B, N, D)
+    Output: (B, N, D)
+    """
+
+    def __init__(self, d_model: int, n_layers: int):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model * n_layers, d_model * 2, bias=False),
+            nn.GELU(),
+            nn.Linear(d_model * 2, d_model, bias=False),
+        )
+
+    def forward(self, layer_outputs: list) -> torch.Tensor:
+        return self.mlp(torch.cat(layer_outputs, dim=-1))
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +169,7 @@ class DINOv3ImageBackbone(ImageBackboneBase):
     Output dict keys: cls, patch_tokens, register_tokens (when n_reg > 0)
     """
 
-    def __init__(self, hf_model, variant_key: str):
+    def __init__(self, hf_model, variant_key: str, n_deep_layers: int = 1):
         super().__init__()
         self._vit        = hf_model
         self.hidden_size = hf_model.config.hidden_size
@@ -150,6 +177,24 @@ class DINOv3ImageBackbone(ImageBackboneBase):
         self._n_reg      = getattr(hf_model.config, "num_register_tokens", 0)
         self.variant_key = variant_key
         self._use_gradient_checkpointing = False
+
+        # Deep self-supervision (V-JEPA 2.1): extract intermediate layer outputs
+        # and apply the SSL loss at each level.
+        # n_deep_layers=1 → final layer only (default, no overhead).
+        # n_deep_layers=4 → select layers at 25%, 50%, 75%, 100% depth.
+        self._n_deep_layers = max(1, n_deep_layers)
+        n_total = hf_model.config.num_hidden_layers   # e.g. 24 for ViT-L
+        # hidden_states tuple index for each selected layer (1-indexed: 0=embedding)
+        self._hs_indices = [
+            int(round((k + 1) * n_total / self._n_deep_layers))
+            for k in range(self._n_deep_layers)
+        ]
+        if self._n_deep_layers > 1:
+            self.layer_fusion = IntermediateLayerFusion(
+                hf_model.config.hidden_size, self._n_deep_layers
+            )
+        else:
+            self.layer_fusion = None
 
         # Import the concrete attention class so we can target it precisely.
         # Lazy import keeps the top-level module importable without transformers.
@@ -173,20 +218,31 @@ class DINOv3ImageBackbone(ImageBackboneBase):
         self,
         pixel_values: torch.Tensor,
         bias: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Inner ViT call used as the checkpointed function.
 
-        Receives attention bias as an explicit tensor argument so that
-        torch.utils.checkpoint saves and restores it correctly during the
-        backward recomputation pass, keeping padding-mask behaviour correct.
-        Returns last_hidden_state directly (the dict unpacking happens in
-        the outer forward).
+        Always returns a 2-tuple (last_hidden_state, stacked_intermediates).
+        When n_deep_layers == 1, stacked_intermediates is a dummy zeros(1) tensor
+        so that torch.utils.checkpoint always sees a consistent return type.
+
+        When n_deep_layers > 1, stacked_intermediates has shape
+        (n_deep_layers, B, seq, D) with the selected layer outputs.
         """
         if bias is not None:
             self._hook.set_mask(bias)
-        out = self._vit(pixel_values=pixel_values, output_hidden_states=False)
+        use_hs = self._n_deep_layers > 1
+        out = self._vit(pixel_values=pixel_values, output_hidden_states=use_hs)
         self._hook.set_mask(None)
-        return out.last_hidden_state
+
+        hs = out.last_hidden_state   # (B, seq, D)
+        if use_hs and out.hidden_states is not None:
+            selected = torch.stack(
+                [out.hidden_states[i] for i in self._hs_indices], dim=0
+            )  # (n_deep, B, seq, D)
+        else:
+            selected = hs.new_zeros(1)   # dummy
+
+        return hs, selected
 
     def forward(
         self,
@@ -201,16 +257,14 @@ class DINOv3ImageBackbone(ImageBackboneBase):
 
         if self._use_gradient_checkpointing and torch.is_grad_enabled():
             import torch.utils.checkpoint as cp
-            # Pass bias as an explicit tensor arg so checkpoint saves/restores
-            # it correctly; _vit_forward_with_mask handles None bias safely.
-            hs = cp.checkpoint(
+            hs, inter = cp.checkpoint(
                 self._vit_forward_with_mask,
                 pixel_values,
                 bias,
                 use_reentrant=False,
             )
         else:
-            hs = self._vit_forward_with_mask(pixel_values, bias)
+            hs, inter = self._vit_forward_with_mask(pixel_values, bias)
 
         result = {
             "cls":          hs[:, 0],
@@ -218,6 +272,17 @@ class DINOv3ImageBackbone(ImageBackboneBase):
         }
         if self._n_reg > 0:
             result["register_tokens"] = hs[:, 1:1 + self._n_reg]
+
+        # Deep self-supervision: return per-layer patch tokens + fused representation.
+        # inter shape: (n_deep, B, seq, D) when n_deep_layers > 1; dummy zeros(1) otherwise.
+        if self._n_deep_layers > 1 and inter.ndim == 4:
+            n_reg = self._n_reg
+            # Extract patch tokens from each intermediate layer
+            layer_patch_list = [inter[k, :, 1 + n_reg:] for k in range(self._n_deep_layers)]
+            result["intermediate_patch_tokens"] = layer_patch_list
+            # Fused representation replaces patch_tokens as the main output
+            result["patch_tokens"] = self.layer_fusion(layer_patch_list)
+
         return result
 
     def enable_gradient_checkpointing(self) -> None:
@@ -285,13 +350,16 @@ def _make_dinov3_factory(variant_key: str):
     def factory(
         dtype: torch.dtype = torch.bfloat16,
         hf_cache_dir: Optional[str] = None,
+        n_deep_layers: int = 1,
     ) -> DINOv3ImageBackbone:
         from transformers import AutoModel
         log.info(f"Loading {variant_key} ({hf_id}) ...")
         hf_model = AutoModel.from_pretrained(
             hf_id, dtype=dtype, cache_dir=hf_cache_dir
         )
-        backbone = DINOv3ImageBackbone(hf_model, variant_key=variant_key)
+        backbone = DINOv3ImageBackbone(
+            hf_model, variant_key=variant_key, n_deep_layers=n_deep_layers
+        )
         log.info(f"  {backbone}")
         return backbone
 

@@ -219,14 +219,21 @@ class MaternalFetalUSVideoIntrapartumAdapter(BaseAdapter):
         if not path.exists():
             return {}
         out: Dict[str, dict] = {}
-        with path.open(newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                filename = (row.get("filename") or "").strip()
-                if not filename:
-                    continue
-                out[Path(filename).stem] = {
-                    k: (v or "").strip() for k, v in row.items()
-                }
+        # CSVs may be UTF-8 BOM, GBK (Chinese), or pure ASCII; try in order
+        for enc in ("utf-8-sig", "gbk", "latin-1"):
+            try:
+                with path.open(newline="", encoding=enc) as f:
+                    rows = list(csv.DictReader(f))
+                for row in rows:
+                    filename = (row.get("filename") or "").strip()
+                    if not filename:
+                        continue
+                    out[Path(filename).stem] = {
+                        k: (v or "").strip() for k, v in row.items()
+                    }
+                return out
+            except (UnicodeDecodeError, UnicodeError):
+                continue
         return out
 
     @staticmethod

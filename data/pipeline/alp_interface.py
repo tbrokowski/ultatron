@@ -51,7 +51,7 @@ In samplers.py:
 
         def __iter__(self):
             hardness = [
-                self.alp.aggregate_hardness(self.entries[i].sample_id)
+                self.alp.sample_aggregate_hardness(self.entries[i].sample_id)
                 for i in pool_indices
             ]
             ...
@@ -123,6 +123,16 @@ class ALPReader(Protocol):
         """
         ...
 
+    def sample_aggregate_hardness(self, sample_id: str) -> float:
+        """
+        Alias for aggregate_hardness — used by HardnessAwareSampler in alp.py.
+        Kept as a separate Protocol entry so NullALPReader satisfies the sampler's
+        call site without relying on duck-typing of the wrong method name.
+
+        Returns 0.5 (neutral) if the sample has not been scored.
+        """
+        ...
+
 
 class NullALPReader:
     """
@@ -145,6 +155,9 @@ class NullALPReader:
         return None
 
     def aggregate_hardness(self, sample_id: str) -> float:
+        return 0.5
+
+    def sample_aggregate_hardness(self, sample_id: str) -> float:
         return 0.5
 
     def __repr__(self) -> str:

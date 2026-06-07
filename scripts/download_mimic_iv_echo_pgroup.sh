@@ -99,30 +99,73 @@ if [[ "${PENDING}" -eq 0 ]]; then
 fi
 
 # ── Worker function (called by xargs in parallel) ─────────────────────────────
+#
+# Design: wget --recursive --continue skips already-existing index.html pages,
+# which breaks link discovery for patients whose study directories were created
+# by the original crawl but whose DCM files were never fetched.  Instead, we
+# parse the locally-cached study index.html files directly (they're always
+# present after the initial crawl) and download each missing DCM individually.
+#
 export PHYSIONET_USER PHYSIONET_PASS TARGET_DIR BASE_URL PGROUP LOG_DIR
 
 download_patient() {
     local patient="$1"
-    local url="${BASE_URL}/${PGROUP}/${patient}/"
+    local patient_dir="${TARGET_DIR}/physionet.org/files/mimic-iv-echo/1.0/files/${PGROUP}/${patient}"
     local patient_log="${LOG_DIR}/mimic_${PGROUP}_${patient}.log"
 
-    wget \
-        --recursive \
-        --continue \
-        --no-parent \
-        --tries=5 \
-        --timeout=60 \
-        --waitretry=10 \
-        --directory-prefix="${TARGET_DIR}" \
-        --output-file="${patient_log}" \
-        --user="${PHYSIONET_USER}" \
-        --password="${PHYSIONET_PASS}" \
-        "${url}"
+    # If the patient directory doesn't exist yet, fall back to a full recursive
+    # fetch to build the skeleton (first-time download path).
+    if [[ ! -d "${patient_dir}" ]]; then
+        wget \
+            --recursive \
+            --no-parent \
+            --tries=5 \
+            --timeout=60 \
+            --waitretry=10 \
+            --directory-prefix="${TARGET_DIR}" \
+            --append-output="${patient_log}" \
+            --user="${PHYSIONET_USER}" \
+            --password="${PHYSIONET_PASS}" \
+            "${BASE_URL}/${PGROUP}/${patient}/"
+    fi
 
-    local dcm_count
-    dcm_count=$(find "${TARGET_DIR}/physionet.org/files/mimic-iv-echo/1.0/files/${PGROUP}/${patient}" \
-                     -name "*.dcm" 2>/dev/null | wc -l)
-    echo "[$(date +%H:%M:%S)] ${PGROUP}/${patient}: ${dcm_count} dcm files"
+    # Find every study index.html that is already on disk.  Parse each one for
+    # DCM hrefs and download any file that is not yet present.
+    local total_downloaded=0
+    while IFS= read -r study_index; do
+        local study_dir
+        study_dir=$(dirname "${study_index}")
+        local study
+        study=$(basename "${study_dir}")
+
+        # Extract bare filenames (e.g. 92289983_0001.dcm) from the HTML.
+        while IFS= read -r dcm_file; do
+            local dcm_path="${study_dir}/${dcm_file}"
+            [[ -f "${dcm_path}" ]] && continue
+
+            wget \
+                --continue \
+                --tries=5 \
+                --timeout=60 \
+                --waitretry=10 \
+                --append-output="${patient_log}" \
+                --user="${PHYSIONET_USER}" \
+                --password="${PHYSIONET_PASS}" \
+                -O "${dcm_path}" \
+                "${BASE_URL}/${PGROUP}/${patient}/${study}/${dcm_file}"
+
+            total_downloaded=$(( total_downloaded + 1 ))
+        done < <(grep -oP 'href="\K[^"]+\.dcm' "${study_index}")
+
+        local dcm_count
+        dcm_count=$(find "${study_dir}" -name "*.dcm" 2>/dev/null | wc -l)
+        echo "[$(date +%H:%M:%S)] ${PGROUP}/${patient}/${study}: ${dcm_count} dcm files" \
+            | tee -a "${patient_log}"
+    done < <(find "${patient_dir}" -name "index.html" -mindepth 2 -not -name "*.tmp" 2>/dev/null)
+
+    local final_dcm
+    final_dcm=$(find "${patient_dir}" -name "*.dcm" 2>/dev/null | wc -l)
+    echo "[$(date +%H:%M:%S)] ${PGROUP}/${patient}: ${final_dcm} total dcm files (${total_downloaded} newly fetched)"
 }
 
 export -f download_patient

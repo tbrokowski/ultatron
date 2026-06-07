@@ -58,6 +58,22 @@ class BUSBRAAdapter(BaseAdapter):
     SONODQS        = "gold"
     DOI            = "https://zenodo.org/record/8231412"
 
+    def _resolve_dir(self, *candidates: str) -> Path:
+        """Return the first existing candidate subdir, else the last one."""
+        for name in candidates:
+            p = self.root / name
+            if p.exists():
+                return p
+        return self.root / candidates[-1]
+
+    def _resolve_file(self, *candidates: str) -> Path:
+        """Return the first existing candidate file, else the last one."""
+        for name in candidates:
+            p = self.root / name
+            if p.exists():
+                return p
+        return self.root / candidates[-1]
+
     def __init__(
         self,
         root: str | Path,
@@ -67,9 +83,13 @@ class BUSBRAAdapter(BaseAdapter):
     ):
         super().__init__(root=root, split_override=split_override)
 
-        self.images_dir      = self.root / "images"
-        self.masks_dir       = self.root / "masks"
-        self.annotations_csv = self.root / "annotations.csv"
+        # The store copy uses capitalised dir names (Images/, Masks/) and
+        # bus_data.csv; fall back gracefully to the canonical lowercase names.
+        self.images_dir      = self._resolve_dir("Images", "images")
+        self.masks_dir       = self._resolve_dir("Masks", "masks")
+        self.annotations_csv = self._resolve_file(
+            "bus_data.csv", "annotations.csv"
+        )
         self.fold_csv        = Path(fold_csv) if fold_csv else None
         self.fold_index      = fold_index
 
@@ -82,8 +102,12 @@ class BUSBRAAdapter(BaseAdapter):
 
     def _load_metadata(self) -> dict[str, dict]:
         """
-        Read annotations.csv → dict keyed by image_filename.
-        Expected columns: image_filename, pathology, birads
+        Read annotations CSV → dict keyed by image filename (stem + .png).
+
+        Handles both the canonical column names (image_filename, pathology,
+        birads) and the store copy's capitalised variants (ID, Pathology,
+        BIRADS).  The ID value is the image stem (e.g. "bus_0001-l") and is
+        stored as "bus_0001-l.png" to match the Images/ filenames.
         """
         meta: dict[str, dict] = {}
 
@@ -93,12 +117,19 @@ class BUSBRAAdapter(BaseAdapter):
         with open(self.annotations_csv, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                fname = row.get("image_filename", "").strip()
+                # Normalise column names to lowercase for flexible matching
+                norm = {k.lower(): v for k, v in row.items()}
+                # Accept "image_filename" or "id" as the key column
+                fname = norm.get("image_filename") or norm.get("id", "")
+                fname = fname.strip()
                 if not fname:
                     continue
+                # Ensure we key by the .png filename used in Images/
+                if not fname.endswith(".png"):
+                    fname = fname + ".png"
                 meta[fname] = {
-                    "pathology": row.get("pathology", "").strip(),
-                    "birads":    row.get("birads", "").strip(),
+                    "pathology": norm.get("pathology", "").strip(),
+                    "birads":    norm.get("birads", "").strip(),
                 }
 
         return meta
@@ -162,7 +193,13 @@ class BUSBRAAdapter(BaseAdapter):
             split = self._resolve_split(fname, i, n)
 
             # ── Mask ──────────────────────────────────────────────────────
+            # Canonical layout: mask shares the image filename.
+            # Store copy: images are bus_XXXX.png, masks are mask_XXXX.png.
             mask_path = self.masks_dir / fname
+            if not mask_path.exists() and fname.startswith("bus_"):
+                alt = self.masks_dir / ("mask_" + fname[len("bus_"):])
+                if alt.exists():
+                    mask_path = alt
             has_mask  = mask_path.exists()
 
             # ── Ontology + task ───────────────────────────────────────────

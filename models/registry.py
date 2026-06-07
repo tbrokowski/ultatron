@@ -76,15 +76,19 @@ def build_image_backbone(
     key: str,
     dtype: torch.dtype = torch.bfloat16,
     hf_cache_dir: Optional[str] = None,
+    **kwargs,
 ):
-    """Instantiate a registered image backbone by key."""
+    """Instantiate a registered image backbone by key.
+
+    Extra keyword arguments (e.g. n_deep_layers) are forwarded to the factory.
+    """
     if key not in _IMAGE_REGISTRY:
         available = sorted(_IMAGE_REGISTRY.keys())
         raise KeyError(
             f"Unknown image backbone '{key}'. "
             f"Available: {available}"
         )
-    return _IMAGE_REGISTRY[key](dtype=dtype, hf_cache_dir=hf_cache_dir)
+    return _IMAGE_REGISTRY[key](dtype=dtype, hf_cache_dir=hf_cache_dir, **kwargs)
 
 
 def build_video_backbone(

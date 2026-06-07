@@ -131,6 +131,17 @@ class ImageSSLCollator:
         local_pmasks  = torch.zeros(B, n_local,  max_lph, max_lpw, dtype=torch.bool)
         patch_masks   = torch.zeros(B, max_gph, max_gpw, dtype=torch.bool)
 
+        # energy_maps: (B, ph_max, pw_max) float [0,1] — SPC spectral weight per patch.
+        # Populated when patch_energy is present; pads with 0 (invisible → no loss).
+        energy_maps = torch.zeros(B, max_gph, max_gpw)
+
+        # raw_crops: (B, C, max_gH, max_gW) — unmasked student crop[0] for pixel recon.
+        # Only populated when global_raw_crop is present in all samples.
+        has_raw = all(s.get("global_raw_crop") is not None for s in samples)
+        raw_crops: Optional[torch.Tensor] = None
+        if has_raw:
+            raw_crops = torch.zeros(B, C, max_gH, max_gW)
+
         for i, s in enumerate(samples):
             for j, (crop, pm) in enumerate(zip(s["global_crops"], s["global_pmasks"])):
                 global_crops[i, j]  = _pad_crop_to(crop, max_gH, max_gW)
@@ -141,6 +152,14 @@ class ImageSSLCollator:
                 local_pmasks[i, j] = _pad_pmask_to(pm, max_lph, max_lpw)
 
             patch_masks[i] = _pad_freq_mask_to(s["patch_mask"], max_gph, max_gpw)
+
+            if s.get("patch_energy") is not None:
+                pe = s["patch_energy"]
+                ph, pw = pe.shape
+                energy_maps[i, :ph, :pw] = pe
+
+            if raw_crops is not None and s.get("global_raw_crop") is not None:
+                raw_crops[i] = _pad_crop_to(s["global_raw_crop"], max_gH, max_gW)
 
         # ── Seg masks (optional, pad to max spatial size) ─────────────────────
         raw_segs = [s.get("seg_mask") for s in samples]
@@ -190,11 +209,13 @@ class ImageSSLCollator:
             seg_masks = None
 
         return {
-            "global_crops":      global_crops,     # B × n_g × 1 × H_max × W_max
+            "global_crops":      global_crops,     # B × n_g × C × H_max × W_max
             "global_pmasks":     global_pmasks,     # B × n_g × ph_max × pw_max
-            "local_crops":       local_crops,       # B × n_l × 1 × h_max × w_max
+            "local_crops":       local_crops,       # B × n_l × C × h_max × w_max
             "local_pmasks":      local_pmasks,      # B × n_l × ph_max_l × pw_max_l
-            "patch_masks":       patch_masks,       # B × ph_max × pw_max  (freq mask)
+            "patch_masks":       patch_masks,       # B × ph_max × pw_max  (bool freq mask)
+            "energy_maps":       energy_maps,       # B × ph_max × pw_max  (float SPC weight)
+            "raw_crops":         raw_crops,         # B × C × H_max × W_max or None
             "dataset_ids":       [s["dataset_id"]       for s in samples],
             "anatomy_families":  [s["anatomy_family"]   for s in samples],
             "tiers":             torch.tensor([s["tier"]          for s in samples], dtype=torch.long),

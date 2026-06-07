@@ -33,6 +33,7 @@ from data.pipeline.dataset import ImageSSLDataset, VideoSSLDataset, PairedSSLDat
 from data.pipeline.collators import ImageSSLCollator, VideoSSLCollator, DualStreamBatch
 from data.pipeline.samplers import CombinedSampler
 from data.pipeline.transforms import ImageSSLTransformConfig, VideoSSLTransformConfig
+from data.pipeline.alp_interface import ALPReader, NullALPReader
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,10 @@ class USFoundationDataModule:
         anatomy_weights: Optional[Dict[str, float]] = None,
         split: str = "train",
         root_remap: Optional[Dict[str, str]] = None,
+        # ALP — pass an ALPScoreCache instance here; None uses NullALPReader (cold-start safe)
+        alp_cache: Optional[ALPReader] = None,
+        # Weight of hardness-based sampling vs uniform; 0.0 = pure curriculum (no ALP)
+        hardness_weight: float = 0.3,
     ):
         self.manifest_path = Path(manifest_path)
         self.image_batch_size = image_batch_size
@@ -68,9 +73,11 @@ class USFoundationDataModule:
         self.total_steps = total_training_steps
         self.image_samples = image_samples_per_epoch
         self.video_samples = video_samples_per_epoch
-        self.anatomy_weights = anatomy_weights
-        self.split = split
-        self.root_remap = root_remap or {}
+        self.anatomy_weights  = anatomy_weights
+        self.split            = split
+        self.root_remap       = root_remap or {}
+        self.alp_cache        = alp_cache or NullALPReader()
+        self.hardness_weight  = hardness_weight
 
         self.image_cfg = image_cfg or ImageSSLTransformConfig()
         self.video_cfg = video_cfg or VideoSSLTransformConfig()
@@ -78,9 +85,9 @@ class USFoundationDataModule:
         self._image_entries: List[USManifestEntry] = []
         self._video_entries: List[USManifestEntry] = []
         self._paired_entries: List[USManifestEntry] = []
-        self._image_sampler: Optional[CombinedSampler] = None
-        self._video_sampler: Optional[CombinedSampler] = None
-        self._paired_sampler: Optional[CombinedSampler] = None
+        self._image_sampler = None
+        self._video_sampler = None
+        self._paired_sampler = None
         self._image_dataset: Optional[ImageSSLDataset] = None
         self._video_dataset: Optional[VideoSSLDataset] = None
         self._paired_dataset: Optional[PairedSSLDataset] = None
@@ -112,17 +119,19 @@ class USFoundationDataModule:
                  f"Video stream: {len(self._video_entries)} | "
                  f"Paired stream: {len(self._paired_entries)}")
 
-        # Datasets
+        # Datasets — pass the ALP reader so __getitem__ can bias masking
         self._image_dataset = ImageSSLDataset(
             self._image_entries,
             cfg=self.image_cfg,
             root_remap=self.root_remap,
+            alp_reader=self.alp_cache,
         )
         self._video_dataset = VideoSSLDataset(
             self._video_entries,
             cfg=self.video_cfg,
             patch_size=self.patch_size,
             root_remap=self.root_remap,
+            alp_reader=self.alp_cache,
         )
         self._paired_dataset = PairedSSLDataset(
             self._paired_entries,
@@ -130,27 +139,29 @@ class USFoundationDataModule:
             vid_cfg=self.video_cfg,
             patch_size=self.patch_size,
             root_remap=self.root_remap,
+            alp_reader=self.alp_cache,
         )
 
-        # Samplers
-        self._image_sampler = CombinedSampler(
-            self._image_entries,
-            total_steps=self.total_steps,
-            samples_per_epoch=self.image_samples,
-            anatomy_weights=self.anatomy_weights,
-        )
-        self._video_sampler = CombinedSampler(
-            self._video_entries,
-            total_steps=self.total_steps,
-            samples_per_epoch=self.video_samples,
-            anatomy_weights=self.anatomy_weights,
-        )
-        self._paired_sampler = CombinedSampler(
-            self._paired_entries,
-            total_steps=self.total_steps,
-            samples_per_epoch=self.video_samples,
-            anatomy_weights=self.anatomy_weights,
-        )
+        # Samplers — wrap CombinedSampler with HardnessAwareSampler when ALP is live
+        from train.alp import HardnessAwareSampler
+
+        def _make_sampler(entries, samples):
+            base = CombinedSampler(
+                entries,
+                total_steps=self.total_steps,
+                samples_per_epoch=samples,
+                anatomy_weights=self.anatomy_weights,
+            )
+            return HardnessAwareSampler(
+                base_sampler=base,
+                alp_cache=self.alp_cache,
+                entries=entries,
+                hardness_weight=self.hardness_weight,
+            )
+
+        self._image_sampler  = _make_sampler(self._image_entries,  self.image_samples)
+        self._video_sampler  = _make_sampler(self._video_entries,  self.video_samples)
+        self._paired_sampler = _make_sampler(self._paired_entries, self.video_samples)
         self._setup_done = True
 
     # ── Curriculum interface ──────────────────────────────────────────────────
@@ -159,15 +170,27 @@ class USFoundationDataModule:
         if self._image_sampler: self._image_sampler.update_step(global_step)
         if self._video_sampler: self._video_sampler.update_step(global_step)
         if self._paired_sampler: self._paired_sampler.update_step(global_step)
+
+        alpha      = self.current_alpha()
+        mask_ratio = self.current_mask_ratio()
+        stage      = self.current_stage()
+
+        # ALP hardness weight ramps with curriculum stage (0→0.3→0.6)
+        hw = {1: 0.0, 2: 0.3, 3: 0.6}.get(stage, 0.3)
+        for s in (self._image_sampler, self._video_sampler, self._paired_sampler):
+            if s is not None and hasattr(s, "hardness_weight"):
+                s.hardness_weight = hw
+
         # Push current alpha and mask_ratio into datasets
         if self._image_dataset:
-            self._image_dataset.alpha = self.current_alpha()
+            self._image_dataset.alpha = alpha
         if self._video_dataset:
-            self._video_dataset.mask_ratio = self.current_mask_ratio()
+            self._video_dataset.mask_ratio  = mask_ratio
+            self._video_dataset.alpha       = alpha
             self._video_dataset.transform.cfg.n_frames = self.current_n_frames()
         if self._paired_dataset:
-            self._paired_dataset.img_alpha = self.current_alpha()
-            self._paired_dataset.vid_mask_ratio = self.current_mask_ratio()
+            self._paired_dataset.img_alpha      = alpha
+            self._paired_dataset.vid_mask_ratio = mask_ratio
             self._paired_dataset.vid_transform.cfg.n_frames = self.current_n_frames()
 
     def current_alpha(self) -> float:

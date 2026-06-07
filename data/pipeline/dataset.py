@@ -23,6 +23,7 @@ from data.pipeline.transforms import (
     ImageSSLTransform, ImageSSLTransformConfig,
     VideoSSLTransform, VideoSSLTransformConfig,
 )
+from data.pipeline.alp_interface import ALPReader, NullALPReader
 
 
 # ── Format helpers (no external deps beyond stdlib + numpy) ──────────────────
@@ -302,10 +303,12 @@ class ImageSSLDataset(USFoundationDataset):
         cfg: ImageSSLTransformConfig = ImageSSLTransformConfig(),
         root_remap: Optional[Dict] = None,
         alpha: float = 1.0,
+        alp_reader: ALPReader = None,
     ):
         super().__init__(entries, root_remap)
         self.transform = ImageSSLTransform(cfg)
         self.alpha     = alpha
+        self.alp       = alp_reader if alp_reader is not None else NullALPReader()
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         for _attempt in range(8):
@@ -339,7 +342,14 @@ class ImageSSLDataset(USFoundationDataset):
         else:
             img = self._load_frame(e, 0)
 
-        views = self.transform(img, alpha=self.alpha)
+        # Fetch ALP scores from cache; None on cold-start → uniform masking
+        alp_scores = self.alp.get(e.sample_id, alpha=self.alpha)
+        alp_tensor = (
+            torch.from_numpy(alp_scores).float() if alp_scores is not None else None
+        )
+        # ALP is pre-blended (alpha already applied in cache.get()), so we
+        # pass it as saliency with alpha=1.0 to avoid double-blending.
+        views = self.transform(img, saliency=alp_tensor, alpha=1.0)
 
         seg_mask, cls_label = None, -1
         _meta_frame_idx = (e.source_meta or {}).get("frame_idx", 0) or 0
@@ -355,7 +365,9 @@ class ImageSSLDataset(USFoundationDataset):
             "global_pmasks":   views["global_pmask"],  # list of (ph_i,pw_i)
             "local_crops":     views["local"],         # list of (3,h_j,w_j)
             "local_pmasks":    views["local_pmask"],   # list of (ph_j,pw_j)
-            "patch_mask":      views["mask"],          # (ph_0,pw_0) freq mask
+            "patch_mask":      views["mask"],             # (ph_0,pw_0) freq mask
+            "patch_energy":    views.get("patch_energy"), # (ph_0,pw_0) float [0,1]
+            "global_raw_crop": views.get("global_raw"),   # (C,H,W) unmasked crop[0]
             "dataset_id":      e.dataset_id,
             "anatomy_family":  e.anatomy_family,
             "tier":            e.curriculum_tier,
@@ -392,10 +404,13 @@ class VideoSSLDataset(USFoundationDataset):
         patch_size: int = 16,
         root_remap: Optional[Dict] = None,
         mask_ratio: Optional[float] = None,
+        alp_reader: ALPReader = None,
     ):
         super().__init__(entries, root_remap)
         self.transform  = VideoSSLTransform(cfg, patch_size)
         self.mask_ratio = mask_ratio
+        self.alpha      = 0.5  # equal saliency/hardness blend for video
+        self.alp        = alp_reader if alp_reader is not None else NullALPReader()
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         for _attempt in range(8):
@@ -412,7 +427,11 @@ class VideoSSLDataset(USFoundationDataset):
     def _load_video_item(self, idx: int) -> Dict[str, Any]:
         e      = self.entries[idx]
         frames = self._load_clip(e)
-        views  = self.transform(frames, mask_ratio=self.mask_ratio)
+        alp_scores = self.alp.get(e.sample_id, alpha=self.alpha)
+        alp_tensor = (
+            torch.from_numpy(alp_scores).float() if alp_scores is not None else None
+        )
+        views  = self.transform(frames, mask_ratio=self.mask_ratio, saliency=alp_tensor)
 
         return {
             "full_clip":             views["full"],
@@ -460,12 +479,14 @@ class PairedSSLDataset(USFoundationDataset):
         root_remap: Optional[Dict] = None,
         img_alpha: float = 1.0,
         vid_mask_ratio: Optional[float] = None,
+        alp_reader: ALPReader = None,
     ):
         super().__init__(entries, root_remap)
         self.img_transform  = ImageSSLTransform(img_cfg)
         self.vid_transform  = VideoSSLTransform(vid_cfg, patch_size)
         self.img_alpha      = img_alpha
         self.vid_mask_ratio = vid_mask_ratio
+        self.alp            = alp_reader if alp_reader is not None else NullALPReader()
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         for _attempt in range(8):
@@ -495,7 +516,11 @@ class PairedSSLDataset(USFoundationDataset):
         t = int(torch.randint(T, (1,)).item())
         source_frame_idx = sampled_indices[t]
         img = frames[source_frame_idx]
-        img_views = self.img_transform(img, alpha=self.img_alpha)
+        alp_scores = self.alp.get(e.sample_id, alpha=self.img_alpha)
+        alp_tensor = (
+            torch.from_numpy(alp_scores).float() if alp_scores is not None else None
+        )
+        img_views = self.img_transform(img, saliency=alp_tensor, alpha=1.0)
 
         return {
             "image": {
@@ -504,6 +529,8 @@ class PairedSSLDataset(USFoundationDataset):
                 "local_crops":     img_views["local"],
                 "local_pmasks":    img_views["local_pmask"],
                 "patch_mask":      img_views["mask"],
+                "patch_energy":    img_views.get("patch_energy"),
+                "global_raw_crop": img_views.get("global_raw"),
                 "dataset_id":      e.dataset_id,
                 "anatomy_family":  e.anatomy_family,
                 "tier":            e.curriculum_tier,

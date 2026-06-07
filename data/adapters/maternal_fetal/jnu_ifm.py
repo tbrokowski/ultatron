@@ -34,6 +34,7 @@ The CSV frame_label is emitted as a secondary classification instance:
 from __future__ import annotations
 
 import csv
+import os
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -73,7 +74,12 @@ class JNUIFMAdapter(BaseAdapter):
             self._resolve_dataset_root(root),
             split_override=split_override,
         )
-        self._mask_cache = self.root / ".jnu_ifm_mask_cache"
+        # Store is read-only; write remapped masks to scratch or a local cache dir
+        scratch = os.environ.get(
+            "SCRATCH",
+            os.environ.get("TMPDIR", "/tmp"),
+        )
+        self._mask_cache = Path(scratch) / "ultatron_cache" / "jnu_ifm_mask_cache"
 
     @classmethod
     def _resolve_dataset_root(cls, root: str | Path) -> Path:

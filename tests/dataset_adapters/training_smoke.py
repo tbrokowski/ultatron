@@ -4,8 +4,8 @@ tests/dataset_adapters/training_smoke.py
 Multi-dataset, multi-phase training smoke test.
 
 Tests all four training phases (DINOv3 image SSL, V-JEPA2 video SSL,
-cross-modal alignment, downstream fine-tuning) using combined data from
-BUSI, EchoNet-Dynamic, and Benin-LUS.
+cross-modal alignment, downstream fine-tuning) using combined data sampled
+from every registered dataset adapter.
 
 Usage (from project root with the .venv active):
 
@@ -20,6 +20,11 @@ Environment overrides:
     US_SKIP_PHASE2=1      Skip Phase 2 video SSL smoke
     US_SKIP_PHASE3=1      Skip Phase 3 alignment smoke
     US_SKIP_PHASE4=1      Skip Phase 4 downstream heads smoke
+
+Each dataset builder respects a corresponding US_<NAME>_ROOT env var and
+falls back to the default CSCS store path.  Datasets whose root directory
+is absent on the current machine are silently skipped (SKIP in the manifest
+summary, not a failure).
 """
 from __future__ import annotations
 
@@ -42,11 +47,54 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from data.adapters.busi import BUSIAdapter
+from data.adapters.tn3k import TN3KAdapter
 from data.adapters.cardiac.camus import CAMUSAdapter
 from data.adapters.cardiac.echonet import EchoNetDynamicAdapter
 from data.adapters.cardiac.echonet_pediatric import EchoNetPediatricAdapter
+from data.adapters.cardiac.echonet_lvh import EchoNetLVHAdapter
+from data.adapters.cardiac.mimic_echo import MIMICEchoAdapter
+from data.adapters.cardiac.mimic_lvvol_a4c import MIMICLVVolA4CAdapter
 from data.adapters.cardiac.ted import TEDAdapter
+from data.adapters.cardiac.unity import UnityAdapter
+from data.adapters.cardiac.cardiacudc import CardiacUDCAdapter
+from data.adapters.cardiac.echocp import EchoCPAdapter
+from data.adapters.breast.breast_adapter import BrEaSTAdapter
+from data.adapters.breast.buid_adapter import BUIDAdapter
+from data.adapters.breast.bus_bra_adapter import BUSBRAAdapter
+from data.adapters.breast.bus_uc_adapter import BUSUCAdapter
+from data.adapters.breast.bus_uclm_adapter import BUSUCLMAdapter
+from data.adapters.breast.busv_adapter import BUSVAdapter
+from data.adapters.breast.gdph_sysucc_adapter import GDPHSYSUCCAdapter
+from data.adapters.breast.chinese_us_report_adapter import ChineseUSReportBreastAdapter
 from data.adapters.lung.benin_lus import BeninLUSAdapter
+from data.adapters.lung.rsa_lus import RSALUSAdapter
+from data.adapters.liver.aul import AULAdapter
+from data.adapters.liver.us105 import US105Adapter
+from data.adapters.maternal_fetal.acouslic import ACOUSLICAIAdapter
+from data.adapters.maternal_fetal.fetal_abdominal_structures import FASSAdapter
+from data.adapters.maternal_fetal.fetal_planes_db import FetalPlanesDBAdapter
+from data.adapters.maternal_fetal.focus import FOCUSAdapter
+from data.adapters.maternal_fetal.fpus23 import FPUS23Adapter
+from data.adapters.maternal_fetal.fugc import FUGCAdapter
+from data.adapters.maternal_fetal.fh_ps_aop import FHPSAOPAdapter
+from data.adapters.maternal_fetal.hc18 import HC18Adapter
+from data.adapters.maternal_fetal.iugc2024 import IUGC2024Adapter
+from data.adapters.maternal_fetal.jnu_ifm import JNUIFMAdapter
+from data.adapters.maternal_fetal.large_scale_fetal_head_biometry import LargeScaleFetalHeadBiometryAdapter
+from data.adapters.maternal_fetal.maternal_fetal_us_video_intrapartum import MaternalFetalUSVideoIntrapartumAdapter
+from data.adapters.maternal_fetal.pbf_us1 import PBFUS1Adapter
+from data.adapters.maternal_fetal.psfhs import PSFHSAdapter
+from data.adapters.cubs import CUBSAdapter
+from data.adapters.common_carotid import CommonCarotidArteryImagesAdapter
+from data.adapters.brain_3d_us_neuroimages import ThreeDUSNeuroimagesAdapter
+from data.adapters.bite import BITEAdapter
+from data.adapters.remind_brain_ius import REMINDBrainIUSAdapter
+from data.adapters.resect import RESECTAdapter
+from data.adapters.remind2reg import ReMIND2RegAdapter
+from data.adapters.stu_hospital import STUHospitalAdapter
+from data.adapters.annotated_heterogeneous_us_db import AnnotatedHeterogeneousUSDBAdapter
+from data.adapters.erdes import ERDESAdapter
+from data.adapters.dermatologic_skin_lesions import DermatologicSkinLesionsAdapter
 from data.schema.manifest import ManifestWriter, USManifestEntry, load_manifest
 from data.pipeline.dataset import ImageSSLDataset, VideoSSLDataset
 from data.pipeline.downstream_dataset import DownstreamDataset, PatientLevelDataset
@@ -72,12 +120,71 @@ log = logging.getLogger("training_smoke")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _STORE = Path("/capstor/store/cscs/swissai/a127/ultrasound/raw")
+
+# Cardiac
 _DEFAULT_CAMUS_ROOT          = _STORE / "cardiac" / "CAMUS"
-_DEFAULT_BUSI_ROOT           = _STORE / "breast"  / "BUSI"
 _DEFAULT_ECHONET_ROOT        = _STORE / "cardiac" / "EchoNet-Dynamic"
 _DEFAULT_ECHONET_PED_ROOT    = _STORE / "cardiac" / "EchoNet-Pediatric"
+_DEFAULT_ECHONET_LVH_ROOT    = _STORE / "cardiac" / "EchoNet-LVH"
+_DEFAULT_MIMIC_ECHO_ROOT     = _STORE / "cardiac" / "MIMIC-IV-Echo"
+_DEFAULT_MIMIC_LVVOL_ROOT    = _STORE / "cardiac" / "MIMIC-IV-Echo-LVVol-A4C"
 _DEFAULT_TED_ROOT            = _STORE / "cardiac" / "TED"
+_DEFAULT_UNITY_ROOT          = _STORE / "cardiac" / "Unity"
+_DEFAULT_CARDIACUDC_ROOT     = _STORE / "cardiac" / "CardiacUDC"
+_DEFAULT_ECHOCP_ROOT         = _STORE / "cardiac" / "EchoCP"
+
+# Breast / Thyroid
+_DEFAULT_BUSI_ROOT           = _STORE / "breast"  / "BUSI"
+_DEFAULT_BREASST_ROOT        = _STORE / "breast"  / "BrEaST"
+_DEFAULT_BUID_ROOT           = _STORE / "breast"  / "BUID"
+_DEFAULT_BUSBRA_ROOT         = _STORE / "breast"  / "BUSBRA"
+_DEFAULT_BUS_UC_ROOT         = _STORE / "breast"  / "BUS_UC"
+_DEFAULT_BUS_UCLM_ROOT       = _STORE / "breast"  / "BUS-UCLM" / "BUS-UCLM"
+_DEFAULT_BUSV_ROOT           = _STORE / "breast"  / "Miccai 2022 BUV Dataset"
+_DEFAULT_GDPH_ROOT           = _STORE / "breast"  / "GDPH&SYSUCC"
+_DEFAULT_CNRPT_ROOT          = _STORE / "breast"  / "Chinese US-Report Dataset (Breast)"
+_DEFAULT_TN3K_ROOT           = _STORE / "thyroid" / "TN3K"
+
+# Lung
 _DEFAULT_BENIN_ROOT          = _STORE / "lung"    / "Benin_Videos"
+_DEFAULT_RSA_ROOT            = _STORE / "lung"    / "RSA_Videos"
+
+# Liver
+_DEFAULT_AUL_ROOT            = _STORE / "liver"   / "AUL"
+_DEFAULT_105US_ROOT          = _STORE / "liver"   / "105US"
+
+# Fetal
+_DEFAULT_ACOUSLIC_ROOT       = _STORE / "fetal"   / "ACOUSLIC"
+_DEFAULT_FASS_ROOT           = _STORE / "fetal"   / "fetal-abdominal-structures-segmentation"
+_DEFAULT_FETAL_PLANES_ROOT   = _STORE / "fetal"   / "FETAL-PLANES-DB"
+_DEFAULT_FOCUS_ROOT          = _STORE / "fetal"   / "FOCUS"
+_DEFAULT_FPUS23_ROOT         = _STORE / "fetal"   / "FPUS23"
+_DEFAULT_FUGC_ROOT           = _STORE / "fetal"   / "FUGC"
+_DEFAULT_FH_PS_AOP_ROOT      = _STORE / "fetal"   / "FH-PS-AOP"
+_DEFAULT_HC18_ROOT           = _STORE / "fetal"   / "HC18"
+_DEFAULT_IUGC2024_ROOT       = _STORE / "fetal"   / "IUGC-2024"
+_DEFAULT_JNU_IFM_ROOT        = _STORE / "fetal"   / "JNU-IFM"
+_DEFAULT_LSFHB_ROOT          = _STORE / "fetal"   / "large-scale-fetal-head-biometry"
+_DEFAULT_MF_INTRAPARTUM_ROOT = _STORE / "fetal"   / "maternal-fetal-us-video-intrapartum"
+_DEFAULT_PBF_US1_ROOT        = _STORE / "fetal"   / "PBF-US1"
+_DEFAULT_PSFHS_ROOT          = _STORE / "fetal"   / "PSFHS"
+
+# Vascular / Carotid
+_DEFAULT_CUBS_ROOT           = _STORE / "vascular-carotid" / "CUBS"
+_DEFAULT_CAROTID_ROOT        = _STORE / "vascular-carotid" / "Common-Carotid-Artery-Ultrasound-Images"
+
+# Brain
+_DEFAULT_3D_NEURO_ROOT       = _STORE / "brain"   / "3D-US-Neuroimages-Dataset"
+_DEFAULT_BITE_ROOT           = _STORE / "brain"   / "BITE"
+_DEFAULT_REMIND_ROOT         = _STORE / "brain"   / "REMIND-Brain-iUS"
+_DEFAULT_RESECT_ROOT         = _STORE / "brain"   / "RESECT"
+_DEFAULT_REMIND2REG_ROOT     = _STORE / "brain"   / "ReMIND2Reg"
+
+# Multi-organ / Ocular / Skin
+_DEFAULT_STU_ROOT            = _STORE / "multi_organ" / "STU-Hospital-master"
+_DEFAULT_AHUS_ROOT           = _STORE / "multi_organ" / "annotated_heterogeneous_us_db"
+_DEFAULT_ERDES_ROOT          = _STORE / "ocular"  / "ERDES"
+_DEFAULT_DERM_ROOT           = _STORE / "skin"    / "Dermatologic-US-Skin-Lesions"
 
 _SMOKE_OUT  = _ROOT / "dataset_exploration_outputs" / "smoke"
 _SMOKE_CFG  = _ROOT / "configs" / "smoke" / "multi_dataset_smoke.yaml"
@@ -207,6 +314,653 @@ def _build_ted_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
     return entries
 
 
+# ── Cardiac (new) ─────────────────────────────────────────────────────────────
+
+def _build_echonet_lvh_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_ECHONET_LVH_ROOT", _DEFAULT_ECHONET_LVH_ROOT)
+    if root is None:
+        log.warning("EchoNet-LVH root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in EchoNetLVHAdapter(root).iter_entries():
+        if e.split == "train":
+            entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("EchoNet-LVH: %d entries", len(entries))
+    return entries
+
+
+def _build_mimic_echo_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_MIMIC_ECHO_ROOT", _DEFAULT_MIMIC_ECHO_ROOT)
+    if root is None:
+        log.warning("MIMIC-IV-Echo root not found — skipping")
+        return []
+    try:
+        import pydicom  # noqa: F401
+    except ImportError:
+        log.warning("pydicom not installed — skipping MIMIC-IV-Echo")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in MIMICEchoAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("MIMIC-IV-Echo: %d entries", len(entries))
+    return entries
+
+
+def _build_mimic_lvvol_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_MIMIC_LVVOL_ROOT", _DEFAULT_MIMIC_LVVOL_ROOT)
+    if root is None:
+        log.warning("MIMIC-IV-Echo-LVVol-A4C root not found — skipping")
+        return []
+    try:
+        import pydicom  # noqa: F401
+    except ImportError:
+        log.warning("pydicom not installed — skipping MIMIC-IV-Echo-LVVol-A4C")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in MIMICLVVolA4CAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("MIMIC-IV-Echo-LVVol-A4C: %d entries", len(entries))
+    return entries
+
+
+def _build_unity_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_UNITY_ROOT", _DEFAULT_UNITY_ROOT)
+    if root is None:
+        log.warning("Unity-Echo root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in UnityAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("Unity-Echo: %d entries", len(entries))
+    return entries
+
+
+def _build_cardiacudc_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_CARDIACUDC_ROOT", _DEFAULT_CARDIACUDC_ROOT)
+    if root is None:
+        log.warning("CardiacUDC root not found — skipping")
+        return []
+    try:
+        import nibabel  # noqa: F401
+    except ImportError:
+        log.warning("nibabel not installed — skipping CardiacUDC")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in CardiacUDCAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("CardiacUDC: %d entries", len(entries))
+    return entries
+
+
+def _build_echocp_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_ECHOCP_ROOT", _DEFAULT_ECHOCP_ROOT)
+    if root is None:
+        log.warning("EchoCP root not found — skipping")
+        return []
+    try:
+        import nibabel  # noqa: F401
+    except ImportError:
+        log.warning("nibabel not installed — skipping EchoCP")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in EchoCPAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("EchoCP: %d entries", len(entries))
+    return entries
+
+
+# ── Breast / Thyroid (new) ────────────────────────────────────────────────────
+
+def _build_breasst_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_BREASST_ROOT", _DEFAULT_BREASST_ROOT)
+    if root is None:
+        log.warning("BrEaST root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in BrEaSTAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("BrEaST: %d entries", len(entries))
+    return entries
+
+
+def _build_buid_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_BUID_ROOT", _DEFAULT_BUID_ROOT)
+    if root is None:
+        log.warning("BUID root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in BUIDAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("BUID: %d entries", len(entries))
+    return entries
+
+
+def _build_busbra_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_BUSBRA_ROOT", _DEFAULT_BUSBRA_ROOT)
+    if root is None:
+        log.warning("BUS-BRA root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in BUSBRAAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("BUS-BRA: %d entries", len(entries))
+    return entries
+
+
+def _build_bus_uc_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_BUS_UC_ROOT", _DEFAULT_BUS_UC_ROOT)
+    if root is None:
+        log.warning("BUS-UC root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in BUSUCAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("BUS-UC: %d entries", len(entries))
+    return entries
+
+
+def _build_bus_uclm_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_BUS_UCLM_ROOT", _DEFAULT_BUS_UCLM_ROOT)
+    if root is None:
+        log.warning("BUS-UCLM root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in BUSUCLMAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("BUS-UCLM: %d entries", len(entries))
+    return entries
+
+
+def _build_busv_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_BUSV_ROOT", _DEFAULT_BUSV_ROOT)
+    if root is None:
+        log.warning("BUSV root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in BUSVAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("BUSV: %d entries", len(entries))
+    return entries
+
+
+def _build_gdph_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_GDPH_ROOT", _DEFAULT_GDPH_ROOT)
+    if root is None:
+        log.warning("GDPH-SYSUCC root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in GDPHSYSUCCAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("GDPH-SYSUCC: %d entries", len(entries))
+    return entries
+
+
+def _build_cnrpt_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_CNRPT_ROOT", _DEFAULT_CNRPT_ROOT)
+    if root is None:
+        log.warning("Chinese-US-Report-Breast root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in ChineseUSReportBreastAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("Chinese-US-Report-Breast: %d entries", len(entries))
+    return entries
+
+
+def _build_tn3k_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_TN3K_ROOT", _DEFAULT_TN3K_ROOT)
+    if root is None:
+        log.warning("TN3K root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in TN3KAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("TN3K: %d entries", len(entries))
+    return entries
+
+
+# ── Lung (new) ────────────────────────────────────────────────────────────────
+
+def _build_rsa_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_RSA_ROOT", _DEFAULT_RSA_ROOT)
+    if root is None:
+        log.warning("RSA-LUS root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in RSALUSAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("RSA-LUS: %d entries", len(entries))
+    return entries
+
+
+# ── Liver (new) ───────────────────────────────────────────────────────────────
+
+def _build_aul_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_AUL_ROOT", _DEFAULT_AUL_ROOT)
+    if root is None:
+        log.warning("AUL root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in AULAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("AUL: %d entries", len(entries))
+    return entries
+
+
+def _build_105us_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_105US_ROOT", _DEFAULT_105US_ROOT)
+    if root is None:
+        log.warning("105US root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in US105Adapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("105US: %d entries", len(entries))
+    return entries
+
+
+# ── Fetal (new) ───────────────────────────────────────────────────────────────
+
+def _build_acouslic_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_ACOUSLIC_ROOT", _DEFAULT_ACOUSLIC_ROOT)
+    if root is None:
+        log.warning("ACOUSLIC-AI root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in ACOUSLICAIAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("ACOUSLIC-AI: %d entries", len(entries))
+    return entries
+
+
+def _build_fass_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_FASS_ROOT", _DEFAULT_FASS_ROOT)
+    if root is None:
+        log.warning("FASS root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in FASSAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("FASS: %d entries", len(entries))
+    return entries
+
+
+def _build_fetal_planes_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_FETAL_PLANES_ROOT", _DEFAULT_FETAL_PLANES_ROOT)
+    if root is None:
+        log.warning("FETAL-PLANES-DB root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in FetalPlanesDBAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("FETAL-PLANES-DB: %d entries", len(entries))
+    return entries
+
+
+def _build_focus_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_FOCUS_ROOT", _DEFAULT_FOCUS_ROOT)
+    if root is None:
+        log.warning("FOCUS root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in FOCUSAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("FOCUS: %d entries", len(entries))
+    return entries
+
+
+def _build_fpus23_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_FPUS23_ROOT", _DEFAULT_FPUS23_ROOT)
+    if root is None:
+        log.warning("FPUS23 root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in FPUS23Adapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("FPUS23: %d entries", len(entries))
+    return entries
+
+
+def _build_fugc_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_FUGC_ROOT", _DEFAULT_FUGC_ROOT)
+    if root is None:
+        log.warning("FUGC root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in FUGCAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("FUGC: %d entries", len(entries))
+    return entries
+
+
+def _build_fh_ps_aop_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_FH_PS_AOP_ROOT", _DEFAULT_FH_PS_AOP_ROOT)
+    if root is None:
+        log.warning("FH-PS-AOP root not found — skipping")
+        return []
+    try:
+        import SimpleITK  # noqa: F401
+    except ImportError:
+        log.warning("SimpleITK not installed — skipping FH-PS-AOP")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in FHPSAOPAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("FH-PS-AOP: %d entries", len(entries))
+    return entries
+
+
+def _build_hc18_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_HC18_ROOT", _DEFAULT_HC18_ROOT)
+    if root is None:
+        log.warning("HC18 root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in HC18Adapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("HC18: %d entries", len(entries))
+    return entries
+
+
+def _build_iugc2024_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_IUGC2024_ROOT", _DEFAULT_IUGC2024_ROOT)
+    if root is None:
+        log.warning("IUGC2024 root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in IUGC2024Adapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("IUGC2024: %d entries", len(entries))
+    return entries
+
+
+def _build_jnu_ifm_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_JNU_IFM_ROOT", _DEFAULT_JNU_IFM_ROOT)
+    if root is None:
+        log.warning("JNU-IFM root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in JNUIFMAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("JNU-IFM: %d entries", len(entries))
+    return entries
+
+
+def _build_lsfhb_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_LSFHB_ROOT", _DEFAULT_LSFHB_ROOT)
+    if root is None:
+        log.warning("Large-Scale-Fetal-Head-Biometry root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in LargeScaleFetalHeadBiometryAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("Large-Scale-Fetal-Head-Biometry: %d entries", len(entries))
+    return entries
+
+
+def _build_mf_intrapartum_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_MF_INTRAPARTUM_ROOT", _DEFAULT_MF_INTRAPARTUM_ROOT)
+    if root is None:
+        log.warning("maternal-fetal-us-video-intrapartum root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in MaternalFetalUSVideoIntrapartumAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("maternal-fetal-us-video-intrapartum: %d entries", len(entries))
+    return entries
+
+
+def _build_pbf_us1_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_PBF_US1_ROOT", _DEFAULT_PBF_US1_ROOT)
+    if root is None:
+        log.warning("PBF-US1 root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in PBFUS1Adapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("PBF-US1: %d entries", len(entries))
+    return entries
+
+
+def _build_psfhs_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_PSFHS_ROOT", _DEFAULT_PSFHS_ROOT)
+    if root is None:
+        log.warning("PSFHS root not found — skipping")
+        return []
+    try:
+        import SimpleITK  # noqa: F401
+    except ImportError:
+        log.warning("SimpleITK not installed — skipping PSFHS")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in PSFHSAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("PSFHS: %d entries", len(entries))
+    return entries
+
+
+# ── Vascular / Carotid (new) ──────────────────────────────────────────────────
+
+def _build_cubs_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_CUBS_ROOT", _DEFAULT_CUBS_ROOT)
+    if root is None:
+        log.warning("CUBS root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in CUBSAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("CUBS: %d entries", len(entries))
+    return entries
+
+
+def _build_carotid_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_CAROTID_ROOT", _DEFAULT_CAROTID_ROOT)
+    if root is None:
+        log.warning("Common-Carotid root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in CommonCarotidArteryImagesAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("Common-Carotid: %d entries", len(entries))
+    return entries
+
+
+# ── Brain / Multi-organ / Ocular / Skin (new) ─────────────────────────────────
+
+def _build_3d_neuro_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_3D_NEURO_ROOT", _DEFAULT_3D_NEURO_ROOT)
+    if root is None:
+        log.warning("3D-US-Neuroimages root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in ThreeDUSNeuroimagesAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("3D-US-Neuroimages: %d entries", len(entries))
+    return entries
+
+
+def _build_bite_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_BITE_ROOT", _DEFAULT_BITE_ROOT)
+    if root is None:
+        log.warning("BITE root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in BITEAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("BITE: %d entries", len(entries))
+    return entries
+
+
+def _build_remind_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_REMIND_ROOT", _DEFAULT_REMIND_ROOT)
+    if root is None:
+        log.warning("REMIND-Brain-iUS root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in REMINDBrainIUSAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("REMIND-Brain-iUS: %d entries", len(entries))
+    return entries
+
+
+def _build_resect_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_RESECT_ROOT", _DEFAULT_RESECT_ROOT)
+    if root is None:
+        log.warning("RESECT root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in RESECTAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("RESECT: %d entries", len(entries))
+    return entries
+
+
+def _build_remind2reg_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_REMIND2REG_ROOT", _DEFAULT_REMIND2REG_ROOT)
+    if root is None:
+        log.warning("ReMIND2Reg root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in ReMIND2RegAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("ReMIND2Reg: %d entries", len(entries))
+    return entries
+
+
+def _build_stu_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_STU_ROOT", _DEFAULT_STU_ROOT)
+    if root is None:
+        log.warning("STU-Hospital-master root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in STUHospitalAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("STU-Hospital-master: %d entries", len(entries))
+    return entries
+
+
+def _build_ahus_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_AHUS_ROOT", _DEFAULT_AHUS_ROOT)
+    if root is None:
+        log.warning("annotated_heterogeneous_us_db root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in AnnotatedHeterogeneousUSDBAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("annotated_heterogeneous_us_db: %d entries", len(entries))
+    return entries
+
+
+def _build_erdes_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_ERDES_ROOT", _DEFAULT_ERDES_ROOT)
+    if root is None:
+        log.warning("ERDES root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in ERDESAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("ERDES: %d entries", len(entries))
+    return entries
+
+
+def _build_derm_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
+    root = _root("US_DERM_ROOT", _DEFAULT_DERM_ROOT)
+    if root is None:
+        log.warning("Dermatologic-US-Skin-Lesions root not found — skipping")
+        return []
+    entries: List[USManifestEntry] = []
+    for e in DermatologicSkinLesionsAdapter(root).iter_entries():
+        entries.append(e)
+        if len(entries) >= n:
+            break
+    log.info("Dermatologic-US-Skin-Lesions: %d entries", len(entries))
+    return entries
+
+
 def build_combined_manifest(force: bool = False) -> Path:
     """Build (or reuse) the combined smoke manifest."""
     _SMOKE_OUT.mkdir(parents=True, exist_ok=True)
@@ -215,14 +969,72 @@ def build_combined_manifest(force: bool = False) -> Path:
         log.info("Reusing existing manifest: %s", _COMBINED_MANIFEST)
         return _COMBINED_MANIFEST
 
-    all_entries: List[USManifestEntry] = (
-        _build_camus_entries()
-        + _build_busi_entries()
-        + _build_echonet_entries()
-        + _build_echonet_ped_entries()
-        + _build_ted_entries()
-        + _build_benin_entries()
-    )
+    _BUILDERS = [
+        # Cardiac
+        _build_camus_entries,
+        _build_echonet_entries,
+        _build_echonet_ped_entries,
+        _build_echonet_lvh_entries,
+        _build_mimic_echo_entries,
+        _build_mimic_lvvol_entries,
+        _build_ted_entries,
+        _build_unity_entries,
+        _build_cardiacudc_entries,
+        _build_echocp_entries,
+        # Breast / Thyroid
+        _build_busi_entries,
+        _build_breasst_entries,
+        _build_buid_entries,
+        _build_busbra_entries,
+        _build_bus_uc_entries,
+        _build_bus_uclm_entries,
+        _build_busv_entries,
+        _build_gdph_entries,
+        _build_cnrpt_entries,
+        _build_tn3k_entries,
+        # Lung
+        _build_benin_entries,
+        _build_rsa_entries,
+        # Liver
+        _build_aul_entries,
+        _build_105us_entries,
+        # Fetal
+        _build_acouslic_entries,
+        _build_fass_entries,
+        _build_fetal_planes_entries,
+        _build_focus_entries,
+        _build_fpus23_entries,
+        _build_fugc_entries,
+        _build_fh_ps_aop_entries,
+        _build_hc18_entries,
+        _build_iugc2024_entries,
+        _build_jnu_ifm_entries,
+        _build_lsfhb_entries,
+        _build_mf_intrapartum_entries,
+        _build_pbf_us1_entries,
+        _build_psfhs_entries,
+        # Vascular / Carotid
+        _build_cubs_entries,
+        _build_carotid_entries,
+        # Brain
+        _build_3d_neuro_entries,
+        _build_bite_entries,
+        _build_remind_entries,
+        _build_resect_entries,
+        _build_remind2reg_entries,
+        # Multi-organ / Ocular / Skin
+        _build_stu_entries,
+        _build_ahus_entries,
+        _build_erdes_entries,
+        _build_derm_entries,
+    ]
+
+    all_entries: List[USManifestEntry] = []
+    for builder in _BUILDERS:
+        try:
+            all_entries.extend(builder())
+        except Exception as exc:
+            log.warning("Builder %s failed — skipping: %s", builder.__name__, exc)
 
     if not all_entries:
         raise RuntimeError("No entries found — check dataset paths.")
@@ -873,11 +1685,11 @@ def main() -> None:
     device = _auto_device()
     log.info("Device: %s", device)
 
-    # Build manifests
+    # Always rebuild so new datasets are included
     log.info("Building combined smoke manifest …")
-    build_combined_manifest()
+    build_combined_manifest(force=True)
 
-    # Cache per-dataset entries for Phase 4
+    # Cache per-dataset entries for Phase 4 downstream heads
     busi_entries    = _build_busi_entries()
     echonet_entries = _build_echonet_entries()
     benin_entries   = _build_benin_entries()

@@ -36,6 +36,7 @@ import torch.nn as nn
 
 from ..base import VideoBackboneBase
 from ..registry import register_video_backbone
+from ..image_backbones.dinov3 import IntermediateLayerFusion
 
 log = logging.getLogger(__name__)
 
@@ -116,14 +117,26 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
       predicted   : (B, T*ph*pw, D)  predictor output (only when tube_mask given)
     """
 
-    def __init__(self, hf_model, variant_key: str):
+    def __init__(self, hf_model, variant_key: str, n_deep_layers: int = 1):
         super().__init__()
         self._model      = hf_model
         self.hidden_size = hf_model.config.hidden_size
         self.variant_key = variant_key
-        # tubelet_size: how many frames per temporal patch token
         self.tubelet_size = getattr(hf_model.config, "tubelet_size", 2)
         self._use_gradient_checkpointing = False
+
+        self._n_deep_layers = max(1, n_deep_layers)
+        n_total = getattr(hf_model.config, "num_hidden_layers", 24)
+        self._hs_indices = [
+            int(round((k + 1) * n_total / self._n_deep_layers))
+            for k in range(self._n_deep_layers)
+        ]
+        if self._n_deep_layers > 1:
+            self.layer_fusion = IntermediateLayerFusion(
+                hf_model.config.hidden_size, self._n_deep_layers
+            )
+        else:
+            self.layer_fusion = None
 
 
     def _model_forward(
@@ -138,22 +151,28 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
         require grad), but they're bound at call time via functools.partial and
         remain accessible during the backward recomputation.
         """
+        use_hs = self._n_deep_layers > 1
         out = self._model(
             pixel_values_videos=pixel_values,
             context_mask=context_mask,
             target_mask=target_mask,
-            output_hidden_states=False,
+            output_hidden_states=use_hs,
         )
-        # Return a tuple so checkpoint can track multiple output tensors.
-        # predictor_output may be None; return a dummy zero tensor in that case
-        # so the return type is always (Tensor, Tensor).
+        # Return a 3-tuple so checkpoint always sees a consistent signature:
+        #   (last_hidden_state, predictor_output_or_dummy, intermediate_or_dummy)
         hs = out.last_hidden_state
         pred = (
             out.predictor_output.last_hidden_state
             if (hasattr(out, "predictor_output") and out.predictor_output is not None)
             else hs.new_zeros(1)
         )
-        return hs, pred
+        if use_hs and getattr(out, "hidden_states", None) is not None:
+            inter = torch.stack(
+                [out.hidden_states[i] for i in self._hs_indices], dim=0
+            )  # (n_deep, B, N, D)
+        else:
+            inter = hs.new_zeros(1)
+        return hs, pred, inter
 
     def forward(
         self,
@@ -186,10 +205,7 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
         if self._use_gradient_checkpointing and torch.is_grad_enabled():
             import functools
             import torch.utils.checkpoint as cp
-            # context_mask / target_mask are captured in the partial closure;
-            # only pixel_values (the large activation tensor) is an explicit arg
-            # saved by checkpoint.
-            tube_tokens, pred_hs = cp.checkpoint(
+            tube_tokens, pred_hs, inter = cp.checkpoint(
                 functools.partial(
                     self._model_forward,
                     context_mask=context_mask,
@@ -199,7 +215,7 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
                 use_reentrant=False,
             )
         else:
-            tube_tokens, pred_hs = self._model_forward(
+            tube_tokens, pred_hs, inter = self._model_forward(
                 pixel_values, context_mask, target_mask
             )
 
@@ -235,12 +251,16 @@ class VJEPA2VideoBackbone(VideoBackboneBase):
             "tube_tokens": tube_tokens,
         }
 
-        # pred_hs is real (ndim==3: B×N_tgt×D) only when target_mask was set;
-        # otherwise it's the dummy scalar zeros(1) returned by _model_forward.
         if pred_hs.ndim == 3:
             result["predicted"] = pred_hs
             if tgt is not None:
                 result["tgt_indices"] = tgt
+
+        # Deep self-supervision: per-layer tube tokens + fused representation.
+        if self._n_deep_layers > 1 and inter.ndim == 4:
+            layer_tube_list = [inter[k] for k in range(self._n_deep_layers)]
+            result["intermediate_tube_tokens"] = layer_tube_list
+            result["tube_tokens"] = self.layer_fusion(layer_tube_list)
 
         return result
 
@@ -271,14 +291,16 @@ def _make_vjepa2_factory(variant_key: str):
     def factory(
         dtype: torch.dtype = torch.bfloat16,
         hf_cache_dir: Optional[str] = None,
+        n_deep_layers: int = 1,
     ) -> VJEPA2VideoBackbone:
-        import copy
         from transformers import AutoModel
         log.info(f"Loading {variant_key} ({hf_id}) ...")
         hf_model = AutoModel.from_pretrained(
             hf_id, torch_dtype=dtype, cache_dir=hf_cache_dir
         )
-        backbone = VJEPA2VideoBackbone(hf_model, variant_key=variant_key)
+        backbone = VJEPA2VideoBackbone(
+            hf_model, variant_key=variant_key, n_deep_layers=n_deep_layers
+        )
         log.info(f"  {backbone}")
         return backbone
 

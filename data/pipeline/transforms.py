@@ -434,7 +434,7 @@ def freq_mask_image(
     patch_size: int = 16,
     alp: Optional[Tensor] = None,      # (ph, pw)
     mask_ratio_override: Optional[float] = None,
-) -> Tuple[Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor]:
     """
     Frequency-domain masking for a (C, H, W) image.
     Operates on each channel independently; the spatial mask is derived from
@@ -444,6 +444,8 @@ def freq_mask_image(
     -------
     masked_img   : (C, H, W)
     spatial_mask : (ph, pw) bool
+    energy_map   : (ph, pw) float [0, 1]  — normalised spectral energy removed
+                   per patch (used as continuous loss weights in SPC mode).
     """
     C, H, W    = x.shape
     ph, pw     = H // patch_size, W // patch_size
@@ -477,7 +479,9 @@ def freq_mask_image(
     threshold = total_energy.flatten().topk(n_mask).values[-1]
     spatial_mask = total_energy >= threshold
 
-    return masked_img, spatial_mask
+    # total_energy is already max-normalised to [0, 1]; return it as the
+    # continuous energy map for SPC loss weighting.
+    return masked_img, spatial_mask, total_energy
 
 
 def freq_mask_video(
@@ -579,7 +583,7 @@ def freq_mask_image_alp(
     hardness: Optional[Tensor],
     alpha: float,
     mask_ratio_override: Optional[float] = None,
-) -> Tuple[Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor]:
     alp: Optional[Tensor] = None
     if saliency is not None or hardness is not None:
         s    = saliency if saliency is not None else torch.zeros_like(hardness)
@@ -693,6 +697,54 @@ def spatial_tube_mask(
     return visible, tube_mask
 
 
+def _alp_spatial_tube_mask(
+    clip: Tensor,
+    patch_size: int,
+    mask_ratio: float,
+    alp: Tensor,               # (ph, pw) — pre-blended ALP scores
+    tube_size: Optional[int] = None,
+) -> Tuple[Tensor, Tensor]:
+    """
+    ALP-guided spatiotemporal tube masking.
+
+    Same structure as spatial_tube_mask but replaces _random_block_mask with
+    _alp_block_mask so the selected block covers the highest-ALP (hardest)
+    region, making the prediction task harder where the student struggles most.
+
+    ALP is treated as a static spatial prior across all temporal groups (the
+    student's weakness is assumed to be spatially consistent within a clip).
+    """
+    T, C, H, W = clip.shape
+    ph, pw     = H // patch_size, W // patch_size
+    n_mask     = max(1, int(ph * pw * mask_ratio))
+
+    # Resize ALP to (ph, pw) if shapes differ (e.g. cached at different resolution)
+    if alp.shape != (ph, pw):
+        alp = F.interpolate(
+            alp.float().view(1, 1, *alp.shape), size=(ph, pw),
+            mode="bilinear", align_corners=False,
+        ).squeeze()
+
+    if tube_size is None or tube_size >= T:
+        mask_2d   = _alp_block_mask(ph, pw, n_mask, alp)
+        tube_mask = mask_2d.unsqueeze(0).expand(T, -1, -1).contiguous()
+    else:
+        n_groups  = math.ceil(T / tube_size)
+        tube_mask = torch.zeros(T, ph, pw, dtype=torch.bool)
+        for g in range(n_groups):
+            t_start = g * tube_size
+            t_end   = min(T, t_start + tube_size)
+            tube_mask[t_start:t_end] = _alp_block_mask(ph, pw, n_mask, alp).unsqueeze(0)
+
+    mask_px = (
+        tube_mask
+        .repeat_interleave(patch_size, dim=1)
+        .repeat_interleave(patch_size, dim=2)
+    )
+    visible = clip * (~mask_px.unsqueeze(1)).float()
+    return visible, tube_mask
+
+
 def random_patch_mask(h: int, w: int, patch_size: int, mask_ratio: float) -> Tensor:
     ph, pw = h // patch_size, w // patch_size
     n      = ph * pw
@@ -756,6 +808,44 @@ def _random_block_mask(ph: int, pw: int, n_mask: int) -> Tensor:
     return mask
 
 
+def _alp_block_mask(ph: int, pw: int, n_mask: int, alp: Tensor) -> Tensor:
+    """
+    ALP-guided spatial block mask: selects the block position (same aspect ratio
+    sampling as _random_block_mask) whose area covers the highest cumulative ALP
+    score — i.e. the region the student finds hardest / the teacher finds most
+    salient.  Falls back to random if alp is degenerate (all-equal scores).
+
+    Uses a 2-D prefix-sum for O(ph*pw) block search.
+    """
+    aspect = random.uniform(0.3, 1.0 / 0.3)
+    h_mask = min(max(1, int(math.sqrt(n_mask * aspect))), ph)
+    w_mask = min(max(1, int(math.sqrt(n_mask / aspect))), pw)
+
+    # 2-D prefix sum for fast window sums
+    a = alp.float()
+    cum = torch.zeros(ph + 1, pw + 1, dtype=torch.float32)
+    cum[1:, 1:] = a.cumsum(0).cumsum(1)
+
+    # Score every valid top-left corner with a vectorised gather
+    rs = torch.arange(ph - h_mask + 1)
+    cs = torch.arange(pw - w_mask + 1)
+    R, C = torch.meshgrid(rs, cs, indexing="ij")  # (nr, nc)
+    scores = (
+        cum[R + h_mask, C + w_mask]
+        - cum[R,        C + w_mask]
+        - cum[R + h_mask, C       ]
+        + cum[R,          C       ]
+    )
+
+    flat_idx = int(scores.argmax())
+    r0 = flat_idx // scores.shape[1]
+    c0 = flat_idx %  scores.shape[1]
+
+    mask = torch.zeros(ph, pw, dtype=torch.bool)
+    mask[r0:r0 + h_mask, c0:c0 + w_mask] = True
+    return mask
+
+
 # ── Masking dispatch ──────────────────────────────────────────────────────────
 
 def _apply_image_mask(
@@ -765,7 +855,7 @@ def _apply_image_mask(
     hardness: Optional[Tensor],
     alpha: float,
     mask_ratio_override: Optional[float],
-) -> Tuple[Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor]:
     """
     Apply the configured masking strategy to a single image crop.
 
@@ -773,6 +863,10 @@ def _apply_image_mask(
     -------
     masked_crop  : (C, H, W)
     spatial_mask : (ph, pw) bool
+    energy_map   : (ph, pw) float [0, 1]
+                   Continuous spectral energy removed per patch.
+                   For ``"spatial"`` strategy this is the binary mask cast to
+                   float (same semantics, no frequency information available).
     """
     strategy   = cfg.mask_strategy
     patch_size = cfg.patch_size
@@ -788,11 +882,16 @@ def _apply_image_mask(
     elif strategy == MASK_STRATEGY_SPATIAL:
         ratio = mask_ratio_override if mask_ratio_override is not None \
                 else cfg.spatial_mask_ratio
-        return spatial_patch_mask(crop, patch_size, ratio, block_style=False)
+        masked_crop, spatial_mask = spatial_patch_mask(
+            crop, patch_size, ratio, block_style=False
+        )
+        # No spectral information; use binary mask as the energy fallback.
+        energy_map = spatial_mask.float()
+        return masked_crop, spatial_mask, energy_map
 
     elif strategy == MASK_STRATEGY_BOTH:
         # Step 1: frequency masking
-        freq_masked, freq_spatial = freq_mask_image_alp(
+        freq_masked, freq_spatial, freq_energy = freq_mask_image_alp(
             crop, cfg.freq_mask, patch_size,
             saliency, hardness, alpha,
             mask_ratio_override=mask_ratio_override,
@@ -803,9 +902,10 @@ def _apply_image_mask(
         spatial_masked, spatial_mask = spatial_patch_mask(
             freq_masked, patch_size, ratio, block_style=False
         )
-        # Union mask: patch is masked if either strategy flagged it
+        # Union mask: patch is masked if either strategy flagged it.
+        # Energy map comes from the frequency pass (richer signal).
         combined_mask = freq_spatial | spatial_mask
-        return spatial_masked, combined_mask
+        return spatial_masked, combined_mask, freq_energy
 
     raise ValueError(f"Unknown mask_strategy: {strategy!r}")
 
@@ -815,6 +915,7 @@ def _apply_video_mask(
     cfg: VideoSSLTransformConfig,
     mask_ratio: float,
     patch_size: int,
+    alp: Optional[Tensor] = None,  # (ph, pw) pre-blended ALP scores; None → uniform
 ) -> Tuple[Tensor, Tensor]:
     """
     Apply the configured masking strategy to a video clip.
@@ -864,6 +965,8 @@ def _apply_video_mask(
         )
 
     elif strategy == MASK_STRATEGY_SPATIAL:
+        if alp is not None:
+            return _alp_spatial_tube_mask(clip, patch_size, mask_ratio, alp, tube_size=tube_size)
         return spatial_tube_mask(clip, patch_size, mask_ratio, tube_size=tube_size)
 
     elif strategy == MASK_STRATEGY_BOTH:
@@ -892,9 +995,15 @@ def _apply_video_mask(
         )
         # Derive spatial tube mask from the original clip geometry (not freq_visible)
         # so the two masking patterns are fully independent.
-        _, spatial_tube = spatial_tube_mask(
-            clip, patch_size, cfg.spatial_mask_ratio, tube_size=tube_size
-        )
+        # When ALP scores are available, bias the spatial block toward harder regions.
+        if alp is not None:
+            _, spatial_tube = _alp_spatial_tube_mask(
+                clip, patch_size, cfg.spatial_mask_ratio, alp, tube_size=tube_size
+            )
+        else:
+            _, spatial_tube = spatial_tube_mask(
+                clip, patch_size, cfg.spatial_mask_ratio, tube_size=tube_size
+            )
         # Zero spatial tube positions in the freq-degraded clip
         mask_px = (
             spatial_tube
@@ -963,12 +1072,16 @@ class ImageSSLTransform:
                             c.min_crop_px, c.max_global_crop_px)
         raw0 = self._photometric(raw0)
         # Apply masking strategy before padding so it operates on real pixels only
-        m0, spatial_mask = _apply_image_mask(
+        m0, spatial_mask, patch_energy = _apply_image_mask(
             raw0, c, saliency, hardness, alpha, mask_ratio_override
         )
         padded0, pmask0 = pad_to_patch_multiple(m0, c.patch_size)
         global_crops.append(padded0)
         global_pmasks.append(pmask0)
+
+        # Keep the unmasked version of crop 0 as the pixel reconstruction target.
+        # Both raw0 and m0 share the same spatial dimensions, so padding is identical.
+        raw0_padded, _ = pad_to_patch_multiple(raw0, c.patch_size)
 
         # ── Global crop 1: clean → teacher ───────────────────────────────────
         raw1 = _native_crop(x, c.global_crop_scale, c.patch_size,
@@ -995,11 +1108,13 @@ class ImageSSLTransform:
             local_pmasks.append(pm)
 
         return {
-            "global":       global_crops,
-            "global_pmask": global_pmasks,
-            "local":        local_crops,
-            "local_pmask":  local_pmasks,
-            "mask":         spatial_mask,
+            "global":        global_crops,
+            "global_pmask":  global_pmasks,
+            "local":         local_crops,
+            "local_pmask":   local_pmasks,
+            "mask":          spatial_mask,
+            "global_raw":    raw0_padded,   # unmasked student crop (pixel recon target)
+            "patch_energy":  patch_energy,  # (ph, pw) float [0,1] — SPC loss weight
         }
 
     def _photometric(self, x: Tensor) -> Tensor:
@@ -1087,8 +1202,26 @@ class VideoSSLTransform:
         if c.apply_speckle and random.random() < 0.5:
             clip = add_speckle_noise(clip, random.uniform(0, c.speckle_sigma))
 
+        # Reshape 1-D ALP vector (from ALPScoreCache) to (ph, pw) spatial grid.
+        # ALP is already blended (saliency=pre-blended, hardness=None) so we
+        # treat the saliency arg as the ready-to-use spatial priority map.
+        alp_2d: Optional[Tensor] = None
+        if saliency is not None:
+            T_c, _C, H_c, W_c = clip.shape
+            ph_c, pw_c = H_c // self.patch_size, W_c // self.patch_size
+            flat = saliency.float().flatten()
+            n    = len(flat)
+            side = int(n ** 0.5)
+            # Try to interpret as a square grid; otherwise treat as 1×n row
+            grid = flat.view(1, 1, side, side) if side * side == n else flat.view(1, 1, 1, n)
+            if grid.shape[-2:] != (ph_c, pw_c):
+                grid = F.interpolate(
+                    grid, size=(ph_c, pw_c), mode="bilinear", align_corners=False
+                )
+            alp_2d = grid.squeeze(0).squeeze(0)  # (ph, pw)
+
         visible_clip, tube_mask = _apply_video_mask(
-            clip, c, mask_ratio, self.patch_size
+            clip, c, mask_ratio, self.patch_size, alp=alp_2d
         )
 
         return {

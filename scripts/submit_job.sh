@@ -52,10 +52,56 @@ UNITY_ROOT="${STORE}/cardiac/Unity"
 CARDIACUDC_ROOT="${STORE}/cardiac/CardiacUDC"
 ECHOCP_ROOT="${STORE}/cardiac/EchoCP"
 
-# ── Non-cardiac dataset roots ─────────────────────────────────────────────────
+# ── Breast / Thyroid dataset roots ────────────────────────────────────────────
 BUSI_ROOT="${STORE}/breast/BUSI"
+BREASST_ROOT="${STORE}/breast/BrEaST"
+BUID_ROOT="${STORE}/breast/BUID"
+BUSBRA_ROOT="${STORE}/breast/BUSBRA"
+BUS_UC_ROOT="${STORE}/breast/BUS_UC"
+BUS_UCLM_ROOT="${STORE}/breast/BUS-UCLM"
+BUSV_ROOT="${STORE}/breast/Miccai 2022 BUV Dataset"
+GDPH_ROOT="${STORE}/breast/GDPH&SYSUCC"
+CNRPT_ROOT="${STORE}/breast/Chinese US-Report Dataset (Breast)"
+TN3K_ROOT="${STORE}/thyroid/TN3K"
+
+# ── Lung dataset roots ────────────────────────────────────────────────────────
 BENIN_ROOT="${STORE}/lung/Benin_Videos"
 RSA_ROOT="${STORE}/lung/RSA_Videos"
+
+# ── Liver dataset roots ───────────────────────────────────────────────────────
+AUL_ROOT="${STORE}/liver/AUL"
+US105_ROOT="${STORE}/liver/105US"
+
+# ── Fetal dataset roots ───────────────────────────────────────────────────────
+ACOUSLIC_ROOT="${STORE}/fetal/ACOUSLIC"
+FASS_ROOT="${STORE}/fetal/fetal-abdominal-structures-segmentation"
+FETAL_PLANES_ROOT="${STORE}/fetal/FETAL-PLANES-DB"
+FOCUS_ROOT="${STORE}/fetal/FOCUS"
+FPUS23_ROOT="${STORE}/fetal/FPUS23"
+FUGC_ROOT="${STORE}/fetal/FUGC"
+FH_PS_AOP_ROOT="${STORE}/fetal/FH-PS-AOP"
+HC18_ROOT="${STORE}/fetal/HC18"
+IUGC2024_ROOT="${STORE}/fetal/IUGC-2024"
+JNU_IFM_ROOT="${STORE}/fetal/JNU-IFM"
+LSFHB_ROOT="${STORE}/fetal/large-scale-fetal-head-biometry"
+MF_INTRAPARTUM_ROOT="${STORE}/fetal/maternal-fetal-us-video-intrapartum"
+PBF_US1_ROOT="${STORE}/fetal/PBF-US1"
+PSFHS_ROOT="${STORE}/fetal/PSFHS"
+
+# ── Vascular / Carotid dataset roots ─────────────────────────────────────────
+CUBS_ROOT="${STORE}/vascular-carotid/CUBS"
+CAROTID_ROOT="${STORE}/vascular-carotid/Common-Carotid-Artery-Ultrasound-Images"
+
+# ── Brain / Multi-organ / Ocular / Skin dataset roots ────────────────────────
+NEUROIMAGES_3D_ROOT="${STORE}/brain/3D-US-Neuroimages-Dataset"
+BITE_ROOT="${STORE}/brain/BITE"
+REMIND_ROOT="${STORE}/brain/REMIND-Brain-iUS"
+RESECT_ROOT="${STORE}/brain/RESECT"
+REMIND2REG_ROOT="${STORE}/brain/ReMIND2Reg"
+STU_ROOT="${STORE}/multi_organ/STU-Hospital-master"
+AHUS_ROOT="${STORE}/multi_organ/annotated_heterogeneous_us_db"
+ERDES_ROOT="${STORE}/ocular/ERDES"
+DERM_ROOT="${STORE}/skin/Dermatologic-US-Skin-Lesions"
 
 # ── Manifest / scratch paths ──────────────────────────────────────────────────
 MANIFEST_DIR="${CKPT_ROOT%/*}/manifests"
@@ -154,37 +200,123 @@ nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>
 echo "================================================================"
 echo ""
 
+# ── Cardiac
 export US_CAMUS_ROOT="${CAMUS_ROOT}"
 export US_ECHONET_ROOT="${ECHONET_ROOT}"
-export US_ECHONET_PED_ROOT=${ECHONET_PED_ROOT}
-export US_ECHONET_LVH_ROOT=${ECHONET_LVH_ROOT}
-export US_MIMIC_ECHO_ROOT=${MIMIC_ECHO_ROOT}
-export US_MIMIC_LVVOL_ROOT=${MIMIC_LVVOL_ROOT}
-export US_TED_ROOT=${TED_ROOT}
-export US_UNITY_ROOT=${UNITY_ROOT}
-export US_CARDIACUDC_ROOT=${CARDIACUDC_ROOT}
-export US_ECHOCP_ROOT=${ECHOCP_ROOT}
-export US_BUSI_ROOT=${BUSI_ROOT}
-export US_BENIN_ROOT=${BENIN_ROOT}
-export US_RSA_ROOT=${RSA_ROOT}
+export US_ECHONET_PED_ROOT="${ECHONET_PED_ROOT}"
+export US_ECHONET_LVH_ROOT="${ECHONET_LVH_ROOT}"
+export US_MIMIC_ECHO_ROOT="${MIMIC_ECHO_ROOT}"
+export US_MIMIC_LVVOL_ROOT="${MIMIC_LVVOL_ROOT}"
+export US_TED_ROOT="${TED_ROOT}"
+export US_UNITY_ROOT="${UNITY_ROOT}"
+export US_CARDIACUDC_ROOT="${CARDIACUDC_ROOT}"
+export US_ECHOCP_ROOT="${ECHOCP_ROOT}"
+# ── Breast / Thyroid
+export US_BUSI_ROOT="${BUSI_ROOT}"
+export US_BREASST_ROOT="${BREASST_ROOT}"
+export US_BUID_ROOT="${BUID_ROOT}"
+export US_BUSBRA_ROOT="${BUSBRA_ROOT}"
+export US_BUS_UC_ROOT="${BUS_UC_ROOT}"
+export US_BUS_UCLM_ROOT="${BUS_UCLM_ROOT}"
+export US_BUSV_ROOT="${BUSV_ROOT}"
+export US_GDPH_ROOT="${GDPH_ROOT}"
+export US_CNRPT_ROOT="${CNRPT_ROOT}"
+export US_TN3K_ROOT="${TN3K_ROOT}"
+# ── Lung
+export US_BENIN_ROOT="${BENIN_ROOT}"
+export US_RSA_ROOT="${RSA_ROOT}"
+# ── Liver
+export US_AUL_ROOT="${AUL_ROOT}"
+export US_105US_ROOT="${US105_ROOT}"
+# ── Fetal
+export US_ACOUSLIC_ROOT="${ACOUSLIC_ROOT}"
+export US_FASS_ROOT="${FASS_ROOT}"
+export US_FETAL_PLANES_ROOT="${FETAL_PLANES_ROOT}"
+export US_FOCUS_ROOT="${FOCUS_ROOT}"
+export US_FPUS23_ROOT="${FPUS23_ROOT}"
+export US_FUGC_ROOT="${FUGC_ROOT}"
+export US_FH_PS_AOP_ROOT="${FH_PS_AOP_ROOT}"
+export US_HC18_ROOT="${HC18_ROOT}"
+export US_IUGC2024_ROOT="${IUGC2024_ROOT}"
+export US_JNU_IFM_ROOT="${JNU_IFM_ROOT}"
+export US_LSFHB_ROOT="${LSFHB_ROOT}"
+export US_MF_INTRAPARTUM_ROOT="${MF_INTRAPARTUM_ROOT}"
+export US_PBF_US1_ROOT="${PBF_US1_ROOT}"
+export US_PSFHS_ROOT="${PSFHS_ROOT}"
+# ── Vascular / Carotid
+export US_CUBS_ROOT="${CUBS_ROOT}"
+export US_CAROTID_ROOT="${CAROTID_ROOT}"
+# ── Brain / Multi-organ / Ocular / Skin
+export US_3D_NEURO_ROOT="${NEUROIMAGES_3D_ROOT}"
+export US_BITE_ROOT="${BITE_ROOT}"
+export US_REMIND_ROOT="${REMIND_ROOT}"
+export US_RESECT_ROOT="${RESECT_ROOT}"
+export US_REMIND2REG_ROOT="${REMIND2REG_ROOT}"
+export US_STU_ROOT="${STU_ROOT}"
+export US_AHUS_ROOT="${AHUS_ROOT}"
+export US_ERDES_ROOT="${ERDES_ROOT}"
+export US_DERM_ROOT="${DERM_ROOT}"
 
-pip install --quiet pydicom
+pip install --quiet pydicom nibabel
 
 echo "Running: python3 -m tests.dataset_adapters.training_smoke"
 echo "Dataset roots:"
-echo "  CAMUS              : ${CAMUS_ROOT}"
-echo "  EchoNet-Dynamic    : ${ECHONET_ROOT}"
-echo "  EchoNet-Pediatric  : ${ECHONET_PED_ROOT}"
-echo "  EchoNet-LVH        : ${ECHONET_LVH_ROOT}"
-echo "  MIMIC-IV-ECHO      : ${MIMIC_ECHO_ROOT}"
-echo "  MIMIC-IV-LVVol-A4C : ${MIMIC_LVVOL_ROOT}"
-echo "  TED                : ${TED_ROOT}"
-echo "  Unity-Echo         : ${UNITY_ROOT}"
-echo "  CardiacUDC         : ${CARDIACUDC_ROOT}"
-echo "  EchoCP             : ${ECHOCP_ROOT}"
-echo "  BUSI               : ${BUSI_ROOT}"
-echo "  Benin-LUS          : ${BENIN_ROOT}"
-echo "  RSA-LUS            : ${RSA_ROOT}"
+echo "  ── Cardiac ──────────────────────────────────────────────────────"
+echo "  CAMUS                          : ${CAMUS_ROOT}"
+echo "  EchoNet-Dynamic                : ${ECHONET_ROOT}"
+echo "  EchoNet-Pediatric              : ${ECHONET_PED_ROOT}"
+echo "  EchoNet-LVH                    : ${ECHONET_LVH_ROOT}"
+echo "  MIMIC-IV-ECHO                  : ${MIMIC_ECHO_ROOT}"
+echo "  MIMIC-IV-LVVol-A4C             : ${MIMIC_LVVOL_ROOT}"
+echo "  TED                            : ${TED_ROOT}"
+echo "  Unity-Echo                     : ${UNITY_ROOT}"
+echo "  CardiacUDC                     : ${CARDIACUDC_ROOT}"
+echo "  EchoCP                         : ${ECHOCP_ROOT}"
+echo "  ── Breast / Thyroid ─────────────────────────────────────────────"
+echo "  BUSI                           : ${BUSI_ROOT}"
+echo "  BrEaST                         : ${BREASST_ROOT}"
+echo "  BUID                           : ${BUID_ROOT}"
+echo "  BUS-BRA                        : ${BUSBRA_ROOT}"
+echo "  BUS-UC                         : ${BUS_UC_ROOT}"
+echo "  BUS-UCLM                       : ${BUS_UCLM_ROOT}"
+echo "  BUSV                           : ${BUSV_ROOT}"
+echo "  GDPH-SYSUCC                    : ${GDPH_ROOT}"
+echo "  Chinese-US-Report-Breast       : ${CNRPT_ROOT}"
+echo "  TN3K                           : ${TN3K_ROOT}"
+echo "  ── Lung ─────────────────────────────────────────────────────────"
+echo "  Benin-LUS                      : ${BENIN_ROOT}"
+echo "  RSA-LUS                        : ${RSA_ROOT}"
+echo "  ── Liver ────────────────────────────────────────────────────────"
+echo "  AUL                            : ${AUL_ROOT}"
+echo "  105US                          : ${US105_ROOT}"
+echo "  ── Fetal ────────────────────────────────────────────────────────"
+echo "  ACOUSLIC-AI                    : ${ACOUSLIC_ROOT}"
+echo "  FASS                           : ${FASS_ROOT}"
+echo "  FETAL-PLANES-DB                : ${FETAL_PLANES_ROOT}"
+echo "  FOCUS                          : ${FOCUS_ROOT}"
+echo "  FPUS23                         : ${FPUS23_ROOT}"
+echo "  FUGC                           : ${FUGC_ROOT}"
+echo "  FH-PS-AOP                      : ${FH_PS_AOP_ROOT}"
+echo "  HC18                           : ${HC18_ROOT}"
+echo "  IUGC2024                       : ${IUGC2024_ROOT}"
+echo "  JNU-IFM                        : ${JNU_IFM_ROOT}"
+echo "  Large-Scale-Fetal-Head-Biometry: ${LSFHB_ROOT}"
+echo "  maternal-fetal-intrapartum     : ${MF_INTRAPARTUM_ROOT}"
+echo "  PBF-US1                        : ${PBF_US1_ROOT}"
+echo "  PSFHS                          : ${PSFHS_ROOT}"
+echo "  ── Vascular / Carotid ───────────────────────────────────────────"
+echo "  CUBS                           : ${CUBS_ROOT}"
+echo "  Common-Carotid                 : ${CAROTID_ROOT}"
+echo "  ── Brain / Multi-organ / Ocular / Skin ──────────────────────────"
+echo "  3D-US-Neuroimages              : ${NEUROIMAGES_3D_ROOT}"
+echo "  BITE                           : ${BITE_ROOT}"
+echo "  REMIND-Brain-iUS               : ${REMIND_ROOT}"
+echo "  RESECT                         : ${RESECT_ROOT}"
+echo "  ReMIND2Reg                     : ${REMIND2REG_ROOT}"
+echo "  STU-Hospital-master            : ${STU_ROOT}"
+echo "  annotated_heterogeneous_us_db  : ${AHUS_ROOT}"
+echo "  ERDES                          : ${ERDES_ROOT}"
+echo "  Dermatologic-US-Skin-Lesions   : ${DERM_ROOT}"
 echo ""
 
 python3 -m tests.dataset_adapters.training_smoke
