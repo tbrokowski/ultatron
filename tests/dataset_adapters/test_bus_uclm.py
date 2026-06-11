@@ -108,6 +108,21 @@ class TestBUSUCLMAdapter:
                 assert e.has_mask
                 assert e.task_type == "segmentation"
 
+    def test_binary_mask_dir_under_dataset_root(self, bus_uclm_root):
+        from data.adapters.breast.bus_uclm_adapter import BUSUCLMAdapter
+
+        adapter = BUSUCLMAdapter(root=bus_uclm_root)
+        assert adapter.binary_mask_dir == bus_uclm_root / "masks_binary"
+
+        list(adapter.iter_entries())
+        assert adapter.binary_mask_dir.is_dir()
+        assert all(
+            p.is_relative_to(adapter.binary_mask_dir)
+            for e in adapter.iter_entries()
+            if e.instances[0].mask_path
+            for p in [Path(e.instances[0].mask_path)]
+        )
+
     def test_split_override(self, bus_uclm_root):
         from data.adapters.breast.bus_uclm_adapter import BUSUCLMAdapter
         for e in BUSUCLMAdapter(root=bus_uclm_root, split_override="val").iter_entries():

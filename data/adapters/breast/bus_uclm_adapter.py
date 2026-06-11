@@ -165,10 +165,12 @@ class BUSUCLMAdapter(BaseAdapter):
 
         self.images_dir      = self.root / "images"
         self.masks_dir       = self.root / "masks"
-        self.binary_mask_dir = (
-            Path(binary_mask_dir) if binary_mask_dir and not Path(binary_mask_dir).is_absolute()
-            else self.root / "masks_binary"
-        )
+        if binary_mask_dir is None:
+            self.binary_mask_dir = self.root / "masks_binary"
+        elif Path(binary_mask_dir).is_absolute():
+            self.binary_mask_dir = Path(binary_mask_dir)
+        else:
+            self.binary_mask_dir = self.root / binary_mask_dir
 
     # ── Public interface ───────────────────────────────────────────────────
 
