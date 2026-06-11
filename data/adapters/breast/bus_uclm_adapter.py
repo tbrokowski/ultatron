@@ -142,13 +142,26 @@ class BUSUCLMAdapter(BaseAdapter):
     SONODQS        = "silver"
     DOI            = "https://doi.org/10.17632/7fvgj4jsp7.1"
 
+    @classmethod
+    def _resolve_dataset_root(cls, root: str | Path) -> Path:
+        root = Path(root)
+        for candidate in (root, root / cls.DATASET_ID):
+            if (candidate / "images").is_dir() and (candidate / "masks").is_dir():
+                return candidate
+        raise FileNotFoundError(
+            f"{cls.DATASET_ID}: expected images/ and masks/ under {root}"
+        )
+
     def __init__(
         self,
         root: str | Path,
         split_override: Optional[str] = None,
         binary_mask_dir: Optional[str | Path] = "masks_binary",
     ):
-        super().__init__(root=root, split_override=split_override)
+        super().__init__(
+            self._resolve_dataset_root(root),
+            split_override=split_override,
+        )
 
         self.images_dir      = self.root / "images"
         self.masks_dir       = self.root / "masks"

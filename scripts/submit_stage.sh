@@ -4,16 +4,15 @@
 # =============================================================================
 #
 # Usage:
-#   bash scripts/submit_stage.sh -run1
-#   bash scripts/submit_stage.sh -run1 --dry-run
-#   bash scripts/submit_stage.sh -run1 --config configs/run1/data_run1.yaml
+#   bash scripts/submit_stage.sh
+#   bash scripts/submit_stage.sh --dry-run
+#   bash scripts/submit_stage.sh --config configs/run1/data_run1.yaml   # subset only
 #
-# Behavior:
-#   - Submits one lightweight SLURM job.
+# Default behavior:
+#   - Stages every dataset in DATASET_STORE_MAP that exists on Capstor Store.
+#   - Skips datasets whose store directory is missing (not staged yet on archive).
+#   - Uses rsync when available, otherwise cp -r (safe for paths with spaces/parens).
 #   - Runs inside the same EDF container environment as training.
-#   - Reads dataset roots from the selected YAML config (datasets: section).
-#   - Copies each dataset directory from /capstor/store/.../raw/... to
-#     /capstor/scratch/cscs/$USER/ultrasound/raw/... via rsync.
 # =============================================================================
 
 set -euo pipefail
@@ -25,13 +24,12 @@ EDF_ENV="/users/tbrokowski/.edf/ultatron.toml"
 LOG_DIR="${REPO_DIR}/logs/staging"
 
 JOB_NAME="ultatron_stage"
-TIME="04:00:00"
+TIME="12:00:00"
 NODES=1
 GPUS=0
 CPUS=4
 
-MODE=""
-CONFIG="configs/run1/data_run1.yaml"
+CONFIG=""
 DRY_RUN=0
 
 die()  { echo "[ERROR] $*" >&2; exit 1; }
@@ -39,20 +37,26 @@ info() { echo "[INFO]  $*"; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -run1) MODE="run1"; shift ;;
+        -run1) shift ;;   # legacy alias; default is now all in-store datasets
         --config) CONFIG="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help)
-            sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) die "Unknown argument: $1" ;;
     esac
 done
 
-[[ -n "$MODE" ]] || die "No mode specified. Use: -run1"
+if [[ -n "${CONFIG}" ]]; then
+    ABS_CONFIG="${REPO_DIR}/${CONFIG}"
+    [[ -f "${ABS_CONFIG}" ]] || die "Config not found: ${ABS_CONFIG}"
+    CONFIG_ARG="${ABS_CONFIG}"
+    MODE="config"
+else
+    CONFIG_ARG=""
+    MODE="all"
+fi
 
-ABS_CONFIG="${REPO_DIR}/${CONFIG}"
-[[ -f "${ABS_CONFIG}" ]] || die "Config not found: ${ABS_CONFIG}"
 mkdir -p "${LOG_DIR}"
 
 INNERSCRIPT="${LOG_DIR}/.inner_stage_${MODE}.sh"
@@ -64,6 +68,7 @@ cat > "${INNERSCRIPT}" << INNER_EOF
 set -euo pipefail
 cd ${REPO_DIR}
 export PYTHONPATH="${REPO_DIR}:\${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1
 export CSCS_USER="\${CSCS_USER:-\${USER:-tbrokowski}}"
 
 echo "================================================================"
@@ -71,92 +76,130 @@ echo " Ultatron — ${JOB_NAME}"
 echo " Job    : \${SLURM_JOB_ID:-local}"
 echo " Node   : \$(hostname)"
 echo " Start  : \$(date)"
-echo " Config : ${ABS_CONFIG}"
+echo " Mode   : ${MODE}"
+echo " Config : ${CONFIG_ARG:-<all in-store datasets>}"
 echo " DryRun : ${DRY_RUN}"
 echo "================================================================"
 echo ""
 
-python3 - << 'PY_EOF'
+python3 -u << 'PY_EOF'
 import os
 import subprocess
+import sys
+import types
 from pathlib import Path
 
-import yaml
+def log(msg: str) -> None:
+    print(msg, flush=True)
 
-config_path = Path("${ABS_CONFIG}")
+REPO = Path("${REPO_DIR}")
 dry_run = bool(${DRY_RUN})
-user = os.environ.get("CSCS_USER") or os.environ.get("USER")
-if not user:
-    raise SystemExit("CSCS_USER/USER is not set; cannot resolve scratch path.")
+config_path = "${CONFIG_ARG}"
 
-store_raw = Path("/capstor/store/cscs/swissai/a127/ultrasound/raw")
-scratch_raw = Path(f"/capstor/scratch/cscs/{user}/ultrasound/raw")
+# Avoid importing data/__init__.py (pulls torch).
+if "data" not in sys.modules:
+    data_stub = types.ModuleType("data")
+    data_stub.__path__ = [str(REPO / "data")]
+    data_stub.__package__ = "data"
+    sys.modules["data"] = data_stub
+
+from data.infra.storage import DATASET_STORE_MAP, StorageConfig
+
+cfg = StorageConfig()
+if not cfg.scratch_root:
+    raise SystemExit("scratch_root not configured. Set CSCS_USER or US_SCRATCH_ROOT.")
+
+store_raw = cfg.store_root / "raw"
+scratch_raw = cfg.scratch_root / "raw"
 scratch_raw.mkdir(parents=True, exist_ok=True)
 
-with open(config_path, "r", encoding="utf-8") as f:
-    cfg = yaml.safe_load(f) or {}
+def resolve_sources():
+    """Return ordered list of (dataset_id, src Path)."""
+    if config_path:
+        import yaml
+        with open(config_path, "r", encoding="utf-8") as f:
+            ycfg = yaml.safe_load(f) or {}
+        datasets = ycfg.get("datasets") or {}
+        if not datasets:
+            raise SystemExit(f"No datasets found in config: {config_path}")
+        out = []
+        for dataset_id, src_raw in datasets.items():
+            out.append((dataset_id, Path(str(src_raw))))
+        return out
 
-datasets = (cfg.get("datasets") or {})
-if not datasets:
-    raise SystemExit(f"No datasets found in config: {config_path}")
+    out = []
+    for dataset_id in sorted(DATASET_STORE_MAP.keys()):
+        anatomy, subdir = DATASET_STORE_MAP[dataset_id]
+        src = store_raw / anatomy / subdir
+        out.append((dataset_id, src))
+    return out
 
-print(f"store_raw   : {store_raw}")
-print(f"scratch_raw : {scratch_raw}")
-print(f"dataset_cnt : {len(datasets)}")
-print("")
+sources = resolve_sources()
 
-has_rsync = (subprocess.run(["bash", "-lc", "command -v rsync >/dev/null 2>&1"]).returncode == 0)
+from shutil import which as _which
+has_rsync = _which("rsync") is not None
 copy_tool = "rsync" if has_rsync else "cp"
-print(f"copy_tool   : {copy_tool}")
-print("")
 
+log("Scanning store and building dataset list...")
+log(f"store_raw    : {store_raw}")
+log(f"scratch_raw  : {scratch_raw}")
+log(f"dataset_cnt  : {len(sources)}")
+log(f"copy_tool    : {copy_tool}")
+log("")
+
+skipped = []
 failures = []
-for dataset_id, src_raw in datasets.items():
-    src = Path(str(src_raw))
-    if not src.exists():
-        print(f"[FAIL] {dataset_id}: source missing -> {src}")
-        failures.append(dataset_id)
+synced = []
+
+for dataset_id, src in sources:
+    if not src.exists() or not any(src.iterdir()):
+        log(f"[SKIP] {dataset_id}: not on store -> {src}")
+        skipped.append(dataset_id)
         continue
 
     try:
         rel = src.relative_to(store_raw)
     except ValueError:
-        print(f"[FAIL] {dataset_id}: source not under store raw root -> {src}")
+        log(f"[FAIL] {dataset_id}: source not under store raw root -> {src}")
         failures.append(dataset_id)
         continue
 
     dst = scratch_raw / rel
     dst.mkdir(parents=True, exist_ok=True)
 
-    print(f"[SYNC] {dataset_id}")
-    print(f"       {src} -> {dst}")
+    log(f"[SYNC] {dataset_id}")
+    log(f"       {src} -> {dst}")
+
     if has_rsync:
         cmd = ["rsync", "-ah", "--info=progress2", f"{src}/", f"{dst}/"]
         if dry_run:
             cmd.insert(1, "--dry-run")
         rc = subprocess.run(cmd).returncode
+    elif dry_run:
+        log("       [DRY-RUN] cp -r <src>/. <dst>/")
+        rc = 0
     else:
-        if dry_run:
-            print("       [DRY-RUN] cp -r <src>/. <dst>/")
-            rc = 0
-        else:
-            # Portable fallback when rsync is unavailable in container.
-            # Use non-preserving recursive copy because scratch may reject
-            # ownership/permission/timestamp metadata from store.
-            cmd = ["cp", "-r", f"{src}/.", f"{dst}/"]
-            rc = subprocess.run(cmd).returncode
-    if rc != 0:
-        print(f"[FAIL] {dataset_id}: copy command exit code {rc}")
-        failures.append(dataset_id)
+        cmd = ["cp", "-r", f"{src}/.", f"{dst}/"]
+        rc = subprocess.run(cmd).returncode
 
-print("")
+    if rc != 0:
+        log(f"[FAIL] {dataset_id}: copy command exit code {rc}")
+        failures.append(dataset_id)
+    else:
+        synced.append(dataset_id)
+
+log("")
+log(f"Synced  : {len(synced)}")
+log(f"Skipped : {len(skipped)} (not on store)")
+log(f"Failed  : {len(failures)}")
 if failures:
-    print("Staging finished with failures:")
+    log("")
+    log("Staging finished with copy failures:")
     for d in failures:
-        print(f"  - {d}")
+        log(f"  - {d}")
     raise SystemExit(1)
 
-print("Staging complete: all datasets synced successfully.")
+log("Staging complete.")
 PY_EOF
 
 echo ""

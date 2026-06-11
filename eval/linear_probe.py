@@ -216,19 +216,44 @@ class LinearProbe:
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+def _load_config(path: str) -> dict:
+    """Load YAML with _base_ inheritance (matches scripts/train.py logic)."""
+    import yaml
+    repo = Path(__file__).resolve().parent.parent
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+    if "_base_" in cfg:
+        base_path = repo / cfg.pop("_base_")
+        with open(base_path) as f:
+            base = yaml.safe_load(f)
+        def _deep_merge(base: dict, override: dict) -> dict:
+            out = dict(base)
+            for k, v in override.items():
+                if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+                    out[k] = _deep_merge(out[k], v)
+                else:
+                    out[k] = v
+            return out
+        cfg = _deep_merge(base, cfg)
+    return cfg
+
+
 def _main():
     parser = argparse.ArgumentParser(
         description="Ultatron anatomy-stratified linear probe"
     )
     parser.add_argument("--config",      required=True,
-                        help="Path to configs/data/data_config.yaml")
+                        help="Experiment YAML (e.g. configs/run1/minimal_run1.yaml)")
     parser.add_argument("--checkpoint",  required=True,
                         help="Path to model checkpoint (.pt)")
+    parser.add_argument("--manifest",    default=None,
+                        help="Override manifest path from config (JSONL file)")
     parser.add_argument("--output",      default=None,
-                        help="Output JSON path (default: auto-generated)")
+                        help="Output JSON path (default: auto-generated alongside ckpt)")
     parser.add_argument("--max-train",   type=int, default=100_000)
     parser.add_argument("--max-val",     type=int, default=50_000)
-    parser.add_argument("--no-7b",       action="store_true")
+    parser.add_argument("--no-7b",       action="store_true",
+                        help="Skip DINOv3-7B frozen teacher (faster, less memory)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -239,47 +264,103 @@ def _main():
     import yaml
     from models import ModelConfig, build_image_branch
     from data.infra.cscs_paths import CSCSConfig
+    from data.pipeline.datamodule import USFoundationDataModule
+    from data.pipeline.transforms import (
+        ImageSSLTransformConfig, VideoSSLTransformConfig, FreqMaskConfig,
+    )
 
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
+    cfg  = _load_config(args.config)
+    cscs = CSCSConfig.from_env()
 
-    device   = "cuda" if torch.cuda.is_available() else "cpu"
-    cscs     = CSCSConfig.from_env()
-    hf_cache = str(cscs.store_path("hf_cache"))
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load model
-    log.info(f"Loading checkpoint: {args.checkpoint}")
-    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    # ── Load checkpoint ───────────────────────────────────────────────────────
+    ckpt_path = Path(args.checkpoint)
+    log.info("Loading checkpoint: %s", ckpt_path)
+    ckpt = torch.load(str(ckpt_path), map_location="cpu")
     step = ckpt.get("global_step", 0)
+    phase_tag = ckpt.get("phase", "")
+    log.info("  step=%d  phase=%s", step, phase_tag)
 
+    # ── Build image branch ────────────────────────────────────────────────────
+    hf_cache = str(cscs.store_path("hf_cache"))
     model_cfg = ModelConfig.from_dict(cfg.get("model", {}))
     model_cfg.hf_cache_dir = hf_cache
     if args.no_7b:
         model_cfg.frozen_teacher = None
 
     img_branch = build_image_branch(model_cfg, device=device)
-    img_branch.student.load_state_dict(ckpt["img_student"])
-    img_branch.teacher.load_state_dict(ckpt["img_teacher"])
+    if "img_student" in ckpt:
+        img_branch.student.load_state_dict(ckpt["img_student"])
+        img_branch.teacher.load_state_dict(ckpt["img_teacher"])
+        log.info("Loaded img_student / img_teacher weights.")
+    else:
+        log.warning("Checkpoint has no img_student key — using randomly initialised weights.")
 
-    # Build datamodule (minimal — only needs image val loader)
-    from train.trainer import TrainConfig
-    # Import build_datamodule from scripts/train.py or replicate inline
-    # For now, assume dm is constructed externally and passed in
-    # (the CLI version is mainly for quick manual runs)
-    log.info("DataModule construction omitted in CLI — use Python API instead.")
-    log.info(
-        "  from eval.linear_probe import LinearProbe\n"
-        "  probe = LinearProbe(img_branch, dm, device)\n"
-        "  results = probe.run()"
+    # ── Build DataModule ──────────────────────────────────────────────────────
+    total_steps = cfg.get("curriculum", {}).get("total_training_steps", 300_000)
+
+    img_raw  = dict(cfg["transforms"]["image"])
+    vid_raw  = dict(cfg["transforms"]["video"])
+    img_freq = img_raw.pop("freq_mask", {})
+    vid_freq = vid_raw.pop("freq_mask", {})
+    img_tcfg = ImageSSLTransformConfig(
+        **img_raw,
+        freq_mask=FreqMaskConfig(**img_freq) if img_freq else FreqMaskConfig(),
+    )
+    vid_tcfg = VideoSSLTransformConfig(
+        **vid_raw,
+        freq_mask=FreqMaskConfig(**vid_freq) if vid_freq else FreqMaskConfig(),
     )
 
-    # Output path
+    if args.manifest:
+        manifest_path = args.manifest
+    else:
+        _mcfg = Path(cfg["manifest"]["path"])
+        repo  = Path(__file__).resolve().parent.parent
+        if not _mcfg.is_absolute():
+            _mcfg = repo / _mcfg
+        manifest_path = str(_mcfg if _mcfg.exists() else cscs.manifest_path(_mcfg.name))
+
+    root_remap = cfg["manifest"].get("root_remap")
+    if root_remap is None:
+        root_remap = cscs.remap_dict()
+
+    dm = USFoundationDataModule(
+        manifest_path           = manifest_path,
+        image_batch_size        = cfg["loaders"]["image_batch_size"],
+        video_batch_size        = cfg["loaders"]["video_batch_size"],
+        num_workers             = cfg["loaders"].get("num_workers", 4),
+        pin_memory              = cfg["loaders"].get("pin_memory", True),
+        patch_size              = cfg["transforms"]["patch_size"],
+        total_training_steps    = total_steps,
+        image_samples_per_epoch = cfg["curriculum"]["image_samples_per_epoch"],
+        video_samples_per_epoch = cfg["curriculum"]["video_samples_per_epoch"],
+        anatomy_weights         = cfg.get("anatomy_weights", {}),
+        root_remap              = root_remap,
+        image_cfg               = img_tcfg,
+        video_cfg               = vid_tcfg,
+    )
+    dm.setup()
+
+    # ── Run linear probe ──────────────────────────────────────────────────────
+    probe   = LinearProbe(img_branch, dm, device=device)
+    results = probe.run(
+        max_train_samples = args.max_train,
+        max_val_samples   = args.max_val,
+    )
+    results["phase"] = phase_tag
+
+    # ── Output path ───────────────────────────────────────────────────────────
     output = args.output
     if output is None:
-        log_dir = cscs.scratch_path("logs") / "current_run" / "results"
-        output  = log_dir / f"linear_probe_step_{step:08d}.json"
+        out_dir = ckpt_path.parent / "results"
+        label   = phase_tag if phase_tag else f"step{step:08d}"
+        output  = out_dir / f"linear_probe_{label}.json"
 
-    log.info(f"Would write results to: {output}")
+    LinearProbe.save(results, output, step=step)
+    print(f"\nLinear probe AUC macro: {results.get('auc_macro', float('nan')):.4f}")
+    print(f"Results: {output}")
 
 
 if __name__ == "__main__":

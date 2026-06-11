@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from data.adapters.cubs import CUBSAdapter
+from data.adapters.vascular.cubs import CUBSAdapter
 from data.pipeline.dataset import ImageSSLDataset
 from data.pipeline.downstream_dataset import DownstreamDataset
 from data.pipeline.transforms import ImageSSLTransformConfig

@@ -10,6 +10,8 @@ import io
 import logging
 import os
 import random
+import re
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,11 +29,197 @@ from data.pipeline.transforms import (
 
 # ── Format helpers (no external deps beyond stdlib + numpy) ──────────────────
 
+_ARCHIVE_SEP = "::"
+_RF_SUFFIX_RE = re.compile(
+    r"\.rf\.[0-9a-f]+\.(jpg|jpeg|png|bmp|tif|tiff)$", re.IGNORECASE,
+)
+
+
+def split_archive_path(path: str) -> tuple[str, Optional[str]]:
+    """Split ``/path/archive.zip::member/in.zip`` into archive path and member."""
+    if _ARCHIVE_SEP in path:
+        archive, member = path.split(_ARCHIVE_SEP, 1)
+        return archive, member
+    return path, None
+
+
+def _extracted_archive_fallback(archive: str, member: str) -> Optional[str]:
+    """If ``archive.zip`` was partially extracted to ``archive/``, use that file."""
+    zp = Path(archive)
+    candidate = zp.parent / zp.stem / member
+    if candidate.is_file():
+        return str(candidate)
+    return None
+
+
+def _resolve_zip_member(zf: zipfile.ZipFile, member: str) -> str:
+    names = zf.namelist()
+    if member in names:
+        return member
+    alt = member.lstrip("/")
+    if alt in names:
+        return alt
+    basename = Path(member).name
+    matches = [n for n in names if Path(n).name == basename]
+    if len(matches) == 1:
+        return matches[0]
+    suffix_matches = [
+        n for n in names
+        if n.endswith(member) or n.endswith("/" + member.lstrip("/"))
+    ]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0]
+    raise FileNotFoundError(f"Archive member not found: {member!r} in {zf.filename}")
+
+
+def media_path_exists(path: str) -> bool:
+    """Return True when a plain file or ``zip::member`` path is readable."""
+    archive, member = split_archive_path(path)
+    if member is not None:
+        fallback = _extracted_archive_fallback(archive, member)
+        if fallback is not None:
+            return True
+        zp = Path(archive)
+        if not zp.is_file():
+            return False
+        try:
+            with zipfile.ZipFile(zp) as zf:
+                resolved = _resolve_zip_member(zf, member)
+                # Probe readability for encrypted entries.
+                with zf.open(resolved) as fh:
+                    fh.read(1)
+            return True
+        except (FileNotFoundError, zipfile.BadZipFile, OSError, RuntimeError):
+            return False
+    return Path(archive).exists()
+
+
+def resolve_media_path(
+    path: str,
+    root_remap: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    """Return the first readable variant of *path* (store/scratch/remapped)."""
+    candidates: List[str] = []
+    remapped = path
+    for old, new in (root_remap or {}).items():
+        if remapped.startswith(old):
+            remapped = remapped.replace(old, new, 1)
+            break
+    candidates.append(remapped)
+    if remapped != path:
+        candidates.append(path)
+    for old, new in (root_remap or {}).items():
+        for p in list(candidates):
+            if p.startswith(old):
+                candidates.append(p.replace(old, new, 1))
+            elif p.startswith(new):
+                candidates.append(p.replace(new, old, 1))
+    for p in dict.fromkeys(candidates):
+        if media_path_exists(p):
+            return p
+    return None
+
+
+def image_path_extension(path: str) -> str:
+    """Return the loader extension, normalising Roboflow and compound suffixes."""
+    _, member = split_archive_path(path)
+    name = member if member is not None else path
+    lower = name.lower()
+    if lower.endswith(".nii.gz"):
+        return ".nii.gz"
+    if lower.endswith(".tar.gz"):
+        return ".tar.gz"
+    rf_match = _RF_SUFFIX_RE.search(name)
+    if rf_match:
+        return "." + rf_match.group(1).lower()
+    suffixes = Path(name).suffixes
+    return suffixes[-1].lower() if suffixes else ""
+
+
+def _read_archive_bytes(path: str) -> tuple[Optional[bytes], str]:
+    """Return ``(bytes, logical_name)`` for zip members, else ``(None, path)``."""
+    archive, member = split_archive_path(path)
+    if member is None:
+        return None, path
+
+    fallback = _extracted_archive_fallback(archive, member)
+    if fallback is not None:
+        return None, fallback
+
+    with zipfile.ZipFile(archive) as zf:
+        resolved = _resolve_zip_member(zf, member)
+        try:
+            return zf.read(resolved), resolved
+        except RuntimeError as exc:
+            if "password" in str(exc).lower() or "encrypted" in str(exc).lower():
+                fallback = _extracted_archive_fallback(archive, member)
+                if fallback is not None:
+                    return None, fallback
+            raise
+
+
+def _frame_to_rgb_uint8(frame: np.ndarray) -> np.ndarray:
+    """Convert a single 2-D or 3-D frame to ``(H, W, 3)`` uint8 RGB."""
+    arr = np.asarray(frame)
+    if arr.ndim == 2:
+        arr = arr.astype(np.float32)
+        vmin, vmax = float(arr.min()), float(arr.max())
+        if vmax > vmin and vmax <= 1.0:
+            arr = arr * 255.0
+        elif vmax > vmin and arr.max() > 255:
+            arr = (arr - vmin) / (vmax - vmin) * 255.0
+        img = np.clip(arr, 0, 255).astype(np.uint8)
+        return np.stack([img, img, img], axis=-1)
+
+    if arr.ndim == 3 and arr.shape[-1] in (3, 4):
+        out = arr[..., :3].astype(np.float32)
+        mx = float(out.max())
+        if mx <= 1.0:
+            out = out * 255.0
+        elif mx > 255:
+            vmin, vmax = float(out.min()), float(out.max())
+            out = (out - vmin) / (vmax - vmin + 1e-8) * 255.0
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+    raise ValueError(f"Unsupported frame shape: {arr.shape}")
+
+
+def _read_h5_frames(path: str, max_frames: Optional[int] = None) -> List[np.ndarray]:
+    try:
+        import h5py
+    except ImportError:
+        raise RuntimeError("h5py required for HDF5 files")
+
+    with h5py.File(path, "r") as f:
+        key = "frames" if "frames" in f else list(f.keys())[0]
+        arr = np.asarray(f[key])
+
+    if arr.ndim == 4 and arr.shape[-1] in (1, 3, 4):
+        raw_frames = [arr[i] for i in range(arr.shape[0])]
+    elif arr.ndim == 3:
+        raw_frames = [arr[i] for i in range(arr.shape[0])]
+    elif arr.ndim == 2:
+        raw_frames = [arr]
+    else:
+        raise ValueError(f"Unsupported HDF5 array shape: {arr.shape}")
+
+    frames = [_frame_to_rgb_uint8(f) for f in raw_frames]
+    if max_frames and len(frames) > max_frames:
+        step = max(1, len(frames) // max_frames)
+        frames = frames[::step][:max_frames]
+    return frames
+
+
 def _read_nifti_array(path: str) -> np.ndarray:
     """Read a NIfTI1 (.nii / .nii.gz) file and return the raw voxel array.
 
     Returns an ndarray with shape transposed to (T-or-Z, Y, X) for 3-D volumes
-    or (Y, X) for 2-D images (NIfTI stores data as X-fastest, so we transpose).
+    or (Y, X) for 2-D images.
+
+    NIfTI voxel data is laid out with dim[1] varying fastest (Fortran /
+    column-major order).  A C-order reshape scrambles the volume and produces
+    striped artefacts when slicing — use ``order='F'`` before transposing to
+    (Z, Y, X).
     """
     import gzip, struct as _struct
     opener = gzip.open if path.endswith(".gz") else open
@@ -45,8 +233,8 @@ def _read_nifti_array(path: str) -> np.ndarray:
                 64: np.float64, 256: np.int8, 512: np.uint16, 768: np.uint32}
     dtype = np.dtype(_dt_map.get(datatype, np.float32)).newbyteorder(endian)
     vox_offset = int(_struct.unpack_from(f"{endian}f", raw, 108)[0])
-    arr = np.frombuffer(raw[vox_offset:], dtype=dtype).reshape(shape)
-    return arr.T  # (X, Y[, T]) → (T, Y, X) or (Y, X)
+    arr = np.frombuffer(raw[vox_offset:], dtype=dtype).reshape(shape, order="F")
+    return arr.T  # (X, Y[, Z]) → (Z, Y, X) or (Y, X)
 
 
 def _read_mhd_array(path: str) -> np.ndarray:
@@ -105,6 +293,15 @@ def _read_mhd_array(path: str) -> np.ndarray:
     return arr
 
 
+def _read_nrrd_array(path: str) -> np.ndarray:
+    """Read an NRRD (.nrrd) file and return the raw voxel array.
+
+    Returns shape (nz, ny, nx) for 3-D or (ny, nx) for 2-D (SimpleITK axis order).
+    """
+    import SimpleITK as sitk
+    return sitk.GetArrayFromImage(sitk.ReadImage(path))
+
+
 # ── Image / video loading ─────────────────────────────────────────────────────
 
 def _read_dicom_dataset(path: str):
@@ -123,7 +320,99 @@ def _read_dicom_dataset(path: str):
     return ds
 
 
-def load_image(path: str) -> np.ndarray:
+def _rescale_dicom_pixels(arr: np.ndarray, ds) -> np.ndarray:
+    """Apply RescaleSlope / RescaleIntercept when present."""
+    slope = float(getattr(ds, "RescaleSlope", 1) or 1)
+    intercept = float(getattr(ds, "RescaleIntercept", 0) or 0)
+    if slope != 1.0 or intercept != 0.0:
+        return arr.astype(np.float32) * slope + intercept
+    return arr.astype(np.float32) if arr.dtype != np.uint8 else arr.astype(np.float32)
+
+
+def _dicom_photometric_to_rgb(frame: np.ndarray, ds) -> np.ndarray:
+    """Convert a single DICOM frame to RGB float32 (H, W, 3).
+
+    Echocardiography cines (MIMIC-ECHO, LVVol-A4C, etc.) are stored as
+    ``YBR_FULL_422`` with the B-mode image in the **Y (luma) channel**.  If YBR
+    triplets are displayed as RGB without conversion, Cb maps to green and Cr to
+    magenta — the green-background artefact seen in thumbnails.  For all YBR
+    photometric types we therefore replicate the luma channel to RGB.
+    """
+    photometric = str(getattr(ds, "PhotometricInterpretation", "MONOCHROME2")).upper()
+
+    if frame.ndim == 2:
+        if photometric == "MONOCHROME1":
+            frame = frame.max() - frame
+        rgb = np.stack([frame, frame, frame], axis=-1)
+        return rgb
+
+    if frame.ndim == 3 and frame.shape[-1] in (3, 4):
+        ch = frame[..., :3].astype(np.float32)
+
+        if photometric.startswith("YBR"):
+            y = ch[..., 0]
+            return np.stack([y, y, y], axis=-1)
+
+        if photometric == "RGB":
+            return ch
+
+        try:
+            try:
+                from pydicom.pixels import convert_color_space
+            except ImportError:
+                from pydicom.pixel_data_handlers.util import convert_color_space
+            u8 = np.clip(ch, 0, 255).astype(np.uint8)
+            return convert_color_space(u8, photometric, "RGB").astype(np.float32)
+        except Exception:
+            return ch
+
+    raise ValueError(f"Unsupported DICOM frame shape: {frame.shape}")
+
+
+def _normalize_dicom_frames_to_uint8(frames: List[np.ndarray]) -> List[np.ndarray]:
+    """Normalize all frames using clip-level min/max to avoid per-frame flicker."""
+    if not frames:
+        return frames
+    stacked = np.stack([f.astype(np.float32) for f in frames], axis=0)
+    vmin, vmax = float(stacked.min()), float(stacked.max())
+    if vmax <= vmin:
+        return [np.zeros_like(f, dtype=np.uint8) for f in frames]
+    scaled = (stacked - vmin) / (vmax - vmin) * 255.0
+    return [scaled[i].astype(np.uint8) for i in range(scaled.shape[0])]
+
+
+def _split_dicom_pixel_array(arr: np.ndarray) -> List[np.ndarray]:
+    """Split a DICOM pixel_array into a list of per-frame arrays."""
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        return [arr]
+    if arr.ndim == 3:
+        if arr.shape[-1] in (3, 4):
+            return [arr[..., :3]]
+        return [arr[i] for i in range(arr.shape[0])]
+    if arr.ndim == 4 and arr.shape[-1] in (3, 4):
+        return [arr[i, ..., :3] for i in range(arr.shape[0])]
+    raise ValueError(f"Unsupported DICOM pixel array shape: {arr.shape}")
+
+
+def _dicom_frames(path: str, max_frames: Optional[int] = None) -> List[np.ndarray]:
+    """
+    Load DICOM cine/volume as RGB uint8 frames with correct color space and
+    clip-level normalization.
+    """
+    ds = _read_dicom_dataset(path)
+    raw = _rescale_dicom_pixels(np.asarray(ds.pixel_array), ds)
+    raw_frames = _split_dicom_pixel_array(raw)
+    rgb_frames = [_dicom_photometric_to_rgb(f, ds) for f in raw_frames]
+    frames = _normalize_dicom_frames_to_uint8(rgb_frames)
+
+    if max_frames and len(frames) > max_frames:
+        step = max(1, len(frames) // max_frames)
+        frames = frames[::step][:max_frames]
+    return frames
+
+
+def load_image(path: str, frame_idx: int = 0) -> np.ndarray:
     """
     Load an image and return a uint8 numpy array preserving available channels.
 
@@ -136,51 +425,70 @@ def load_image(path: str) -> np.ndarray:
     2D arrays are channel-repeated to (3, H, W); (H, W, 3) arrays are permuted
     to (3, H, W) without modification.
     """
-    suffixes = Path(path).suffixes
-    # Compound extensions like .nii.gz → treat as ".nii.gz"
-    ext = "".join(suffixes[-2:]).lower() if len(suffixes) >= 2 else (suffixes[-1].lower() if suffixes else "")
+    raw_bytes, logical = _read_archive_bytes(path)
+    disk_path = logical
+    ext = image_path_extension(logical)
 
     if ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"):
         from PIL import Image
-        return np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
+        src = io.BytesIO(raw_bytes) if raw_bytes is not None else disk_path
+        return np.array(Image.open(src).convert("RGB"), dtype=np.uint8)
+
+    if raw_bytes is not None:
+        raise ValueError(f"Unsupported image format inside archive: {ext}")
 
     if ext in (".npy",):
-        arr = np.load(path)
-        if arr.ndim == 3 and arr.shape[2] == 4:
-            arr = arr[..., :3]   # drop alpha, keep RGB
+        arr = np.load(disk_path)
+        if arr.ndim == 3 and arr.shape[2] in (3, 4):
+            arr = arr[..., :3]
+            return arr.astype(np.uint8) if arr.max() > 1 else (arr * 255).astype(np.uint8)
+        arr = _select_volume_slice(np.asarray(arr), frame_idx=frame_idx)
         return arr.astype(np.uint8) if arr.max() > 1 else (arr * 255).astype(np.uint8)
 
     if ext in (".npz",):
-        d   = np.load(path)
-        arr = d[list(d.keys())[0]]
-        return arr.astype(np.uint8)
+        d   = np.load(disk_path)
+        arr = np.asarray(d[list(d.keys())[0]])
+        if arr.ndim == 3 and arr.shape[2] in (3, 4):
+            arr = arr[..., :3]
+            return arr.astype(np.uint8) if arr.max() > 1 else (arr * 255).astype(np.uint8)
+        arr = _select_volume_slice(arr, frame_idx=frame_idx)
+        return arr.astype(np.uint8) if arr.max() > 1 else (arr * 255).astype(np.uint8)
 
     if ext in (".mhd", ".mha"):
-        arr = _read_mhd_array(path)
-        if arr.ndim == 3:
-            arr = arr[0]
+        arr = _select_volume_slice(_read_mhd_array(disk_path), frame_idx=frame_idx)
         arr = arr.astype(np.float32)
         img = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
         return img
 
     if ext in (".dcm",):
-        ds  = _read_dicom_dataset(path)
-        arr = np.asarray(ds.pixel_array)
-        if arr.ndim == 3 and arr.shape[-1] not in (3, 4):
-            arr = arr[0]
-        elif arr.ndim == 4 and arr.shape[-1] in (3, 4):
-            arr = arr[0, ..., :3]
-        arr = arr.astype(float)
-        arr = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
-        return arr   # (H, W) for monochrome DICOM; to_canonical_tensor expands to RGB
+        frames = _dicom_frames(disk_path, max_frames=None)
+        if not frames:
+            raise ValueError(f"No frames decoded from DICOM: {disk_path}")
+        idx = len(frames) // 2 if frame_idx < 0 else min(frame_idx, len(frames) - 1)
+        frame = frames[idx]
+        if frame.ndim == 3 and frame.shape[-1] in (3, 4):
+            return frame[..., :3]
+        if frame.ndim > 2:
+            return _select_volume_slice(frame, frame_idx=0)
+        return frame
 
     if ext in (".nii.gz", ".nii"):
-        arr = _read_nifti_array(path)
-        if arr.ndim == 3:
-            arr = arr[0]
+        arr = _select_volume_slice(_read_nifti_array(disk_path), frame_idx=frame_idx)
         arr = arr.astype(np.float32)
         img = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
         return img
+
+    if ext in (".nrrd",):
+        arr = _select_volume_slice(_read_nrrd_array(disk_path), frame_idx=frame_idx)
+        arr = arr.astype(np.float32)
+        img = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
+        return img
+
+    if ext in (".h5", ".hdf5"):
+        frames = _read_h5_frames(disk_path, max_frames=None)
+        if not frames:
+            raise ValueError(f"No frames decoded from HDF5: {disk_path}")
+        return frames[min(frame_idx, len(frames) - 1)]
 
     raise ValueError(f"Unsupported image format: {ext}")
 
@@ -193,35 +501,49 @@ def load_video_frames(path: str, max_frames: Optional[int] = None) -> List[np.nd
     inadvertently collapsed to grayscale.  ``to_canonical_tensor`` in
     transforms.py converts each frame to a (3, H, W) float32 tensor.
     """
-    ext = Path(path).suffix.lower()
+    ext = image_path_extension(path)
 
     if ext in (".dcm",):
-        ds = _read_dicom_dataset(path)
-        arr = ds.pixel_array
+        return _dicom_frames(path, max_frames=max_frames)
 
-        def _as_uint8(x: np.ndarray) -> np.ndarray:
-            if x.dtype == np.uint8:
-                return x
-            x = x.astype(np.float32)
-            return ((x - x.min()) / (x.max() - x.min() + 1e-8) * 255).astype(np.uint8)
+    if ext in (".h5", ".hdf5"):
+        return _read_h5_frames(path, max_frames=max_frames)
 
-        arr = _as_uint8(np.asarray(arr))
-        if arr.ndim == 2:
-            frames = [arr]
-        elif arr.ndim == 3:
-            if arr.shape[-1] in (3, 4):
-                frames = [arr[..., :3]]
-            else:
-                frames = [arr[i] for i in range(arr.shape[0])]
-        elif arr.ndim == 4 and arr.shape[-1] in (3, 4):
-            frames = [arr[i, ..., :3] for i in range(arr.shape[0])]
+    if ext in (".nii.gz", ".nii"):
+        arr = _read_nifti_array(path)
+        if arr.ndim <= 2:
+            return [_frame_to_rgb_uint8(arr)]
+        depth = arr.shape[0]
+        if max_frames is None or max_frames >= depth:
+            indices = list(range(depth))
         else:
-            raise ValueError(f"Unsupported DICOM video pixel array shape: {arr.shape}")
+            step = max(1, depth // max_frames)
+            indices = list(range(0, depth, step))[:max_frames]
+        return [_frame_to_rgb_uint8(_select_volume_slice(arr, frame_idx=i)) for i in indices]
 
-        if max_frames and len(frames) > max_frames:
-            step = max(1, len(frames) // max_frames)
-            frames = frames[::step][:max_frames]
-        return frames
+    if ext in (".mhd", ".mha"):
+        arr = _read_mhd_array(path)
+        if arr.ndim <= 2:
+            return [_frame_to_rgb_uint8(arr)]
+        depth = arr.shape[0]
+        if max_frames is None or max_frames >= depth:
+            indices = list(range(depth))
+        else:
+            step = max(1, depth // max_frames)
+            indices = list(range(0, depth, step))[:max_frames]
+        return [_frame_to_rgb_uint8(_select_volume_slice(arr, frame_idx=i)) for i in indices]
+
+    if ext in (".nrrd",):
+        arr = _read_nrrd_array(path)
+        if arr.ndim <= 2:
+            return [_frame_to_rgb_uint8(arr)]
+        depth = arr.shape[0]
+        if max_frames is None or max_frames >= depth:
+            indices = list(range(depth))
+        else:
+            step = max(1, depth // max_frames)
+            indices = list(range(0, depth, step))[:max_frames]
+        return [_frame_to_rgb_uint8(_select_volume_slice(arr, frame_idx=i)) for i in indices]
 
     if ext in (".avi", ".mp4", ".mov", ".mkv", ".gif"):
         try:
@@ -280,6 +602,34 @@ def _load_numpy_mask(path: str):
         return np.load(path, allow_pickle=True)
 
 
+_VOLUME_SLICE_EXTS = (".nii.gz", ".nii", ".mhd", ".mha", ".nrrd")
+
+
+def _select_volume_slice(arr: np.ndarray, frame_idx: int = 0) -> np.ndarray:
+    """Select a 2-D plane from a volume; ``frame_idx < 0`` picks the middle."""
+    arr = np.asarray(arr)
+    if arr.ndim <= 2:
+        return arr
+
+    # Already a displayable RGB / greyscale image (H, W, C).
+    if arr.ndim == 3 and arr.shape[-1] in (1, 3, 4):
+        if arr.shape[-1] == 1:
+            return arr[..., 0]
+        return arr
+
+    depth = arr.shape[0]
+    idx = depth // 2 if frame_idx < 0 else min(frame_idx, depth - 1)
+    plane = arr[idx]
+    # Some brain US volumes (e.g. ReMIND2Reg) pad slice 0 with zeros.
+    if frame_idx == 0 and plane.size > 0 and float(plane.max()) == float(plane.min()):
+        idx = depth // 2
+        plane = arr[idx]
+    # Recurse for 4-D stacks (e.g. NIfTI with extra dim, multi-channel volumes).
+    if plane.ndim > 2:
+        return _select_volume_slice(plane, frame_idx=0)
+    return plane
+
+
 def _select_mask_plane(
     arr: np.ndarray,
     frame_idx: int = 0,
@@ -304,7 +654,7 @@ def _select_mask_plane(
     if layout != "frame_first":
         raise ValueError(f"frame_idx selection requires frame_first layout, got layout={layout!r}")
 
-    return arr[min(frame_idx, arr.shape[0] - 1)]
+    return _select_volume_slice(arr, frame_idx=frame_idx)
 
 
 def _select_npz_array(path: str, data) -> np.ndarray:
@@ -321,8 +671,7 @@ def _select_npz_array(path: str, data) -> np.ndarray:
 
 
 def load_mask(path: str, frame_idx: int = 0, mask_channel: Optional[int] = None) -> np.ndarray:
-    suffixes = Path(path).suffixes
-    ext = "".join(suffixes[-2:]).lower() if len(suffixes) >= 2 else (suffixes[-1].lower() if suffixes else "")
+    ext = image_path_extension(path)
     if ext in (".npy",):
         loaded = _load_numpy_mask(path)
         if loaded.shape == () and loaded.dtype == object:
@@ -382,7 +731,9 @@ def load_mask(path: str, frame_idx: int = 0, mask_channel: Optional[int] = None)
             return (arr == mask_channel).astype(np.uint8)
         return (arr > 0).astype(np.uint8)
     from PIL import Image
-    mask = np.array(Image.open(path).convert("L"), dtype=np.uint8)
+    raw_bytes, _ = _read_archive_bytes(path)
+    src = io.BytesIO(raw_bytes) if raw_bytes is not None else path
+    mask = np.array(Image.open(src).convert("L"), dtype=np.uint8)
     if mask_channel is not None:
         return (mask == mask_channel).astype(np.uint8)
     return (mask > 127).astype(np.uint8)
@@ -402,15 +753,67 @@ class USFoundationDataset(Dataset):
                 return p.replace(old, new, 1)
         return p
 
+    def _volume_slice_index(self, path: str, entry: USManifestEntry) -> int:
+        meta = entry.source_meta or {}
+        if "frame_idx" in meta and meta["frame_idx"] is not None:
+            return int(meta["frame_idx"])
+        if entry.modality_type != "volume":
+            return 0
+
+        ext = image_path_extension(path)
+        if ext in (".nii.gz", ".nii"):
+            arr = _read_nifti_array(path)
+            if arr.ndim == 3:
+                return random.randint(0, arr.shape[0] - 1)
+        elif ext in (".mhd", ".mha"):
+            arr = _read_mhd_array(path)
+            if arr.ndim == 3:
+                return random.randint(0, arr.shape[0] - 1)
+        elif ext in (".nrrd",):
+            arr = _read_nrrd_array(path)
+            if arr.ndim == 3:
+                return random.randint(0, arr.shape[0] - 1)
+        elif ext == ".dcm":
+            frames = _dicom_frames(path, max_frames=None)
+            if frames:
+                return random.randint(0, len(frames) - 1)
+        return 0
+
     def _load_frame(self, entry: USManifestEntry, frame_idx: int = 0) -> np.ndarray:
-        return load_image(self._remap_path(entry.image_paths[frame_idx]))
+        path = self._remap_path(entry.image_paths[frame_idx])
+        vol_frame_idx = self._volume_slice_index(path, entry)
+        return load_image(path, frame_idx=vol_frame_idx)
 
     def _load_clip(self, entry: USManifestEntry,
                    max_frames: Optional[int] = None) -> List[np.ndarray]:
         paths = [self._remap_path(p) for p in entry.image_paths]
-        if len(paths) == 1 and Path(paths[0]).suffix.lower() in \
-                (".avi", ".mp4", ".mov", ".mkv", ".gif", ".dcm"):
-            return load_video_frames(paths[0], max_frames)
+        if len(paths) == 1:
+            ext = image_path_extension(paths[0])
+            if ext in (".avi", ".mp4", ".mov", ".mkv", ".gif", ".dcm", ".h5", ".hdf5"):
+                return load_video_frames(paths[0], max_frames)
+            if ext in _VOLUME_SLICE_EXTS:
+                arr = (
+                    _read_nifti_array(paths[0]) if ext in (".nii.gz", ".nii")
+                    else _read_mhd_array(paths[0]) if ext in (".mhd", ".mha")
+                    else _read_nrrd_array(paths[0])
+                )
+                if arr.ndim <= 2:
+                    return [load_image(paths[0])]
+                depth = arr.shape[0]
+                if entry.frame_indices:
+                    indices = [
+                        i for i in entry.frame_indices
+                        if 0 <= i < depth
+                    ]
+                elif max_frames is None or max_frames >= depth:
+                    indices = list(range(depth))
+                else:
+                    step = max(1, depth // max_frames)
+                    indices = list(range(0, depth, step))[:max_frames]
+                if max_frames and len(indices) > max_frames:
+                    step = max(1, len(indices) // max_frames)
+                    indices = indices[::step][:max_frames]
+                return [load_image(paths[0], frame_idx=i) for i in indices]
         frames = [load_image(p) for p in paths]
         if max_frames and len(frames) > max_frames:
             step   = len(frames) // max_frames
@@ -420,7 +823,7 @@ class USFoundationDataset(Dataset):
     def _load_mask_tensor(self, inst, frame_idx: int = 0) -> Optional[Tensor]:
         if inst.mask_path is None: return None
         mp = self._remap_path(inst.mask_path)
-        if not Path(mp).exists(): return None
+        if not media_path_exists(mp): return None
         return torch.from_numpy(
             load_mask(mp, frame_idx=frame_idx, mask_channel=getattr(inst, "mask_channel", None))
         ).float().unsqueeze(0)
@@ -464,7 +867,9 @@ class ImageSSLDataset(USFoundationDataset):
         self.alpha     = alpha
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        for _attempt in range(8):
+        # 32 retries: resilient to partially-staged datasets where a meaningful
+        # fraction of files may be missing while most entries are valid.
+        for _attempt in range(32):
             try:
                 return self._load_image_item(idx)
             except (FileNotFoundError, OSError) as exc:
@@ -554,7 +959,7 @@ class VideoSSLDataset(USFoundationDataset):
         self.mask_ratio = mask_ratio
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        for _attempt in range(8):
+        for _attempt in range(32):
             try:
                 return self._load_video_item(idx)
             except (FileNotFoundError, OSError) as exc:
@@ -624,7 +1029,7 @@ class PairedSSLDataset(USFoundationDataset):
         self.vid_mask_ratio = vid_mask_ratio
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        for _attempt in range(8):
+        for _attempt in range(32):
             try:
                 return self._load_paired_item(idx)
             except (FileNotFoundError, OSError) as exc:

@@ -15,6 +15,12 @@
 #   -minimalrun   4-GPU DDP run, 50 training steps. Verifies the distributed
 #                 training loop end-to-end before committing to a full run.
 #   -run1         Full run1 training on multi-node GH200 (see NODES in script).
+#   -eval         Linear probe evaluation on phase1/2/3 checkpoints (~30 min).
+#                 Reads checkpoints from CKPT_ROOT/minimalrun/ by default; use
+#                 --ckpt-dir to point at a different run's checkpoint directory.
+#   -eval         Linear probe evaluation on phase1/2/3 checkpoints (~30 min).
+#                 Reads checkpoints from CKPT_ROOT/minimalrun/ by default; use
+#                 --ckpt-dir to point at a different run's checkpoint directory.
 #
 # Optional flags (all modes except -smoke):
 #   --resume <path>   Resume from checkpoint (auto-detects latest.pt if absent)
@@ -68,22 +74,25 @@ info() { echo "[INFO]  $*"; }
 MODE=""
 RESUME_ARG=""
 NO_7B_ARG="--no-7b"   # default for all runs in this iteration
+EVAL_CKPT_DIR=""      # -eval mode: override checkpoint directory
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -smoke)       MODE="smoke";      shift ;;
         -minimalrun)  MODE="minimalrun"; shift ;;
         -run1)        MODE="run1";       shift ;;
+        -eval)        MODE="eval";       shift ;;
         --resume)     RESUME_ARG="--resume $2"; shift 2 ;;
+        --ckpt-dir)   EVAL_CKPT_DIR="$2"; shift 2 ;;
         --no-7b)      NO_7B_ARG="--no-7b"; shift ;;
         -h|--help)
-            sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
-        *) die "Unknown argument: $1. Use -smoke | -minimalrun | -run1" ;;
+        *) die "Unknown argument: $1. Use -smoke | -minimalrun | -run1 | -eval" ;;
     esac
 done
 
-[[ -z "$MODE" ]] && die "No mode specified. Use: bash $0 -smoke | -minimalrun | -run1"
+[[ -z "$MODE" ]] && die "No mode specified. Use: bash $0 -smoke | -minimalrun | -run1 | -eval"
 
 # ── Per-mode settings ─────────────────────────────────────────────────────────
 case "$MODE" in
@@ -104,6 +113,16 @@ minimalrun)
     LOG_DIR="${LOG_ROOT}/minimalrun"
     CKPT_DIR="${CKPT_ROOT}/minimalrun"
     ;;
+eval)
+    JOB_NAME="ultatron_eval"
+    TIME="00:30:00"
+    NODES=1
+    GPUS=1
+    CPUS=8
+    LOG_DIR="${LOG_ROOT}/eval"
+    # Default to minimalrun checkpoints; override with --ckpt-dir
+    CKPT_DIR="${EVAL_CKPT_DIR:-${CKPT_ROOT}/minimalrun}"
+    ;;
 run1)
     JOB_NAME="ultatron_run1"
     TIME="12:00:00"
@@ -112,8 +131,7 @@ run1)
     CPUS=64       # 16 per GPU × 4 GPUs per node
     LOG_DIR="${LOG_ROOT}/run1"
     CKPT_DIR="${CKPT_ROOT}/run1"
-    MANIFEST_DIR="${LOG_DIR}"
-    MANIFEST_PATH="${MANIFEST_DIR}/run1_train.jsonl"
+    MANIFEST_REPO="${REPO_DIR}/dataset_exploration_outputs/run1/run1_train_v2.jsonl"
     # Auto-resume from latest.pt if no explicit --resume given
     if [[ -z "$RESUME_ARG" && -f "${CKPT_DIR}/latest.pt" ]]; then
         RESUME_ARG="--resume ${CKPT_DIR}/latest.pt"
@@ -199,6 +217,7 @@ INNER_EOF
 # ─────────────────────────────────────────────────── Minimal run ──────────────
 minimalrun)
 mkdir -p "${CKPT_DIR}"
+MANIFEST_ALL="${REPO_DIR}/dataset_exploration_outputs/run1/run1_train_v2.jsonl"
 cat > "${INNERSCRIPT}" << INNER_EOF
 #!/bin/bash
 set -euo pipefail
@@ -233,15 +252,41 @@ pip install --quiet pydicom
 echo "Running 50-step DDP minimal run (4 GPUs)..."
 echo ""
 
-# For initial testing, force a clean start (no auto-resume).
-# scripts/train.py will load --ckpt-dir/latest.pt if it exists.
+# ── Build manifest from all registered adapters (scratch preferred) ───────────
+mkdir -p "$(dirname "${MANIFEST_ALL}")"
+echo "Building run1 manifest (scratch-preferred) → ${MANIFEST_ALL}"
+python3 scripts/build_manifest.py \
+    --config configs/run1/data_run1.yaml \
+    --prefer-scratch \
+    --out "${MANIFEST_ALL}" \
+    || { echo "ERROR: manifest build failed"; exit 1; }
+echo "Manifest built: \$(wc -l < "${MANIFEST_ALL}") entries"
+echo ""
+
+# ── Pre-flight: drop manifest rows whose Scratch files are missing ───────────
+REMAP_MANIFEST="${CKPT_DIR}/run1_train_scratch.jsonl"
+if [[ -f "${MANIFEST_ALL}" ]]; then
+    python3 scripts/build_manifest.py \
+        --filter-missing "${MANIFEST_ALL}" \
+        --out "\${REMAP_MANIFEST}"
+    echo "Filtered manifest: \$(wc -l < \${REMAP_MANIFEST}) entries → \${REMAP_MANIFEST}"
+else
+    echo "WARNING: manifest not found at ${MANIFEST_ALL}"
+    REMAP_MANIFEST=""
+fi
+
+# ── For initial testing, force a clean start (no auto-resume) ────────────────
 rm -f "${CKPT_DIR}/latest.pt" "${CKPT_DIR}/phase1_end.pt" "${CKPT_DIR}/phase2_end.pt" "${CKPT_DIR}/phase3_end.pt" "${CKPT_DIR}/best.pt" || true
+
+MANIFEST_FLAG=""
+[[ -n "\${REMAP_MANIFEST}" && -f "\${REMAP_MANIFEST}" ]] && MANIFEST_FLAG="--manifest \${REMAP_MANIFEST}"
 
 python3 -m torch.distributed.run \
     --nproc_per_node=4 \
     scripts/train.py \
     --config configs/run1/minimal_run1.yaml \
     --ckpt-dir ${CKPT_DIR} \
+    \${MANIFEST_FLAG} \
     ${NO_7B_ARG}
 
 echo ""
@@ -308,17 +353,18 @@ echo "Checkpoint dir : ${CKPT_DIR}"
 echo "Resume         : ${RESUME_ARG:-none}"
 echo ""
 
-# ── Build manifest (rank-0 only; idempotent — skip if already exists) ─────────
-mkdir -p "${MANIFEST_DIR}"
-if [[ ! -f "${MANIFEST_PATH}" || -n "\${FORCE_REBUILD_MANIFEST:-}" ]]; then
-    echo "Building run1 manifest → ${MANIFEST_PATH}"
+# ── Build manifest (scratch-preferred; idempotent — skip if already exists) ───
+mkdir -p "$(dirname "${MANIFEST_REPO}")"
+if [[ ! -f "${MANIFEST_REPO}" || -n "\${FORCE_REBUILD_MANIFEST:-}" ]]; then
+    echo "Building run1 manifest (scratch-preferred) → ${MANIFEST_REPO}"
     python3 scripts/build_manifest.py \
         --config configs/run1/data_run1.yaml \
-        --out "${MANIFEST_PATH}" \
+        --prefer-scratch \
+        --out "${MANIFEST_REPO}" \
         || { echo "ERROR: manifest build failed"; exit 1; }
-    echo "Manifest built: \$(wc -l < ${MANIFEST_PATH}) entries"
+    echo "Manifest built: \$(wc -l < ${MANIFEST_REPO}) entries"
 else
-    echo "Reusing existing manifest: ${MANIFEST_PATH} (\$(wc -l < ${MANIFEST_PATH}) entries)"
+    echo "Reusing existing manifest: ${MANIFEST_REPO} (\$(wc -l < ${MANIFEST_REPO}) entries)"
 fi
 echo ""
 
@@ -330,7 +376,6 @@ python3 -m torch.distributed.run \
     --rdzv_id=\${SLURM_JOB_ID} \
     scripts/train.py \
     --config configs/experiments/run1.yaml \
-    --manifest "${MANIFEST_PATH}" \
     --ckpt-dir ${CKPT_DIR} \
     ${NO_7B_ARG} \
     ${RESUME_ARG}
@@ -357,6 +402,111 @@ echo " RUN1 COMPLETE  exit=\${TRAIN_EXIT}  \$(date)"
 echo "================================================================"
 exit \${TRAIN_EXIT}
 INNER_EOF
+;;
+
+# ──────────────────────────────────────────── Linear-probe eval ───────────────
+eval)
+mkdir -p "${LOG_DIR}"
+cat > "${INNERSCRIPT}" << 'INNER_EOF'
+#!/bin/bash
+set -euo pipefail
+REPO_DIR="/users/tbrokowski/Ultatron"
+cd "${REPO_DIR}"
+export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+echo "================================================================"
+echo " Ultatron — ultatron_eval"
+echo " Job    : ${SLURM_JOB_ID:-local}"
+echo " Node   : $(hostname)"
+echo " Start  : $(date)"
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null \
+    | awk '{print " GPU     :", $0}' || echo " GPU     : nvidia-smi unavailable"
+echo "================================================================"
+echo ""
+INNER_EOF
+
+# Inject variables that need shell-time expansion (not inside single-quote heredoc)
+cat >> "${INNERSCRIPT}" << INNER_EOF2
+CKPT_DIR="${CKPT_DIR}"
+CKPT_ROOT="${CKPT_ROOT}"
+NO_7B_ARG="${NO_7B_ARG}"
+
+echo "Checkpoint dir : \${CKPT_DIR}"
+echo ""
+
+pip install --quiet pydicom scikit-learn
+
+PHASES=(phase1_end phase2_end phase3_end)
+RESULTS_DIR="\${CKPT_DIR}/results"
+mkdir -p "\${RESULTS_DIR}"
+
+MANIFEST_ARG=""
+if [[ -f "\${CKPT_ROOT}/minimalrun/run1_train_scratch.jsonl" ]]; then
+    MANIFEST_ARG="--manifest \${CKPT_ROOT}/minimalrun/run1_train_scratch.jsonl"
+    echo "Using filtered Scratch manifest: \${CKPT_ROOT}/minimalrun/run1_train_scratch.jsonl"
+fi
+
+for PHASE in "\${PHASES[@]}"; do
+    CKPT_FILE="\${CKPT_DIR}/\${PHASE}.pt"
+    if [[ ! -f "\${CKPT_FILE}" ]]; then
+        echo "SKIP \${PHASE}: checkpoint not found at \${CKPT_FILE}"
+        continue
+    fi
+
+    echo ""
+    echo "─── Linear probe: \${PHASE} ────────────────────────────────────"
+    python3 -m eval.linear_probe \\
+        --config   configs/run1/minimal_run1.yaml \\
+        --checkpoint "\${CKPT_FILE}" \\
+        --output   "\${RESULTS_DIR}/linear_probe_\${PHASE}.json" \\
+        --max-train 50000 \\
+        --max-val   20000 \\
+        \${NO_7B_ARG} \\
+        \${MANIFEST_ARG} \\
+    && echo "  → \${RESULTS_DIR}/linear_probe_\${PHASE}.json" \\
+    || echo "  WARNING: linear probe failed for \${PHASE} (non-fatal)"
+done
+
+echo ""
+echo "─── Summary ──────────────────────────────────────────────────────"
+python3 - "\${RESULTS_DIR}" << 'PYEOF'
+import json, glob, sys, os
+results_dir = sys.argv[1]
+files = sorted(glob.glob(f"{results_dir}/linear_probe_phase*.json"))
+if not files:
+    print("No linear probe results found.")
+    sys.exit(0)
+print(f"{'Phase':<20} {'AUC macro':>10}  {'n_train':>8}  {'n_val':>7}")
+print("-" * 52)
+for f in files:
+    d = json.load(open(f))
+    phase = d.get("phase") or os.path.basename(f).replace("linear_probe_","").replace(".json","")
+    auc   = d.get("auc_macro", float("nan"))
+    print(f"{phase:<20} {auc:>10.4f}  {d.get('n_train',0):>8,}  {d.get('n_val',0):>7,}")
+print()
+per_anat = {}
+for f in files:
+    d = json.load(open(f))
+    for k, v in d.get("per_anatomy", {}).items():
+        per_anat.setdefault(k, {})[os.path.basename(f)] = v
+if per_anat:
+    fnames = [os.path.basename(f).replace("linear_probe_","").replace(".json","") for f in files]
+    header = f"{'Anatomy':<22}" + "".join(f"  {p:>12}" for p in fnames)
+    print(header)
+    print("-" * len(header))
+    for anat in sorted(per_anat):
+        row = f"{anat:<22}" + "".join(
+            f"  {per_anat[anat].get(os.path.basename(f), float('nan')):>12.4f}" for f in files
+        )
+        print(row)
+PYEOF
+
+echo ""
+echo "================================================================"
+echo " EVAL COMPLETE  -- \$(date)"
+echo "================================================================"
+INNER_EOF2
 ;;
 esac
 
@@ -403,7 +553,7 @@ echo "  Log      : ${LOG_DIR}/${JOB_NAME}_${JOB_ID}.out"
 echo "  Watch    : tail -f ${LOG_DIR}/${JOB_NAME}_${JOB_ID}.out"
 echo "  Queue    : squeue -u \$USER -j ${JOB_ID}"
 
-# For run1: print one-liner to chain finetune job after training completes
+# Post-submission hints
 if [[ "$MODE" == "run1" ]]; then
     echo ""
     echo "  ── Phase 4 finetune ──────────────────────────────────────────────────"
@@ -411,4 +561,11 @@ if [[ "$MODE" == "run1" ]]; then
     echo "    bash scripts/submit_finetune.sh --after-job ${JOB_ID}"
     echo "  Or run immediately on a saved checkpoint:"
     echo "    bash scripts/submit_finetune.sh --checkpoint ${CKPT_DIR}/phase3_end.pt"
+fi
+
+if [[ "$MODE" == "minimalrun" ]]; then
+    echo ""
+    echo "  ── After minimalrun completes ──────────────────────────────────────"
+    echo "  Run linear probe eval on all phase checkpoints:"
+    echo "    bash scripts/submit_job.sh -eval --ckpt-dir ${CKPT_DIR}"
 fi

@@ -81,8 +81,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Ultatron Phase 4: downstream head fine-tuning"
     )
-    parser.add_argument("--checkpoint",   required=True,
-                        help="Path to SSL pre-training checkpoint (.pt)")
+    parser.add_argument("--checkpoint",   default=None,
+                        help="Path to SSL pre-training checkpoint (.pt). "
+                             "Required unless --comparison-config is set.")
+    parser.add_argument("--comparison-config", default=None,
+                        help="Run multi-backbone comparison sweep from YAML "
+                             "(see configs/finetune/comparison.yaml)")
     parser.add_argument("--train-config", default="configs/experiments/run1.yaml",
                         help="Training YAML config (for backbone architecture)")
     parser.add_argument("--output-dir",   default=None,
@@ -117,6 +121,13 @@ def main():
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+
+    if args.comparison_config:
+        run_comparison(args)
+        return
+
+    if not args.checkpoint:
+        parser.error("--checkpoint is required unless --comparison-config is set")
 
     repo = _find_repo_root()
     ckpt_path = Path(args.checkpoint)
@@ -434,6 +445,202 @@ def _run_generic(
     results = exp.evaluate("test")
     log.info(f"[{result_key}] {results}")
     all_results[result_key] = results
+
+
+# ── Comparison sweep ──────────────────────────────────────────────────────────
+
+_EXPERIMENT_REGISTRY = {
+    "busi":        ("finetune.experiments.busi",        "BUSIFinetune"),
+    "echonet":     ("finetune.experiments.echonet",     "EchoNetFinetune"),
+    "echonet_ped": ("finetune.experiments.echonet_pediatric", "EchoNetPediatricFinetune"),
+    "echonet_lvh": ("finetune.experiments.echonet_lvh", "EchoNetLVHFinetune"),
+    "mimic_lvvol": ("finetune.experiments.mimic_lvvol", "MIMICLVVolFinetune"),
+    "cardiacudc":  ("finetune.experiments.cardiacudc",  "CardiacUDCFinetune"),
+    "echocp":      ("finetune.experiments.echocp",      "EchoCPFinetune"),
+}
+
+
+def _resolve_dataset_roots(cfg: dict, repo: Path) -> dict[str, str]:
+    """Merge comparison YAML roots with per-experiment finetune YAML defaults."""
+    ft_cfg_dir = repo / "configs" / "finetune"
+    roots = dict(cfg.get("dataset_roots", {}))
+
+    _yaml_keys = {
+        "busi":        ("busi",        "dataset_root"),
+        "echonet":     ("echonet",     "dataset_root"),
+        "echonet_ped": ("echonet_pediatric", "dataset_root"),
+        "echonet_lvh": ("echonet_lvh", "dataset_root"),
+        "mimic_lvvol": ("mimic_lvvol", "dataset_root"),
+        "cardiacudc":  ("cardiacudc",  "dataset_root"),
+        "echocp":      ("echocp",      "dataset_root"),
+    }
+    for exp_key, (yaml_name, field) in _yaml_keys.items():
+        if roots.get(exp_key):
+            continue
+        yaml_path = ft_cfg_dir / f"{yaml_name}.yaml"
+        if yaml_path.exists():
+            raw = _load_finetune_cfg(str(yaml_path))
+            roots[exp_key] = raw.get(field, "")
+
+    if not roots.get("benin") and (ft_cfg_dir / "lus_patient.yaml").exists():
+        lus_raw = _load_finetune_cfg(str(ft_cfg_dir / "lus_patient.yaml"))
+        roots["benin"] = lus_raw.get("dataset_root_benin", "")
+        roots["rsa"]   = lus_raw.get("dataset_root_rsa",   "")
+
+    return roots
+
+
+def _run_comparison_experiment(
+    exp_name:    str,
+    encoder,
+    head_type:   str,
+    out_dir:     Path,
+    device:      str,
+    eval_only:   bool,
+    roots:       dict[str, str],
+    repo:        Path,
+) -> dict | None:
+    """Run one backbone × experiment × head_type combination."""
+    import importlib
+    from finetune.base import FinetuneConfig
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if exp_name == "lus":
+        from finetune.experiments.lus_patient import LUSPatientFinetune
+        benin_root = roots.get("benin", "")
+        rsa_root   = roots.get("rsa", "")
+        has_data = (benin_root and Path(benin_root).exists()) or \
+                   (rsa_root and Path(rsa_root).exists())
+        if not has_data:
+            log.warning(f"[lus] dataset roots not found — skipping.")
+            return {"skipped": True, "reason": "dataset roots not found"}
+
+        lus_raw = _load_finetune_cfg(str(repo / "configs" / "finetune" / "lus_patient.yaml"))
+        ft_raw  = dict(lus_raw.get("finetune", lus_raw))
+        ft_raw["head_type"] = head_type
+        cfg = FinetuneConfig.from_dict(ft_raw)
+        exp = LUSPatientFinetune(
+            data_root_benin = benin_root or "",
+            data_root_rsa   = rsa_root or "",
+            output_dir      = str(out_dir),
+            cfg             = cfg,
+            n_frames        = ft_raw.get("n_frames", 8),
+            img_size        = ft_raw.get("img_size", 224),
+        )
+    else:
+        if exp_name not in _EXPERIMENT_REGISTRY:
+            log.warning(f"Unknown experiment {exp_name!r} — skipping.")
+            return {"skipped": True, "reason": f"unknown experiment: {exp_name}"}
+
+        data_root = roots.get(exp_name, "")
+        if not data_root or not Path(data_root).exists():
+            log.warning(f"[{exp_name}] data_root not found: {data_root!r} — skipping.")
+            return {"skipped": True, "reason": f"data_root not found: {data_root}"}
+
+        module_name, cls_name = _EXPERIMENT_REGISTRY[exp_name]
+        yaml_map = {
+            "echonet_ped": "echonet_pediatric",
+        }
+        yaml_name = yaml_map.get(exp_name, exp_name)
+        raw_cfg = _load_finetune_cfg(str(repo / "configs" / "finetune" / f"{yaml_name}.yaml"))
+        ft_raw = dict(raw_cfg.get("finetune", raw_cfg))
+        ft_raw["head_type"] = head_type
+        cfg = FinetuneConfig.from_dict(ft_raw)
+
+        mod = importlib.import_module(module_name)
+        cls = getattr(mod, cls_name)
+        exp = cls(data_root=data_root, output_dir=str(out_dir), cfg=cfg)
+
+    exp.setup(encoder=encoder, device=device)
+
+    if eval_only:
+        best = out_dir / "best_head.pt"
+        if best.exists():
+            exp.load_head(str(best))
+        else:
+            log.warning(f"[{exp_name}/{head_type}] eval-only but best_head.pt missing — training.")
+            exp.run()
+    else:
+        exp.run()
+
+    results = exp.evaluate("test")
+    log.info(f"[{exp_name}/{head_type}] {results}")
+    return results
+
+
+def run_comparison(args) -> None:
+    """Sweep backbone × head_type × experiment and write comparison reports."""
+    repo = _find_repo_root()
+    cfg_path = Path(args.comparison_config)
+    if not cfg_path.is_absolute():
+        cfg_path = repo / cfg_path
+    with open(cfg_path) as f:
+        cmp_cfg = yaml.safe_load(f)
+
+    train_cfg_full = _load_config(cmp_cfg["train_config"])
+    model_cfg_dict = dict(train_cfg_full.get("model", {}))
+
+    try:
+        from data.infra.cscs_paths import CSCSConfig
+        cscs = CSCSConfig.from_env()
+        _scratch_hf = cscs.scratch_path("hf_cache")
+        _store_hf   = cscs.store_path("hf_cache")
+        hf_cache = str(_scratch_hf if _scratch_hf.exists() else _store_hf)
+    except Exception:
+        hf_cache = os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
+    model_cfg_dict["hf_cache_dir"] = hf_cache
+    model_cfg_dict["frozen_teacher"] = None
+
+    output_dir = Path(cmp_cfg.get("output_dir", "eval_results"))
+    if not output_dir.is_absolute():
+        output_dir = repo / output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    device    = args.device or cmp_cfg.get("device", "cuda")
+    eval_only = args.eval_only or cmp_cfg.get("eval_only", False)
+    roots     = _resolve_dataset_roots(cmp_cfg, repo)
+
+    from finetune.backbones.registry import build_encoder
+    from finetune.report import generate_comparison_report
+
+    head_types_cfg = cmp_cfg.get("head_types", {"default": ["linear"]})
+    default_heads  = head_types_cfg.get("default", ["linear"])
+
+    for backbone_spec in cmp_cfg.get("backbones", []):
+        bkey = backbone_spec.get("key", "?")
+        log.info("=" * 60)
+        log.info(f"Backbone: {bkey}")
+        log.info("=" * 60)
+        try:
+            spec = dict(backbone_spec)
+            spec.setdefault("hf_cache_dir", hf_cache)
+            encoder = build_encoder(spec, device=device, train_cfg=model_cfg_dict)
+            encoder.to(device)
+            encoder.eval()
+        except Exception as exc:
+            log.error(f"Failed to build encoder {bkey!r}: {exc}")
+            continue
+
+        for exp_name in cmp_cfg.get("experiments", []):
+            head_types = head_types_cfg.get(exp_name, default_heads)
+            for head_type in head_types:
+                run_dir = output_dir / bkey / exp_name / head_type
+                log.info(f"  → {exp_name} / {head_type} → {run_dir}")
+                try:
+                    _run_comparison_experiment(
+                        exp_name, encoder, head_type, run_dir,
+                        device, eval_only, roots, repo,
+                    )
+                except Exception as exc:
+                    log.error(f"Run failed ({bkey}/{exp_name}/{head_type}): {exc}")
+
+    report = generate_comparison_report(output_dir)
+    print("\n" + "=" * 60)
+    print("COMPARISON REPORT")
+    print("=" * 60)
+    print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

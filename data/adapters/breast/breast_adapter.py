@@ -14,14 +14,6 @@ BrEaST/
 ├── case002.png
 ├── case002_tumor.png
 └── ...
-
-Key observations
-----------------
-- Everything is flat in a single directory.
-- Pairing: case{N}.png  ↔  case{N}_tumor.png
-- No class label (benign/malignant) — segmentation only.
-- Some cases may have multiple tumors → multiple mask files (case001_tumor.png,
-  case001_tumor2.png etc.) — we collect all masks per case.
 """
 from __future__ import annotations
 

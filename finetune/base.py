@@ -144,8 +144,9 @@ class FinetuneExperiment(ABC):
         self.cfg        = cfg
 
         # Set by setup()
-        self.img_branch  = None
-        self.vid_branch  = None
+        self.encoder     = None          # BackboneEncoder (preferred)
+        self.img_branch  = None          # kept for legacy subclass access
+        self.vid_branch  = None          # kept for legacy subclass access
         self.head:  Optional[nn.Module] = None
         self.head2: Optional[nn.Module] = None   # optional second head (e.g. cls + seg)
         self.device = "cuda"
@@ -197,24 +198,51 @@ class FinetuneExperiment(ABC):
 
     def setup(
         self,
-        img_branch,
+        img_branch  = None,
         device:     str = "cuda",
         vid_branch  = None,
+        encoder     = None,
     ):
-        """Wire in the backbone and build the head."""
-        self.img_branch = img_branch
-        self.vid_branch = vid_branch
-        self.device     = device
-        embed_dim = img_branch.embed_dim
+        """
+        Wire in the backbone and build the task head.
 
-        if self.cfg.freeze_backbone:
+        New-style call (comparison mode):
+            experiment.setup(encoder=encoder, device=device)
+
+        Legacy call (backward compat, used by scripts/finetune.py and trainer):
+            experiment.setup(img_branch, device=device, vid_branch=vid_branch)
+        """
+        from finetune.backbones.ultatron_encoder import UltatronBranchEncoder
+
+        if encoder is not None:
+            self.encoder    = encoder
+            # Expose as img_branch/vid_branch for subclasses that still reference them
+            self.img_branch = encoder
+            self.vid_branch = encoder
+        elif img_branch is not None:
+            self.encoder    = UltatronBranchEncoder(img_branch, vid_branch)
+            self.img_branch = img_branch
+            self.vid_branch = vid_branch
+        else:
+            raise ValueError("setup() requires either 'encoder' or 'img_branch'.")
+
+        self.device = device
+        embed_dim   = self.encoder.embed_dim
+
+        if self.cfg.freeze_backbone and img_branch is not None:
             for p in img_branch.parameters():
                 p.requires_grad_(False)
             img_branch.eval()
 
-        # Match the head dtype to the backbone so features and weights are
-        # compatible without needing autocast in every forward pass.
-        backbone_dtype = next(img_branch.parameters()).dtype
+        # Infer backbone dtype for head precision matching
+        try:
+            backbone_dtype = next(
+                p for mod in self.encoder._nn_modules()
+                for p in mod.parameters()
+            ).dtype
+        except StopIteration:
+            backbone_dtype = torch.bfloat16
+
         self.head = self.build_head(embed_dim, self.cfg).to(device=device, dtype=backbone_dtype)
         log.info(f"[{self.EXPERIMENT_NAME}] Head: {self.head} (dtype={backbone_dtype})")
 
@@ -231,8 +259,11 @@ class FinetuneExperiment(ABC):
         train_loader = self.build_dataloader("train")
         val_loader   = self.build_dataloader("val")
 
+        # Include any trainable encoder params (e.g. TemporalAttentionPool for image-only models)
+        encoder_trainable = list(self.encoder.trainable_parameters()) if self.encoder else []
+        all_params = list(self.head.parameters()) + encoder_trainable
         optimiser = torch.optim.AdamW(
-            self.head.parameters(),
+            all_params,
             lr=self.cfg.lr,
             weight_decay=self.cfg.weight_decay,
         )
@@ -322,10 +353,9 @@ class FinetuneExperiment(ABC):
 
             with torch.autocast("cuda", dtype=torch.bfloat16,
                                  enabled=torch.cuda.is_available()):
-                with torch.no_grad():
-                    feats = self.img_branch.forward_teacher(
-                        batch["image"], padding_mask=batch.get("padding_mask")
-                    )
+                # encode_image() handles its own no_grad for frozen backbone;
+                # TemporalAttentionPool (if any) runs outside no_grad for gradients.
+                feats = self.encoder.encode_image(batch["image"])
                 head_out = self.head(
                     feats["patch_tokens"],
                     padding_mask=batch.get("padding_mask"),
@@ -368,7 +398,8 @@ class FinetuneExperiment(ABC):
         benchmark_cls = getattr(self, "BENCHMARK_CLS", None)
         if benchmark_cls is not None:
             benchmark = benchmark_cls(
-                img_branch=self.img_branch,
+                encoder=self.encoder,
+                img_branch=self.img_branch,   # kept for legacy benchmarks
                 head=self.head,
                 device=self.device,
                 batch_size=self.cfg.batch_size,

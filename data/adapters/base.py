@@ -112,8 +112,9 @@ class BaseAdapter(ABC):
         source_meta = {"root": str(self.root), "doi": self.DOI}
         source_meta.update(extra_source_meta)
 
+        id_source = kwargs.get("series_id") or image_paths[0]
         entry = USManifestEntry(
-            sample_id=USManifestEntry.make_sample_id(self.DATASET_ID, image_paths[0]),
+            sample_id=USManifestEntry.make_sample_id(self.DATASET_ID, id_source),
             dataset_id=self.DATASET_ID,
             anatomy_family=self.ANATOMY_FAMILY,
             sonodqs=self.SONODQS,

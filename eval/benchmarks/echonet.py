@@ -140,12 +140,16 @@ class EchoNetBenchmark(BaseBenchmark):
     ANATOMY_FAMILY = "cardiac"
     TASK           = "regression"
 
-    def __init__(self, vid_branch, reg_head, device="cuda",
-                 batch_size=8, num_workers=4, n_frames=32):
-        # Note: passes None as img_branch — this benchmark uses vid_branch
-        super().__init__(img_branch=None, head=reg_head,
+    def __init__(self, vid_branch=None, reg_head=None, device="cuda",
+                 batch_size=8, num_workers=4, n_frames=32,
+                 encoder=None, head=None):
+        # Accept either new-style encoder= or legacy vid_branch=
+        _enc = encoder
+        _head = head if head is not None else reg_head
+        super().__init__(img_branch=None, head=_head,
                          device=device, batch_size=batch_size,
-                         num_workers=num_workers)
+                         num_workers=num_workers, encoder=_enc)
+        # Keep vid_branch for legacy; if encoder provided, encode_video goes through encoder
         self.vid_branch = vid_branch
         self.n_frames   = n_frames
 
@@ -157,8 +161,11 @@ class EchoNetBenchmark(BaseBenchmark):
 
     def predict(self, batch: dict) -> dict:
         clips = batch["clip"].to(self.device)  # (B, T, 3, 112, 112)
-        with torch.no_grad():
-            vid_out = self.vid_branch.forward_teacher(clips)
+        if self.encoder is not None:
+            vid_out = self.encoder.encode_video(clips)
+        else:
+            with torch.no_grad():
+                vid_out = self.vid_branch.forward_teacher(clips)
         ef_pred = self.head(vid_out["clip_cls"])   # (B,) regression output
         return {"pred": ef_pred}
 

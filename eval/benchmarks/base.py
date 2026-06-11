@@ -59,13 +59,16 @@ class BaseBenchmark(ABC):
 
     def __init__(
         self,
-        img_branch,
-        head: Optional[nn.Module],
+        img_branch = None,
+        head: Optional[nn.Module] = None,
         device: str = "cuda",
         batch_size: int = 16,
         num_workers: int = 4,
+        encoder = None,
     ):
-        self.img_branch  = img_branch
+        # encoder (BackboneEncoder) takes priority; img_branch kept for legacy benchmarks
+        self.encoder    = encoder
+        self.img_branch = encoder if encoder is not None else img_branch
         self.head        = head
         self.device      = device
         self.batch_size  = batch_size
@@ -128,8 +131,13 @@ class BaseBenchmark(ABC):
         loader       = self.build_dataloader(root, split)
         per_sample   = []
 
-        if self.img_branch is not None:
-            self.img_branch.teacher.eval()
+        if self.encoder is not None:
+            self.encoder.eval()
+        elif self.img_branch is not None:
+            if hasattr(self.img_branch, "teacher"):
+                self.img_branch.teacher.eval()
+            else:
+                self.img_branch.eval()
         if getattr(self, "vid_branch", None) is not None:
             self.vid_branch.teacher.eval()
         if self.head is not None:
@@ -176,5 +184,8 @@ class BaseBenchmark(ABC):
 
     @torch.no_grad()
     def _extract_features(self, images: torch.Tensor, padding_mask=None) -> dict:
-        """Run image teacher and return {cls, patch_tokens}."""
+        """Run image encoder and return {cls, patch_tokens}."""
+        if self.encoder is not None:
+            return self.encoder.encode_image(images)
+        # Legacy path: raw ImageBranch
         return self.img_branch.forward_teacher(images, padding_mask=padding_mask)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from data.adapters.brain_3d_us_neuroimages import ThreeDUSNeuroimagesAdapter
+from data.adapters.brain.brain_3d_us_neuroimages import ThreeDUSNeuroimagesAdapter
 
 from ._explore_utils import run_adapter_explore
 

@@ -18,23 +18,14 @@ from .cardiac.ted               import TEDAdapter
 from .cardiac.unity             import UnityAdapter
 from .cardiac.cardiacudc        import CardiacUDCAdapter
 from .cardiac.echocp            import EchoCPAdapter
-
-# ── Non-cardiac ───────────────────────────────────────────────────────────────
-from .busi    import BUSIAdapter
-from .tn3k    import TN3KAdapter
-from .annotated_heterogeneous_us_db import AnnotatedHeterogeneousUSDBAdapter
-from .bite import BITEAdapter
-from .brain_3d_us_neuroimages import ThreeDUSNeuroimagesAdapter
-from .common_carotid import CommonCarotidArteryImagesAdapter
-from .cubs import CUBSAdapter
-from .dermatologic_skin_lesions import DermatologicSkinLesionsAdapter
-from .erdes import ERDESAdapter
-from .remind2reg import ReMIND2RegAdapter
-from .remind_brain_ius import REMINDBrainIUSAdapter
-from .resect import RESECTAdapter
-from .stu_hospital import STUHospitalAdapter
+from .cardiac.echocardiogram_uci   import EchocardiogramUCIAdapter
+from .cardiac.mimic_echoqa         import MIMICEchoQAAdapter
+from .cardiac.cactus               import CACTUSAdapter
+from .cardiac.mitea                import MITEAAdapter
+from .cardiac.physionet_cardiac     import PhysioNetCardiacAdapter
 
 # ── Breast ────────────────────────────────────────────────────────────────────
+from .breast.busi                       import BUSIAdapter
 from .breast.breast_adapter             import BrEaSTAdapter
 from .breast.buid_adapter               import BUIDAdapter
 from .breast.bus_b_adapter              import BUSBAdapter
@@ -45,6 +36,9 @@ from .breast.busv_adapter               import BUSVAdapter
 from .breast.chinese_us_report_adapter  import ChineseUSReportBreastAdapter
 from .breast.gdph_sysucc_adapter        import GDPHSYSUCCAdapter
 from .breast.s1_adapter                 import S1Adapter
+from .breast.busi_whu                   import BUSIWHUAdapter
+from .breast.midi_b                     import MidiBAdapter
+from .breast.stanford_bus               import STAnfordBUSAdapter
 
 # ── Lung ──────────────────────────────────────────────────────────────────────
 from .lung.benin_lus       import BeninLUSAdapter
@@ -52,6 +46,14 @@ from .lung.covidx_us       import COVIDxUSAdapter
 from .lung.lus_multicenter import LUSMulticenterAdapter
 from .lung.open_pocus      import OpenPOCUSAdapter
 from .lung.rsa_lus         import RSALUSAdapter
+from .lung.luss_phantom    import LUSSPhantomAdapter
+from .lung.lung_database   import LungDatabaseAdapter
+from .lung.pocus_covid     import PocusCovidAdapter
+from .lung.benin_videos    import BeninVideosAdapter
+from .lung.covid_blues     import COVIDBLUESAdapter
+from .lung.pocus_lus       import POCUSLUSAdapter
+from .lung.ultrasound_lus  import ULTRASOUNDLUSAdapter
+from .lung.lus_data          import LUSDataAdapter
 
 # ── Liver ─────────────────────────────────────────────────────────────────────
 from .liver.aul               import AULAdapter
@@ -59,6 +61,10 @@ from .liver.us105             import US105Adapter
 from .liver.fatty_liver_bmode import FattyLiverBmodeAdapter
 from .liver.liver_cv_project  import LiverCVProjectAdapter
 from .liver.lepset            import LEPsetAdapter
+from .liver.ctrus             import CTRUSAdapter
+from .liver.bmode_ceus_liver  import BModeCEUSLiverAdapter
+from .liver.behsof              import BEHSOFAdapter
+from .liver.ultrasound_elastography_liver_cancer import UltrasoundElastographyLiverCancerAdapter
 
 # ── Maternal / fetal ──────────────────────────────────────────────────────────
 from .maternal_fetal.acouslic                        import ACOUSLICAIAdapter
@@ -75,6 +81,9 @@ from .maternal_fetal.large_scale_fetal_head_biometry import LargeScaleFetalHeadB
 from .maternal_fetal.maternal_fetal_us_video_intrapartum import MaternalFetalUSVideoIntrapartumAdapter
 from .maternal_fetal.pbf_us1                         import PBFUS1Adapter
 from .maternal_fetal.psfhs                           import PSFHSAdapter
+from .maternal_fetal.ultrasound_fetus              import UltrasoundFetusAdapter
+from .maternal_fetal.oc4us                         import OC4USAdapter
+from .maternal_fetal.fast_u_net                    import FastUNetAdapter
 
 # ── Muscle / MSK ──────────────────────────────────────────────────────────────
 from .muscle.stmus_nda           import STMUSNDAAdapter
@@ -85,13 +94,72 @@ from .muscle.knee_us_jocohS      import KneeUSJoCoHSAdapter
 from .muscle.tus_rec             import TUSRECAdapter
 from .muscle.tus_rec_val         import TUSRECValAdapter
 from .muscle.spinal_cord_injury_us import SpinalCordInjuryUSAdapter
+from .muscle.msk_heckmatt          import MSKHeckmattAdapter
+from .muscle.msk_nmd               import MSKNMDAdapter
+from .muscle.open_hip_dysplasia    import OpenHipDysplasiaAdapter
 
 # ── Gallbladder / GI ──────────────────────────────────────────────────────────
 from .gallbladder.gist514_db                          import GIST514DBAdapter
 from .gallbladder.regensburg_pediatric_appendicitis   import RegensburgPediatricAppendicitisAdapter
+from .gallbladder.gbcu                                import GBCUAdapter
 
 # ── Abdomen ───────────────────────────────────────────────────────────────────
 from .abdomen.abdomen_us import AbdomenUSAdapter
+from .abdomen.abdomen_us_liver import AbdomenUSLiverAdapter
+from .abdomen.cptac_pda  import CPTACPDAAdapter
+
+# ── Kidney ────────────────────────────────────────────────────────────────────
+from .kidney.normal_kidney_cv import NormalKidneyCVAdapter
+from .kidney.kidney_us        import KidneyUSAdapter
+
+# ── Thyroid ───────────────────────────────────────────────────────────────────
+from .thyroid.segthy  import SegthyAdapter
+from .thyroid.ddti    import DDTIAdapter
+from .thyroid.tg3k    import TG3KAdapter
+from .thyroid.tn3k    import TN3KAdapter
+from .thyroid.tn5000  import TN5000Adapter
+from .thyroid.tnscui  import TNSCUIAdapter
+from .thyroid.thyroid_nodule_pathology import ThyroidNodulePathologyAdapter
+
+# ── Ovarian ───────────────────────────────────────────────────────────────────
+from .ovarian.mmotu3d                 import MMOTU3DAdapter
+from .ovarian.mmotu2d                 import MMOTU2DAdapter
+from .ovarian.polycystic_ovary_telkom import PolycysticOvaryTelkomAdapter
+from .ovarian.pcosgen                 import PCOSGenAdapter
+
+# ── Prostate ──────────────────────────────────────────────────────────────────
+from .prostate.openpros import OpenProsAdapter
+from .prostate.museg import MuSegAdapter
+from .prostate.muregpro import MuRegProAdapter
+from .prostate.micro_ultrasound_prostate_seg import MicroUltrasoundProstateSegAdapter
+from .prostate.mri_us_biopsy import ProstateMRIUSBiopsyAdapter
+
+# ── Vascular / carotid ──────────────────────────────────────────────────────────
+from .vascular.cubs           import CUBSAdapter
+from .vascular.common_carotid import CommonCarotidArteryImagesAdapter
+
+# ── Brain ───────────────────────────────────────────────────────────────────────
+from .brain.bratious              import BraTioUSAdapter
+from .brain.bite                  import BITEAdapter
+from .brain.brain_3d_us_neuroimages import ThreeDUSNeuroimagesAdapter
+from .brain.remind_brain_ius      import REMINDBrainIUSAdapter
+from .brain.resect                import RESECTAdapter
+from .brain.remind2reg            import ReMIND2RegAdapter
+
+# ── Multi-organ ─────────────────────────────────────────────────────────────────
+from .multi_organ.annotated_heterogeneous_us_db import AnnotatedHeterogeneousUSDBAdapter
+from .multi_organ.stu_hospital                  import STUHospitalAdapter
+from .multi_organ.us_365k                       import US365KAdapter
+
+# ── Ocular ──────────────────────────────────────────────────────────────────────
+from .ocular.erdes import ERDESAdapter
+
+# ── Skin ────────────────────────────────────────────────────────────────────────
+from .skin.dermatologic_skin_lesions import DermatologicSkinLesionsAdapter
+
+# ── Nerve ───────────────────────────────────────────────────────────────────────
+from .nerve.optic_nerve_sheaths  import OpticNerveSheathsAdapter
+from .nerve.us_guided_anesthesia import USGuidedAnesthesiaAdapter
 
 # ── Generic mask-pair factory ─────────────────────────────────────────────────
 from .generic_mask import GenericMaskPairAdapter, _make_generic
@@ -110,6 +178,11 @@ ADAPTER_REGISTRY = {
     "Unity-Echo":               UnityAdapter,
     "CardiacUDC":               CardiacUDCAdapter,
     "EchoCP":                   EchoCPAdapter,
+    "Echocardiogram-UCI":       EchocardiogramUCIAdapter,
+    "MIMIC-EchoQA":             MIMICEchoQAAdapter,
+    "CACTUS":                   CACTUSAdapter,
+    "MITEA":                    MITEAAdapter,
+    "PhysioNet-cardiac":        PhysioNetCardiacAdapter,
     # Breast / thyroid
     "BUSI":                                    BUSIAdapter,
     "TN3K":                                    TN3KAdapter,
@@ -123,6 +196,9 @@ ADAPTER_REGISTRY = {
     "GDPH-SYSUCC":                             GDPHSYSUCCAdapter,
     "Chinese-US-Report-Breast":                ChineseUSReportBreastAdapter,
     "S1":                                      S1Adapter,
+    "busi-whu":                                BUSIWHUAdapter,
+    "midi-b":                                  MidiBAdapter,
+    "STAnford-BUS":                            STAnfordBUSAdapter,
     # Vascular / carotid
     "CUBS":                                    CUBSAdapter,
     "Common-Carotid-Artery-Ultrasound-Images": CommonCarotidArteryImagesAdapter,
@@ -134,6 +210,7 @@ ADAPTER_REGISTRY = {
     "ReMIND2Reg":                              ReMIND2RegAdapter,
     "STU-Hospital-master":                     STUHospitalAdapter,
     "annotated_heterogeneous_us_db":           AnnotatedHeterogeneousUSDBAdapter,
+    "US-365K":                                 US365KAdapter,
     "ERDES":                                   ERDESAdapter,
     "Dermatologic-US-Skin-Lesions":            DermatologicSkinLesionsAdapter,
     # Lung
@@ -142,12 +219,24 @@ ADAPTER_REGISTRY = {
     "LUS-multicenter-2025":     LUSMulticenterAdapter,
     "OpenPOCUS":                OpenPOCUSAdapter,
     "RSA-LUS":                  RSALUSAdapter,
+    "LUSS-PHANTOM":             LUSSPhantomAdapter,
+    "Lung-Database":            LungDatabaseAdapter,
+    "Pocus-covid":              PocusCovidAdapter,
+    "BeninVideos":              BeninVideosAdapter,
+    "COVID-BLUES":              COVIDBLUESAdapter,
+    "POCUS-LUS":                POCUSLUSAdapter,
+    "ULTRASOUND-LUS":           ULTRASOUNDLUSAdapter,
+    "LUS-data":                 LUSDataAdapter,
     # Liver
     "AUL":                      AULAdapter,
     "105US":                    US105Adapter,
     "fatty-liver-bmode":        FattyLiverBmodeAdapter,
     "liver-CV-project":         LiverCVProjectAdapter,
     "LEPset":                   LEPsetAdapter,
+    "B-mode-CEUS-liver":        BModeCEUSLiverAdapter,
+    "C-TRUS":                   CTRUSAdapter,
+    "BEHSOF":                   BEHSOFAdapter,
+    "ultrasound-elastography-liver-cancer": UltrasoundElastographyLiverCancerAdapter,
     # Maternal / fetal
     "ACOUSLIC-AI":                         ACOUSLICAIAdapter,
     "FASS":                                FASSAdapter,
@@ -163,6 +252,9 @@ ADAPTER_REGISTRY = {
     "maternal-fetal-us-video-intrapartum": MaternalFetalUSVideoIntrapartumAdapter,
     "PBF-US1":                             PBFUS1Adapter,
     "PSFHS":                               PSFHSAdapter,
+    "ultrasound-fetus-dataset":            UltrasoundFetusAdapter,
+    "OC4US":                               OC4USAdapter,
+    "Fast-U-Net":                          FastUNetAdapter,
     # Muscle / MSK
     "STMUS-NDA":        STMUSNDAAdapter,
     "FALLMUD":          FALLMUDAdapter,
@@ -172,11 +264,43 @@ ADAPTER_REGISTRY = {
     "TUS-REC":          TUSRECAdapter,
     "TUS-REC-Val":      TUSRECValAdapter,
     "SpinalCordInjuryUS": SpinalCordInjuryUSAdapter,
+    "msk-heckmatt-radboud": MSKHeckmattAdapter,
+    "msk-nmd-radboud":      MSKNMDAdapter,
+    "open-hip-dysplasia":   OpenHipDysplasiaAdapter,
     # Gallbladder / GI
     "GIST514-DB":           GIST514DBAdapter,
     "RegensburgPedAppend":  RegensburgPediatricAppendicitisAdapter,
+    "GBCU":                 GBCUAdapter,
     # Abdomen
     "AbdomenUS":        AbdomenUSAdapter,
+    "AbdomenUS-liver":  AbdomenUSLiverAdapter,
+    "cptac-pda":        CPTACPDAAdapter,
+    # Kidney
+    "KidneyUS":         KidneyUSAdapter,
+    "Normal-Kidney-CV": NormalKidneyCVAdapter,
+    # Thyroid
+    "Segthy-Dataset":   SegthyAdapter,
+    "DDTI":             DDTIAdapter,
+    "TG3K":             TG3KAdapter,
+    "TN5000":           TN5000Adapter,
+    "TNSCUI":           TNSCUIAdapter,
+    "Thyroid-Nodule-Pathology": ThyroidNodulePathologyAdapter,
+    "MuSeg":                    MuSegAdapter,
+    "Micro-Ultrasound-Prostate-Segmentation": MicroUltrasoundProstateSegAdapter,
+    # Ovarian
+    "MMOTU-3D":         MMOTU3DAdapter,
+    "MMOTU-2D":         MMOTU2DAdapter,
+    "Polycystic-Ovary-US-Telkom": PolycysticOvaryTelkomAdapter,
+    "PCOSGen":          PCOSGenAdapter,
+    # Prostate
+    "ProstateSeg":      OpenProsAdapter,
+    "Prostate-MRI-US-Biopsy": ProstateMRIUSBiopsyAdapter,
+    "muregpro":         MuRegProAdapter,
+    # Brain
+    "braTioUS":         BraTioUSAdapter,
+    # Nerve
+    "optic-nerve-sheaths":  OpticNerveSheathsAdapter,
+    "us-guided-anesthesia": USGuidedAnesthesiaAdapter,
 }
 
 
@@ -215,6 +339,8 @@ __all__ = [
     "CAMUSAdapter", "EchoNetDynamicAdapter", "EchoNetPediatricAdapter",
     "EchoNetLVHAdapter", "MIMICEchoAdapter", "MIMICLVVolA4CAdapter",
     "TEDAdapter", "UnityAdapter", "CardiacUDCAdapter", "EchoCPAdapter",
+    "EchocardiogramUCIAdapter",
+    "MIMICEchoQAAdapter", "CACTUSAdapter", "MITEAAdapter",
     # Non-cardiac
     "BUSIAdapter", "TN3KAdapter", "CUBSAdapter",
     "CommonCarotidArteryImagesAdapter",
@@ -226,26 +352,48 @@ __all__ = [
     "BrEaSTAdapter", "BUIDAdapter", "BUSBAdapter", "BUSBRAAdapter",
     "BUSUCAdapter", "BUSUCLMAdapter", "BUSVAdapter",
     "ChineseUSReportBreastAdapter", "GDPHSYSUCCAdapter", "S1Adapter",
+    "BUSIWHUAdapter", "MidiBAdapter", "STAnfordBUSAdapter",
     # Lung
     "BeninLUSAdapter", "COVIDxUSAdapter", "LUSMulticenterAdapter",
     "OpenPOCUSAdapter", "RSALUSAdapter",
+    "LUSSPhantomAdapter", "LungDatabaseAdapter", "PocusCovidAdapter",
+    "BeninVideosAdapter", "COVIDBLUESAdapter", "POCUSLUSAdapter",
+    "ULTRASOUNDLUSAdapter",
     # Liver
     "AULAdapter", "US105Adapter", "FattyLiverBmodeAdapter",
     "LiverCVProjectAdapter", "LEPsetAdapter",
+    "CTRUSAdapter", "BModeCEUSLiverAdapter", "BEHSOFAdapter",
     # Maternal / fetal
     "ACOUSLICAIAdapter", "FASSAdapter", "FetalPlanesDBAdapter",
     "FOCUSAdapter", "FPUS23Adapter", "FUGCAdapter", "FHPSAOPAdapter",
     "HC18Adapter", "IUGC2024Adapter", "JNUIFMAdapter",
     "LargeScaleFetalHeadBiometryAdapter",
     "MaternalFetalUSVideoIntrapartumAdapter", "PBFUS1Adapter", "PSFHSAdapter",
+    "UltrasoundFetusAdapter", "OC4USAdapter",
     # Muscle / MSK
     "STMUSNDAAdapter", "FALLMUDAdapter", "LUMINOUSAdapter", "DeepMTJAdapter",
     "KneeUSJoCoHSAdapter", "TUSRECAdapter", "TUSRECValAdapter",
     "SpinalCordInjuryUSAdapter",
+    "MSKHeckmattAdapter", "MSKNMDAdapter", "OpenHipDysplasiaAdapter",
     # Gallbladder / GI
     "GIST514DBAdapter", "RegensburgPediatricAppendicitisAdapter",
+    "GBCUAdapter",
     # Abdomen
-    "AbdomenUSAdapter",
+    "AbdomenUSAdapter", "CPTACPDAAdapter",
+    # Kidney
+    "NormalKidneyCVAdapter", "KidneyUSAdapter",
+    # Thyroid
+    "SegthyAdapter", "DDTIAdapter", "TG3KAdapter", "TN5000Adapter",
+    "TNSCUIAdapter",
+    # Ovarian
+    "MMOTU3DAdapter", "MMOTU2DAdapter", "PolycysticOvaryTelkomAdapter",
+    "PCOSGenAdapter",
+    # Prostate
+    "OpenProsAdapter",
+    # Brain
+    "BraTioUSAdapter",
+    # Nerve
+    "OpticNerveSheathsAdapter", "USGuidedAnesthesiaAdapter",
     # Generic
     "GenericMaskPairAdapter", "_make_generic",
     # Helpers

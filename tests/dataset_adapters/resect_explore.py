@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from data.adapters.resect import RESECTAdapter
+from data.adapters.brain.resect import RESECTAdapter
 
 from ._explore_utils import run_adapter_explore
 

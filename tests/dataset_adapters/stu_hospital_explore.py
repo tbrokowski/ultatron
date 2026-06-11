@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from data.adapters.stu_hospital import STUHospitalAdapter
+from data.adapters.multi_organ.stu_hospital import STUHospitalAdapter
 
 from ._explore_utils import run_adapter_explore
 

@@ -187,11 +187,18 @@ class BUSIFinetune(FinetuneExperiment):
         """Primary head: binary tumour segmentation."""
         return build_seg_head(embed_dim, n_classes=1, head_type=cfg.head_type)
 
-    def setup(self, img_branch, device="cuda", vid_branch=None):
-        super().setup(img_branch, device, vid_branch)
-        backbone_dtype = next(img_branch.parameters()).dtype
+    def setup(self, img_branch=None, device="cuda", vid_branch=None, encoder=None):
+        super().setup(img_branch, device, vid_branch, encoder=encoder)
+        # Infer dtype from the encoder
+        try:
+            backbone_dtype = next(
+                p for mod in self.encoder._nn_modules()
+                for p in mod.parameters()
+            ).dtype
+        except StopIteration:
+            backbone_dtype = torch.bfloat16
         self.head2 = build_cls_head(
-            img_branch.embed_dim, n_classes=3, head_type="linear"
+            self.encoder.embed_dim, n_classes=3, head_type="linear"
         ).to(device=device, dtype=backbone_dtype)
         log.info(f"[BUSI] Cls head: {self.head2} (dtype={backbone_dtype})")
 
@@ -260,8 +267,9 @@ class BUSIFinetune(FinetuneExperiment):
         """Override to include head2 in the optimiser with cosine LR schedule."""
         # Rebuild optimiser to include both heads on first call
         if not hasattr(self, "_multi_optim"):
+            encoder_trainable = list(self.encoder.trainable_parameters()) if self.encoder else []
             self._multi_optim = torch.optim.AdamW(
-                list(self.head.parameters()) + list(self.head2.parameters()),
+                list(self.head.parameters()) + list(self.head2.parameters()) + encoder_trainable,
                 lr=self.cfg.lr, weight_decay=self.cfg.weight_decay,
             )
             self._multi_scaler = scaler
@@ -283,8 +291,7 @@ class BUSIFinetune(FinetuneExperiment):
 
             with torch.autocast("cuda", dtype=torch.bfloat16,
                                  enabled=torch.cuda.is_available()):
-                with torch.no_grad():
-                    feats = self.img_branch.forward_teacher(batch["image"])
+                feats    = self.encoder.encode_image(batch["image"])
                 head_out = self.head(feats["patch_tokens"])
                 loss     = self.compute_loss(batch, feats, head_out)
 
@@ -306,7 +313,7 @@ class BUSIFinetune(FinetuneExperiment):
     def compute_val_metrics(self, val_loader: DataLoader) -> dict:
         self.head.eval()
         self.head2.eval()
-        self.img_branch.teacher.eval()
+        self.encoder.eval()
 
         per_sample   = []
         cls_correct  = 0
@@ -318,7 +325,7 @@ class BUSIFinetune(FinetuneExperiment):
             batch = {k: v.to(self.device, non_blocking=True)
                      if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            feats    = self.img_branch.forward_teacher(batch["image"])
+            feats    = self.encoder.encode_image(batch["image"])
             logits   = self.head(feats["patch_tokens"])
             cls_out  = self.head2(feats["cls"])
 
@@ -367,12 +374,12 @@ class BUSIFinetune(FinetuneExperiment):
         images, preds, gts, ids = [], [], [], []
 
         self.head.eval()
-        self.img_branch.teacher.eval()
+        self.encoder.eval()
         with torch.no_grad():
             for batch in test_loader:
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
-                feats  = self.img_branch.forward_teacher(batch["image"])
+                feats  = self.encoder.encode_image(batch["image"])
                 logits = self.head(feats["patch_tokens"])
                 pred   = F.interpolate(logits, size=(IMG_SIZE, IMG_SIZE),
                                        mode="bilinear", align_corners=False)

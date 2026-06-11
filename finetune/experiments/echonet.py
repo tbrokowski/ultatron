@@ -123,21 +123,33 @@ class EchoNetFinetune(FinetuneExperiment):
             output_max = 85.0,   # physiologically: EF above 85% is extremely high
         )
 
-    def setup(self, img_branch, device="cuda", vid_branch=None):
-        """Override to freeze vid_branch instead of img_branch."""
-        self.img_branch = img_branch
-        self.vid_branch = vid_branch
-        self.device     = device
+    def setup(self, img_branch=None, device="cuda", vid_branch=None, encoder=None):
+        """Override to use video embed_dim for the regression head."""
+        from finetune.backbones.ultatron_encoder import UltatronBranchEncoder
+        if encoder is not None:
+            self.encoder    = encoder
+            self.img_branch = encoder
+            self.vid_branch = encoder
+        else:
+            assert vid_branch is not None, "EchoNetFinetune requires vid_branch"
+            self.encoder    = UltatronBranchEncoder(img_branch, vid_branch)
+            self.img_branch = img_branch
+            self.vid_branch = vid_branch
+        self.device = device
 
-        assert vid_branch is not None, "EchoNetFinetune requires vid_branch"
-
-        if self.cfg.freeze_backbone:
+        if self.cfg.freeze_backbone and vid_branch is not None:
             for p in vid_branch.parameters():
                 p.requires_grad_(False)
             vid_branch.eval()
 
-        embed_dim = vid_branch.embed_dim
-        backbone_dtype = next(vid_branch.parameters()).dtype
+        embed_dim = self.encoder.video_embed_dim
+        try:
+            backbone_dtype = next(
+                p for mod in self.encoder._nn_modules()
+                for p in mod.parameters()
+            ).dtype
+        except StopIteration:
+            backbone_dtype = torch.bfloat16
         self.head = self.build_head(embed_dim, self.cfg).to(device=device, dtype=backbone_dtype)
         log.info(f"[EchoNet] Regression head: {self.head} (dtype={backbone_dtype})")
 
@@ -157,9 +169,9 @@ class EchoNetFinetune(FinetuneExperiment):
         return mse + 0.1 * mae_l
 
     def _train_epoch(self, loader, optimiser, scaler) -> float:
-        """Override to use vid_branch instead of img_branch."""
+        """Override to use video encoder instead of image encoder."""
         self.head.train()
-        self.vid_branch.teacher.eval()   # frozen
+        self.encoder.eval()
         total_loss = 0.0
         n          = 0
 
@@ -170,8 +182,7 @@ class EchoNetFinetune(FinetuneExperiment):
 
             with torch.autocast("cuda", dtype=torch.bfloat16,
                                  enabled=torch.cuda.is_available()):
-                with torch.no_grad():
-                    vid_out = self.vid_branch.forward_teacher(batch["clip"])
+                vid_out = self.encoder.encode_video(batch["clip"])
                 pred = self.head(vid_out["clip_cls"])
                 loss = self.compute_loss(batch, {}, pred)
 
@@ -188,7 +199,7 @@ class EchoNetFinetune(FinetuneExperiment):
     @torch.no_grad()
     def compute_val_metrics(self, val_loader: DataLoader) -> dict:
         self.head.eval()
-        self.vid_branch.teacher.eval()
+        self.encoder.eval()
 
         all_pred, all_true = [], []
         total_loss = 0.0
@@ -198,7 +209,7 @@ class EchoNetFinetune(FinetuneExperiment):
             batch = {k: v.to(self.device, non_blocking=True)
                      if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            vid_out = self.vid_branch.forward_teacher(batch["clip"])
+            vid_out = self.encoder.encode_video(batch["clip"])
             pred    = self.head(vid_out["clip_cls"])
             loss    = self.compute_loss(batch, {}, pred)
             total_loss += loss.item()
@@ -218,11 +229,12 @@ class EchoNetFinetune(FinetuneExperiment):
         }
 
     def evaluate(self, split: str = "test") -> dict:
-        """Override to instantiate EchoNetBenchmark with vid_branch instead of img_branch."""
+        """Override to instantiate EchoNetBenchmark with the encoder."""
         assert self.head is not None, "Call setup() and run() first"
         self.head.eval()
         benchmark = EchoNetBenchmark(
-            vid_branch=self.vid_branch,
+            encoder=self.encoder,
+            vid_branch=self.vid_branch,   # legacy compat
             reg_head=self.head,
             device=self.device,
             batch_size=self.cfg.batch_size,
@@ -246,12 +258,12 @@ class EchoNetFinetune(FinetuneExperiment):
         all_pred, all_true = [], []
 
         self.head.eval()
-        self.vid_branch.teacher.eval()
+        self.encoder.eval()
         with torch.no_grad():
             for batch in test_loader:
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
-                vid_out = self.vid_branch.forward_teacher(batch["clip"])
+                vid_out = self.encoder.encode_video(batch["clip"])
                 pred    = self.head(vid_out["clip_cls"])
                 all_pred.extend(pred.cpu().numpy().tolist())
                 all_true.extend(batch["target"].cpu().numpy().tolist())

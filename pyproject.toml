@@ -27,6 +27,7 @@ dependencies = [
 
     # Medical image formats
     "pydicom>=2.4.0",          # DICOM support
+    "h5py>=3.10.0",            # HDF5 frame stacks (TUS-REC, etc.)
     "SimpleITK>=2.3.0",        # .mhd/.mha support
 
     # Serialisation / config

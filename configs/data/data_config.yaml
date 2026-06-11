@@ -112,7 +112,7 @@ transforms:
       band_width_min: 0.20
       band_width_max: 0.50
       mask_ratio: 0.75
-      use_alp_bias: false
+      use_alp_bias: true
       perturb_phase: false
       phase_perturb_sigma: 0.10
       n_bands: 1

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from data.adapters.bite import BITEAdapter
+from data.adapters.brain.bite import BITEAdapter
 
 from ._explore_utils import run_adapter_explore
 

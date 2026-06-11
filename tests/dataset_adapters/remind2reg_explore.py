@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from data.adapters.remind2reg import ReMIND2RegAdapter
+from data.adapters.brain.remind2reg import ReMIND2RegAdapter
 
 from ._explore_utils import run_adapter_explore
 

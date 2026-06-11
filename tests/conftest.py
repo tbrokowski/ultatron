@@ -137,6 +137,16 @@ def build_generic_seg(root: Path, n=8):
     splits = {"train": stems[:5], "val": stems[5:7], "test": stems[7:]}
     (root / "splits.json").write_text(json.dumps(splits))
 
+def build_tn3k(root: Path, n_trainval=6, n_test=2):
+    """Build official TN3K layout: trainval-* and test-* subdirectories."""
+    for prefix, n in (("trainval", n_trainval), ("test", n_test)):
+        (root / f"{prefix}-image").mkdir(parents=True, exist_ok=True)
+        (root / f"{prefix}-mask").mkdir(parents=True, exist_ok=True)
+        for i in range(n):
+            stem = f"{i:04d}"
+            _save_png(_gray(), root / f"{prefix}-image" / f"{stem}.jpg")
+            _save_png(_mask(), root / f"{prefix}-mask" / f"{stem}.jpg")
+
 def build_covidx(root: Path, n=4):
     (root / "data").mkdir(parents=True, exist_ok=True)
     for split in ("train", "val", "test"):
@@ -1056,7 +1066,7 @@ def busi_root(data_root):
 
 @pytest.fixture(scope="session")
 def tn3k_root(data_root):
-    r = data_root / "TN3K"; build_generic_seg(r); return r
+    r = data_root / "TN3K"; build_tn3k(r); return r
 
 @pytest.fixture(scope="session")
 def covidx_root(data_root):

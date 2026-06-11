@@ -67,8 +67,8 @@ class BUSBRAAdapter(BaseAdapter):
     ):
         super().__init__(root=root, split_override=split_override)
 
-        self.images_dir      = self.root / "images"
-        self.masks_dir       = self.root / "masks"
+        self.images_dir      = self._find_subdir("images", "Images")
+        self.masks_dir       = self._find_subdir("masks", "Masks")
         self.annotations_csv = self.root / "annotations.csv"
         self.fold_csv        = Path(fold_csv) if fold_csv else None
         self.fold_index      = fold_index
@@ -79,6 +79,13 @@ class BUSBRAAdapter(BaseAdapter):
         ) else {}
 
     # ── Private helpers ────────────────────────────────────────────────────
+
+    def _find_subdir(self, *names: str) -> Path:
+        for name in names:
+            candidate = self.root / name
+            if candidate.is_dir():
+                return candidate
+        return self.root / names[0]
 
     def _load_metadata(self) -> dict[str, dict]:
         """

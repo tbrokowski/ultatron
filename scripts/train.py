@@ -154,6 +154,25 @@ def _build_finetune_experiments(cfg: dict, ckpt_dir: Path, log) -> list:
     except Exception as e:
         log.warning(f"[Phase4] EchoNet experiment failed to load: {e}")
 
+    # ── CAMUS ─────────────────────────────────────────────────────────────────
+    try:
+        from finetune.experiments.camus import CAMUSFinetune
+        from finetune.base import FinetuneConfig
+        raw = _load_ft_yaml("camus.yaml")
+        root = raw.get("dataset_root", "")
+        if root and Path(root).exists():
+            exp = CAMUSFinetune(
+                data_root  = root,
+                output_dir = str(results_dir / "camus"),
+                cfg        = FinetuneConfig.from_dict(raw.get("finetune", raw)),
+            )
+            experiments.append(exp)
+            log.info(f"[Phase4] CAMUS experiment ready: {root}")
+        else:
+            log.warning(f"[Phase4] CAMUS root not found ({root!r}), skipping.")
+    except Exception as e:
+        log.warning(f"[Phase4] CAMUS experiment failed to load: {e}")
+
     # ── LUS patient ───────────────────────────────────────────────────────────
     try:
         from finetune.experiments.lus_patient import LUSPatientFinetune

@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from data.adapters.dermatologic_skin_lesions import DermatologicSkinLesionsAdapter
+from data.adapters.skin.dermatologic_skin_lesions import DermatologicSkinLesionsAdapter
 
 
 def test_dermatologic_skin_lesions_adapter_handles_paired_and_fallback_images(

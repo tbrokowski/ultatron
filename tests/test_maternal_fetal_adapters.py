@@ -35,8 +35,8 @@ from data.adapters.maternal_fetal.psfhs                      import PSFHSAdapter
 
 def test_acouslic_yields_all_sweeps(acouslic_root: Path):
     entries = list(ACOUSLICAIAdapter(acouslic_root).iter_entries())
-    # All 4 .mha files must be yielded, including the mask-less one.
-    assert len(entries) == 4
+    # 4 cases × 6 OSP sweeps each, including the mask-less case.
+    assert len(entries) == 24
 
 
 def test_acouslic_schema(acouslic_root: Path):
@@ -44,10 +44,14 @@ def test_acouslic_schema(acouslic_root: Path):
     for e in entries:
         assert e.dataset_id == "ACOUSLIC-AI"
         assert e.anatomy_family == "fetal_abdomen"
-        assert e.modality_type == "volume"
-        assert e.is_3d is True
-        assert e.num_frames == 840
-        assert e.ssl_stream == "image"
+        assert e.modality_type == "video"
+        assert e.is_3d is False
+        assert e.is_cine is True
+        assert e.has_temporal_order is True
+        assert e.num_frames == 140
+        assert e.ssl_stream == "video"
+        assert e.frame_indices is not None
+        assert len(e.frame_indices) == 140
         assert e.curriculum_tier in (1, 2, 3)
         assert len(e.image_paths) == 1
 
@@ -55,8 +59,12 @@ def test_acouslic_schema(acouslic_root: Path):
 def test_acouslic_segmentation_entries(acouslic_root: Path):
     entries = {e.series_id: e for e in ACOUSLICAIAdapter(acouslic_root).iter_entries()}
 
-    for uuid in ("sweep-aaa", "sweep-bbb", "sweep-ccc"):
-        e = entries[uuid]
+    for series_id in (
+        "sweep-aaa_sweep1",
+        "sweep-bbb_sweep2",
+        "sweep-ccc_sweep1",
+    ):
+        e = entries[series_id]
         assert e.has_mask is True
         assert e.task_type == "segmentation"
         assert e.is_promptable is True
@@ -67,47 +75,50 @@ def test_acouslic_segmentation_entries(acouslic_root: Path):
 
 def test_acouslic_ssl_only_entry(acouslic_root: Path):
     entries = {e.series_id: e for e in ACOUSLICAIAdapter(acouslic_root).iter_entries()}
-    e = entries["sweep-ddd"]
-    assert e.has_mask is False
-    assert e.task_type == "ssl_only"
-    assert e.is_promptable is False
-    assert e.instances[0].mask_path is None
+    for sweep_idx in range(1, 7):
+        e = entries[f"sweep-ddd_sweep{sweep_idx}"]
+        assert e.has_mask is False
+        assert e.task_type == "ssl_only"
+        assert e.is_promptable is False
+        assert e.instances[0].mask_path is None
 
 
 def test_acouslic_measurement_mm(acouslic_root: Path):
     entries = {e.series_id: e for e in ACOUSLICAIAdapter(acouslic_root).iter_entries()}
 
-    assert entries["sweep-aaa"].instances[0].measurement_mm == pytest.approx(250.0)
-    assert entries["sweep-bbb"].instances[0].measurement_mm == pytest.approx(252.0)
-    assert entries["sweep-ccc"].instances[0].measurement_mm == pytest.approx(270.0)
-    assert entries["sweep-ddd"].instances[0].measurement_mm is None
+    assert entries["sweep-aaa_sweep1"].instances[0].measurement_mm == pytest.approx(250.0)
+    assert entries["sweep-bbb_sweep2"].instances[0].measurement_mm == pytest.approx(252.0)
+    assert entries["sweep-ccc_sweep1"].instances[0].measurement_mm == pytest.approx(270.0)
+    assert entries["sweep-ddd_sweep1"].instances[0].measurement_mm is None
 
 
 def test_acouslic_subject_level_splitting(acouslic_root: Path):
     entries = {e.series_id: e for e in ACOUSLICAIAdapter(acouslic_root).iter_entries()}
 
-    # Both sweeps from subject 01 must receive the same split.
-    assert entries["sweep-aaa"].split == entries["sweep-bbb"].split
+    # Both cases from subject 01 must receive the same split.
+    assert entries["sweep-aaa_sweep1"].split == entries["sweep-bbb_sweep1"].split
 
-    # study_id should be the subject, series_id the sweep uuid.
-    assert entries["sweep-aaa"].study_id == "1"   # leading zero stripped
-    assert entries["sweep-bbb"].study_id == "1"
-    assert entries["sweep-ccc"].study_id == "2"
+    assert entries["sweep-aaa_sweep1"].study_id == "1"   # leading zero stripped
+    assert entries["sweep-bbb_sweep1"].study_id == "1"
+    assert entries["sweep-ccc_sweep1"].study_id == "2"
 
 
 def test_acouslic_source_meta(acouslic_root: Path):
     entries = {e.series_id: e for e in ACOUSLICAIAdapter(acouslic_root).iter_entries()}
-    e = entries["sweep-aaa"]
+    e = entries["sweep-aaa_sweep1"]
     assert e.source_meta["uuid"] == "sweep-aaa"
     assert e.source_meta["subject_id"] == "1"
+    assert e.source_meta["sweep_idx"] == 1
     assert e.source_meta["ac_mm"] == pytest.approx(250.0)
+    assert e.source_meta["frame_start"] == 0
+    assert e.source_meta["frame_end"] == 140
 
 
 def test_acouslic_resolve_root_direct(acouslic_root: Path):
     # Adapter must also accept the inner acouslic-ai-train-set/ path directly.
     inner = acouslic_root / "acouslic-ai-train-set"
     entries = list(ACOUSLICAIAdapter(inner).iter_entries())
-    assert len(entries) == 4
+    assert len(entries) == 24
 
 
 def test_acouslic_split_override(acouslic_root: Path):
@@ -1296,10 +1307,15 @@ def test_large_scale_fhb_split_override(large_scale_fhb_root: Path):
 # PBF-US1
 # ══════════════════════════════════════════════════════════════════════════════
 
-def test_pbf_us1_yields_all_frames(pbf_us1_root: Path):
+def test_pbf_us1_yields_frames_and_sweep_videos(pbf_us1_root: Path):
     entries = list(PBFUS1Adapter(pbf_us1_root).iter_entries())
+    images = [e for e in entries if e.modality_type == "image"]
+    videos = [e for e in entries if e.modality_type == "pseudo_video"]
     # 7 images exist; 1 extra resume.csv row points to a missing file → skipped.
-    assert len(entries) == 7
+    assert len(images) == 7
+    # 3 exam folders → 3 sweep pseudo_video entries.
+    assert len(videos) == 3
+    assert len(entries) == 10
 
 
 def test_pbf_us1_schema(pbf_us1_root: Path):
@@ -1307,15 +1323,29 @@ def test_pbf_us1_schema(pbf_us1_root: Path):
     for e in entries:
         assert e.dataset_id == "PBF-US1"
         assert e.anatomy_family == "fetal_planes"
-        assert e.modality_type == "image"
-        assert e.ssl_stream == "image"
         assert e.height == 500
         assert e.width == 700
         assert e.curriculum_tier in (1, 2, 3)
+        assert e.task_type == "classification"
+        if e.modality_type == "image":
+            assert e.ssl_stream == "image"
+            assert e.view_type in {
+                "biparietal", "abdominal", "heart", "spine", "femur", "no_plane",
+            }
+        else:
+            assert e.modality_type == "pseudo_video"
+            assert e.ssl_stream == "both"
+            assert e.view_type == "fetal_standard_plane_sweep"
+            assert e.has_temporal_order is True
+            assert e.is_cine is True
+            assert e.fps == 24.0
 
 
 def test_pbf_us1_classification_instances(pbf_us1_root: Path):
-    entries = list(PBFUS1Adapter(pbf_us1_root).iter_entries())
+    entries = [
+        e for e in PBFUS1Adapter(pbf_us1_root).iter_entries()
+        if e.modality_type == "image"
+    ]
     for e in entries:
         assert e.task_type == "classification"
         assert e.has_mask is False
@@ -1352,6 +1382,40 @@ def test_pbf_us1_source_meta(pbf_us1_root: Path):
     assert e.source_meta["studie"] == "Obstetrics Exam - 01-Jan-2023_10_AM"
     assert e.source_meta["protocol"] == "Vertical"
     assert e.source_meta["position"] == "OP"
+    assert e.source_meta["class_idx"] == 0
+    assert e.source_meta["class_name"] == "Biparietal standard plane"
+
+
+def test_pbf_us1_sweep_labels_and_instances(pbf_us1_root: Path):
+    entries = [
+        e for e in PBFUS1Adapter(pbf_us1_root).iter_entries()
+        if e.modality_type == "pseudo_video"
+    ]
+    exam_a = "Obstetrics Exam - 01-Jan-2023_10_AM"
+    sweep = next(e for e in entries if e.study_id == exam_a)
+    assert len(sweep.source_meta["frame_labels"]) == 3
+    assert sweep.source_meta["n_standard_plane_frames"] == 2
+    assert sweep.source_meta["n_no_plane_frames"] == 1
+    assert sweep.source_meta["plane_frame_indices"]["Biparietal standard plane"] == [0]
+    assert sweep.source_meta["plane_frame_indices"]["Heart standard plane"] == [1]
+    assert len(sweep.instances) == 2
+    labels = {inst.classification_label for inst in sweep.instances}
+    assert labels == {0, 2}
+
+
+def test_pbf_us1_sweep_video_frame_order(pbf_us1_root: Path):
+    entries = [
+        e for e in PBFUS1Adapter(pbf_us1_root).iter_entries()
+        if e.modality_type == "pseudo_video"
+    ]
+    exam_a = "Obstetrics Exam - 01-Jan-2023_10_AM"
+    sweep = next(e for e in entries if e.study_id == exam_a)
+    assert sweep.num_frames == 3
+    assert [Path(p).name for p in sweep.image_paths] == [
+        "cineframe_1_2023-01-01T100000.jpeg",
+        "cineframe_2_2023-01-01T100041.jpeg",
+        "cineframe_3_2023-01-01T100123.jpeg",
+    ]
 
 
 def test_pbf_us1_resolve_root_nested(pbf_us1_root: Path):
@@ -1360,7 +1424,7 @@ def test_pbf_us1_resolve_root_nested(pbf_us1_root: Path):
     # Temporarily rename folder to "PBF-US1" if needed — fixture already is PBF-US1.
     # Test that passing pbf_us1_root directly works (resume.csv present).
     entries = list(PBFUS1Adapter(pbf_us1_root).iter_entries())
-    assert len(entries) == 7
+    assert len(entries) == 10
 
 
 def test_pbf_us1_split_override(pbf_us1_root: Path):

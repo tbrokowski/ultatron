@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stage ultrasound datasets from Capstor Store → Scratch (rsync via StorageConfig).
+Stage ultrasound datasets from Capstor Store → Scratch (rsync or cp via StorageConfig).
 
 Requires Python >= 3.10 (same as the rest of Ultatron). The cluster default
 `python3` on bare nodes is often too old; use the training stack, e.g.:
@@ -30,15 +30,26 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+# Stub out the data package before importing to avoid eagerly loading
+# torch-dependent modules from data/__init__.py.  This script only needs
+# data.infra.storage which has no heavy dependencies.
+import types as _types
+
+if "data" not in sys.modules:
+    _data_stub = _types.ModuleType("data")
+    _data_stub.__path__ = [str(REPO / "data")]  # type: ignore[attr-defined]
+    _data_stub.__package__ = "data"
+    sys.modules["data"] = _data_stub
+
 from data.infra.storage import StorageConfig
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Stage Store → Scratch via rsync.")
+    p = argparse.ArgumentParser(description="Stage Store → Scratch (rsync or cp).")
     p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print rsync commands without running them.",
+        help="Print copy commands without running them.",
     )
     p.add_argument(
         "--anatomy",

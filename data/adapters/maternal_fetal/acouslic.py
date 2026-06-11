@@ -2,30 +2,31 @@
 data/adapters/maternal_fetal/acouslic.py  ·  ACOUSLIC-AI adapter
 =================================================================
 
-ACOUSLIC-AI: fetal abdominal-circumference ultrasound sweep dataset
-(Grand Challenge 2023).  Each sample is a 3-D MetaImage sweep of a
-fetal abdomen paired with a binary segmentation mask.
+ACOUSLIC-AI: fetal abdominal-circumference blind-sweep ultrasound dataset
+(Grand Challenge / MICCAI 2024).  Each case is a MetaImage stack of 840
+cine frames (744×562) acquired via the 6-sweep Obstetric Sweep Protocol
+(OSP); we emit one manifest entry per OSP sweep (140 frames each).
 
 Layout on disk:
   {root}/
   └── acouslic-ai-train-set/
-      ├── images/stacked_fetal_ultrasound/<uuid>.mha   (300 sweeps)
+      ├── images/stacked_fetal_ultrasound/<uuid>.mha   (300 cases)
       ├── masks/stacked_fetal_abdomen/<uuid>.mha       (300 masks)
       └── circumferences/
           └── fetal_abdominal_circumferences_per_sweep.csv
 
-Volume format (both image and mask):
-  MetaImage (.mha), uint8
-  Shape (W=744, H=562, N=840) on disk → numpy (840, 562, 744) after loading.
-  Third axis is the stacked 2-D sweep frames; isotropic spacing 0.28 mm.
+MetaImage format (both image and mask):
+  uint8, DimSize = 744 562 840 → numpy (840, 562, 744) after loading.
+  Temporal axis stacks all six OSP sweeps (140 frames each); spacing 0.28 mm.
 
 CSV columns:
   uuid, subject_id, sweep_1_ac_mm … sweep_6_ac_mm
-  Each row is sparse (typically 1–3 of the 6 sweep columns populated).
-  Multiple rows (sweeps) may share the same subject_id.
+  Each row is one case; up to six per-sweep AC reference measurements.
+
+Manifest: 300 cases × 6 OSP sweeps = 1 800 video entries.
 
 Split strategy: group by subject_id to avoid leakage across sweeps of the
-same patient.  Splitting on uuid would contaminate val/test sets.
+same patient.
 """
 from __future__ import annotations
 
@@ -36,8 +37,10 @@ from typing import Dict, Iterator, List, Optional
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry
 
-_SWEEP_COLS = [f"sweep_{i}_ac_mm" for i in range(1, 7)]
-_N_FRAMES   = 840   # constant across all ACOUSLIC sweeps
+_SWEEP_COLS        = [f"sweep_{i}_ac_mm" for i in range(1, 7)]
+_N_SWEEPS          = 6
+_N_FRAMES          = 840
+_FRAMES_PER_SWEEP  = _N_FRAMES // _N_SWEEPS
 
 
 class ACOUSLICAIAdapter(BaseAdapter):
@@ -56,11 +59,9 @@ class ACOUSLICAIAdapter(BaseAdapter):
     @classmethod
     def _resolve_dataset_root(cls, root: str | Path) -> Path:
         root = Path(root)
-        # Accept root pointing to the parent; descend into acouslic-ai-train-set/
         candidate = root / "acouslic-ai-train-set"
         if candidate.is_dir():
             return candidate
-        # Accept root already being acouslic-ai-train-set/
         if (root / "images" / "stacked_fetal_ultrasound").is_dir():
             return root
         raise FileNotFoundError(
@@ -68,7 +69,7 @@ class ACOUSLICAIAdapter(BaseAdapter):
         )
 
     def _load_csv(self) -> Dict[str, dict]:
-        """Return {uuid: {subject_id, ac_mm}} from the circumferences CSV."""
+        """Return {uuid: {subject_id, sweep_ac_mm: {1..6: float|None}}} from CSV."""
         csv_path = (
             self.root
             / "circumferences"
@@ -84,20 +85,27 @@ class ACOUSLICAIAdapter(BaseAdapter):
                 if not uuid:
                     continue
                 subject_id = str(row.get("subject_id", "")).strip().lstrip("0") or "0"
-                ac_vals: List[float] = []
-                for col in _SWEEP_COLS:
+                sweep_ac: Dict[int, Optional[float]] = {}
+                for sweep_idx, col in enumerate(_SWEEP_COLS, start=1):
                     raw = row.get(col, "").strip()
-                    if raw:
-                        try:
-                            ac_vals.append(float(raw))
-                        except ValueError:
-                            pass
+                    if not raw:
+                        sweep_ac[sweep_idx] = None
+                        continue
+                    try:
+                        sweep_ac[sweep_idx] = float(raw)
+                    except ValueError:
+                        sweep_ac[sweep_idx] = None
                 out[uuid] = {
                     "subject_id": subject_id,
-                    "ac_mm": float(sum(ac_vals) / len(ac_vals)) if ac_vals else None,
-                    "n_ac_vals": len(ac_vals),
+                    "sweep_ac_mm": sweep_ac,
                 }
         return out
+
+    @staticmethod
+    def _sweep_frame_indices(sweep_idx: int) -> List[int]:
+        start = (sweep_idx - 1) * _FRAMES_PER_SWEEP
+        end   = sweep_idx * _FRAMES_PER_SWEEP
+        return list(range(start, end))
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
         img_dir  = self.root / "images" / "stacked_fetal_ultrasound"
@@ -113,7 +121,6 @@ class ACOUSLICAIAdapter(BaseAdapter):
             if p.is_file() and p.suffix.lower() == ".mha"
         )
 
-        # Build subject-level split map to avoid leakage across sweeps.
         subject_uuids: Dict[str, List[str]] = {}
         for img_path in images:
             uuid = img_path.stem
@@ -130,51 +137,60 @@ class ACOUSLICAIAdapter(BaseAdapter):
             uuid       = img_path.stem
             row        = self._meta.get(uuid, {})
             subject_id = row.get("subject_id") or uuid
-            ac_mm      = row.get("ac_mm")
-            n_ac_vals  = row.get("n_ac_vals", 0)
+            sweep_ac   = row.get("sweep_ac_mm") or {}
 
             mask_path = mask_dir / img_path.name
             has_mask  = mask_path.exists()
             split     = self.split_override or subject_split.get(subject_id, "train")
 
-            if has_mask:
-                instance = self._make_instance(
-                    instance_id    = uuid,
-                    label_raw      = "fetal_abdomen",
-                    label_ontology = "fetal_abdomen",
-                    mask_path      = str(mask_path),
-                    is_promptable  = True,
-                    measurement_mm = ac_mm,
-                )
-                task_type = "segmentation"
-            else:
-                instance = self._make_instance(
-                    instance_id    = uuid,
-                    label_raw      = "fetal_abdomen",
-                    label_ontology = "fetal_abdomen",
-                    is_promptable  = False,
-                    measurement_mm = ac_mm,
-                )
-                task_type = "ssl_only"
+            for sweep_idx in range(1, _N_SWEEPS + 1):
+                series_id = f"{uuid}_sweep{sweep_idx}"
+                ac_mm     = sweep_ac.get(sweep_idx)
+                frame_idx = self._sweep_frame_indices(sweep_idx)
 
-            yield self._make_entry(
-                str(img_path),
-                split         = split,
-                modality      = "volume",
-                instances     = [instance],
-                study_id      = subject_id,
-                series_id     = uuid,
-                is_3d         = True,
-                num_frames    = _N_FRAMES,
-                view_type     = "fetal_abdomen_sweep",
-                has_mask      = has_mask,
-                task_type     = task_type,
-                ssl_stream    = "image",
-                is_promptable = has_mask,
-                source_meta   = {
-                    "uuid":       uuid,
-                    "subject_id": subject_id,
-                    "ac_mm":      ac_mm,
-                    "n_ac_vals":  n_ac_vals,
-                },
-            )
+                if has_mask:
+                    instance = self._make_instance(
+                        instance_id    = series_id,
+                        label_raw      = "fetal_abdomen",
+                        label_ontology = "fetal_abdomen",
+                        mask_path      = str(mask_path),
+                        is_promptable  = True,
+                        measurement_mm = ac_mm,
+                    )
+                    task_type = "segmentation"
+                else:
+                    instance = self._make_instance(
+                        instance_id    = series_id,
+                        label_raw      = "fetal_abdomen",
+                        label_ontology = "fetal_abdomen",
+                        is_promptable  = False,
+                        measurement_mm = ac_mm,
+                    )
+                    task_type = "ssl_only"
+
+                yield self._make_entry(
+                    str(img_path),
+                    split              = split,
+                    modality           = "video",
+                    instances          = [instance],
+                    study_id           = subject_id,
+                    series_id          = series_id,
+                    is_3d              = False,
+                    num_frames         = _FRAMES_PER_SWEEP,
+                    frame_indices      = frame_idx,
+                    is_cine            = True,
+                    has_temporal_order = True,
+                    view_type          = "fetal_abdomen_sweep",
+                    has_mask           = has_mask,
+                    task_type          = task_type,
+                    ssl_stream         = "video",
+                    is_promptable      = has_mask,
+                    source_meta        = {
+                        "uuid":       uuid,
+                        "subject_id": subject_id,
+                        "sweep_idx":  sweep_idx,
+                        "ac_mm":      ac_mm,
+                        "frame_start": frame_idx[0],
+                        "frame_end":   frame_idx[-1] + 1,
+                    },
+                )

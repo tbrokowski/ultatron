@@ -13,10 +13,16 @@ Usage:
         --out run1_train.jsonl \
         --datasets CAMUS EchoNet-Dynamic
 
+    # Prefer Scratch paths (default) when building from run1 config:
+    python scripts/build_manifest.py \
+        --config configs/run1/data_run1.yaml \
+        --prefer-scratch \
+        --out dataset_exploration_outputs/run1/run1_train_v2.jsonl
+
     # Filter an existing manifest to remove entries with missing files:
     python scripts/build_manifest.py \
-        --filter-missing dataset_exploration_outputs/run1/run1_train.jsonl \
-        --out dataset_exploration_outputs/run1/run1_train_filtered.jsonl
+        --filter-missing dataset_exploration_outputs/run1/run1_train_v2.jsonl \
+        --out dataset_exploration_outputs/run1/run1_train_v2_filtered.jsonl
 
 This script:
   1. Reads dataset root paths from config
@@ -43,6 +49,33 @@ from data.adapters import build_manifest_for_dataset
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("build_manifest")
+
+
+def _resolve_roots_from_config(
+    cfg: dict,
+    prefer_scratch: bool = True,
+) -> dict[str, str]:
+    """
+    Map dataset_id -> root path for manifest building.
+
+    When prefer_scratch is True, use Scratch if staged, else fall back to Store
+    paths listed in the config.
+    """
+    from data.infra.storage import StorageConfig
+
+    storage = StorageConfig()
+    store_roots: dict[str, str] = cfg.get("datasets", {})
+    resolved: dict[str, str] = {}
+
+    for ds_id, store_path in store_roots.items():
+        if prefer_scratch:
+            scratch_path = storage.resolve_dataset_root(ds_id, prefer_scratch=True)
+            if scratch_path is not None:
+                resolved[ds_id] = str(scratch_path)
+                continue
+        resolved[ds_id] = str(store_path)
+
+    return resolved
 
 
 def _filter_missing(src: Path, dst: Path) -> None:
@@ -74,6 +107,14 @@ def main():
                         help="Force all entries to this split (train/val/test)")
     parser.add_argument("--datasets", nargs="*", default=None,
                         help="Subset of dataset IDs to process")
+    parser.add_argument("--all-adapters", action="store_true",
+                        help="Use all ADAPTER_REGISTRY datasets with resolvable store/scratch roots")
+    parser.add_argument(
+        "--prefer-scratch",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When using --config, prefer staged Scratch roots over Store paths (default: on)",
+    )
     parser.add_argument("--filter-missing", default=None, metavar="MANIFEST",
                         help="Filter an existing manifest, dropping entries with missing files")
     args = parser.parse_args()
@@ -82,14 +123,26 @@ def main():
         _filter_missing(Path(args.filter_missing), Path(args.out))
         return
 
-    if not args.config:
-        parser.error("--config is required unless --filter-missing is used")
+    if not args.config and not args.all_adapters:
+        parser.error("--config is required unless --filter-missing or --all-adapters is used")
 
-    cfg = yaml.safe_load(open(args.config))  # type: ignore[arg-type]
-    dataset_roots = cfg.get("datasets", {})
-
-    ds_ids = args.datasets or list(dataset_roots.keys())
-    log.info(f"Building manifest for {len(ds_ids)} datasets → {args.out}")
+    if args.all_adapters:
+        from data.infra.storage import StorageConfig
+        storage = StorageConfig()
+        dataset_roots = storage.resolve_all_dataset_roots(prefer_scratch=True)
+        ds_ids = args.datasets or list(dataset_roots.keys())
+        log.info(
+            f"Building manifest for {len(ds_ids)} adapters "
+            f"({len(dataset_roots)} with data on disk) → {args.out}"
+        )
+    else:
+        cfg = yaml.safe_load(open(args.config))  # type: ignore[arg-type]
+        dataset_roots = _resolve_roots_from_config(cfg, prefer_scratch=args.prefer_scratch)
+        ds_ids = args.datasets or list(cfg.get("datasets", {}).keys())
+        root_mode = "scratch-preferred" if args.prefer_scratch else "config-store"
+        log.info(
+            f"Building manifest for {len(ds_ids)} datasets ({root_mode}) → {args.out}"
+        )
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
 

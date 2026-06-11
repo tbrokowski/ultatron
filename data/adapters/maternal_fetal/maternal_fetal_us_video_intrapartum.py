@@ -233,7 +233,10 @@ class MaternalFetalUSVideoIntrapartumAdapter(BaseAdapter):
     def _load_landmarks(path: Path) -> Dict[str, dict]:
         if not path.exists():
             return {}
-        raw = path.read_text(encoding="utf-8").strip()
+        try:
+            raw = path.read_text(encoding="utf-8-sig").strip()
+        except UnicodeDecodeError:
+            return {}
         if not raw:
             return {}
         try:

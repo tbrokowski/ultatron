@@ -173,7 +173,7 @@ def test_generic_mask_adapter_thyroid(tn3k_root):
 
 
 def test_generic_mask_adapter_split_inference(tn3k_root):
-    """Verify that split inference respects splits.json."""
+    """Verify that TN3K train/val/test splits are assigned from folder layout."""
     from data.adapters import ADAPTER_REGISTRY
 
     TN3KAdapter = ADAPTER_REGISTRY["TN3K"]
@@ -197,12 +197,56 @@ def test_generic_mask_split_override(tn3k_root):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Segthy (3D thyroid NIfTI volumes)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_segthy_adapter_slices_volumes(monkeypatch, tmp_path):
+    """Segthy should emit one entry per labelled axial slice with frame_idx metadata."""
+    import numpy as np
+    from data.adapters.thyroid.segthy import SegthyAdapter
+
+    us_dir  = tmp_path / "ground_truth_data" / "US"
+    lbl_dir = tmp_path / "ground_truth_data" / "US_thyroid_label"
+    us_dir.mkdir(parents=True)
+    lbl_dir.mkdir(parents=True)
+
+    vol_path = us_dir / "001_P1_1_left_US.nii"
+    lbl_path = lbl_dir / "001_P1_1_left.nii"
+    vol_path.touch()
+    lbl_path.touch()
+
+    img = np.full((4, 8, 8), 120, dtype=np.uint8)
+    lbl = np.zeros((4, 8, 8), dtype=np.uint8)
+    lbl[1, 2:6, 2:6] = 1
+    lbl[3, 1:5, 1:5] = 1
+
+    def _fake_read(path: str):
+        return lbl if "US_thyroid_label" in path else img
+
+    monkeypatch.setattr(
+        "data.adapters.thyroid.segthy._read_nifti_array", _fake_read
+    )
+
+    entries = list(SegthyAdapter(tmp_path).iter_entries())
+    _validate_entries(entries, min_count=2)
+
+    assert all(e.dataset_id == "Segthy-Dataset" for e in entries)
+    assert all(e.task_type == "segmentation" for e in entries)
+    assert all(e.has_mask for e in entries)
+    assert {e.source_meta["frame_idx"] for e in entries} == {1, 3}
+    assert all(e.instances[0].label_ontology == "whole_thyroid" for e in entries)
+    assert all(e.instances[0].mask_path == str(lbl_path) for e in entries)
+    assert all(e.image_paths[0] == str(vol_path) for e in entries)
+    assert {e.study_id for e in entries} == {"001"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # BUSI
 # ══════════════════════════════════════════════════════════════════════════════
 
 def test_busi_adapter_basic(busi_root):
     """BUSI adapter should yield image entries for benign, malignant, and normal."""
-    from data.adapters.busi import BUSIAdapter
+    from data.adapters.breast.busi import BUSIAdapter
 
     entries = list(BUSIAdapter(busi_root).iter_entries())
     _validate_entries(entries, min_count=4)

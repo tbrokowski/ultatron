@@ -62,27 +62,40 @@ class IUGC2024Adapter(BaseAdapter):
         root = Path(root)
         if cls._looks_like_dataset_root(root):
             return root
-        for name in ("new", "IUGC2024", "IUGC-2024"):
+        for name in ("new", "DatasetV3", "IUGC2024", "IUGC-2024"):
             candidate = root / name
             if cls._looks_like_dataset_root(candidate):
                 return candidate
-            nested = candidate / "new"
-            if cls._looks_like_dataset_root(nested):
-                return nested
+            for nested in (candidate / "new", candidate):
+                if cls._looks_like_dataset_root(nested):
+                    return nested
         raise FileNotFoundError(
-            f"{cls.DATASET_ID}: expected new/{{train,val,test}} under {root}"
+            f"{cls.DATASET_ID}: expected train/val/test split dirs under {root}"
         )
 
     @staticmethod
     def _looks_like_dataset_root(path: Path) -> bool:
-        return path.is_dir() and any((path / split / "videos").is_dir()
-                                     for split, *_rest in SPLITS)
+        if not path.is_dir():
+            return False
+        return any(IUGC2024Adapter._find_split_dir(path, split) is not None
+                   for split, *_rest in SPLITS)
+
+    @staticmethod
+    def _find_split_dir(root: Path, split_name: str) -> Optional[Path]:
+        direct = root / split_name
+        if (direct / "videos").is_dir():
+            return direct
+        for candidate in sorted(root.glob(f"{split_name}*")):
+            nested = candidate / split_name
+            if (nested / "videos").is_dir():
+                return nested
+        return None
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
         found_any = False
         for split_name, info_csv_name, cls_csv_name, seg_index_col in SPLITS:
-            split_dir = self.root / split_name
-            if not split_dir.exists():
+            split_dir = self._find_split_dir(self.root, split_name)
+            if split_dir is None:
                 continue
             found_any = True
             yield from self._iter_split(
@@ -227,8 +240,16 @@ class IUGC2024Adapter(BaseAdapter):
     def _load_landmarks(path: Path) -> Dict[str, dict]:
         if not path.exists():
             return {}
-        with path.open(encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            raw = path.read_text(encoding="utf-8-sig").strip()
+        except UnicodeDecodeError:
+            return {}
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
         return data if isinstance(data, dict) else {}
 
     @staticmethod

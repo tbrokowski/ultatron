@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from data.adapters.erdes import ERDESAdapter
+from data.adapters.ocular.erdes import ERDESAdapter
 
 from ._explore_utils import run_adapter_explore
 

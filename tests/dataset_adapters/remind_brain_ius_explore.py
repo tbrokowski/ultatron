@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from data.adapters.remind_brain_ius import REMINDBrainIUSAdapter
+from data.adapters.brain.remind_brain_ius import REMINDBrainIUSAdapter
 
 from ._explore_utils import run_adapter_explore
 

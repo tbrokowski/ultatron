@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from data.adapters.annotated_heterogeneous_us_db import AnnotatedHeterogeneousUSDBAdapter
+from data.adapters.multi_organ.annotated_heterogeneous_us_db import AnnotatedHeterogeneousUSDBAdapter
 
 
 def test_annotated_heterogeneous_us_db_adapter_preserves_weak_labels_and_noise_filter(

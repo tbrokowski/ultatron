@@ -9,23 +9,26 @@ MIMIC-IV-ECHO: ~525,000 echocardiogram DICOM clips from Beth Israel Deaconess.
 
 Actual layout after wget download:
   {root}/physionet.org/files/mimic-iv-echo/1.0/
-    echo-record-list.csv          ← authoritative index of all 525k records
-    echo-study-list.csv
-    structured-measurement.csv.gz
+    echo-record-list.csv          ← one row per .dcm (dicom_filepath, study_id, subject_id)
+    echo-study-list.csv           ← study_id → measurement_id linkage (~99% coverage)
+    structured_measurement.csv.gz ← long-format echo measurements keyed on measurement_id
     files/
       p{prefix}/p{subject_id}/s{study_id}/{study_id}_{series}.dcm
 
-The adapter is driven from echo-record-list.csv (not a disk scan), but emits
-only DICOM files that are present on disk.  A partial download should produce a
-partial training manifest, not runtime missing-file failures in the dataloader.
+Each .dcm is a single multi-frame cine (one cardiac view = one temporal sequence).
+The adapter is driven from echo-record-list.csv (not a disk scan) and emits only
+DICOM files that are present on disk.  A partial download produces a partial
+training manifest rather than runtime missing-file failures in the dataloader.
+
+measurement_id is joined from echo-study-list.csv so that downstream tasks can
+link manifest entries to structured echo measurements without re-reading CSVs.
 """
 from __future__ import annotations
 
 import csv
-import gzip
 import logging
 from pathlib import Path
-from typing import Iterator
+from typing import Dict, Iterator
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry
@@ -43,12 +46,15 @@ class MIMICEchoAdapter(BaseAdapter):
     dicom_filepath column is a path relative to the 1.0 base directory,
     e.g. files/p10/p10002221/s94106955/94106955_0001.dcm.  Missing files are
     skipped so generated training manifests are directly trainable.
+
+    echo-study-list.csv is joined on study_id to populate measurement_id in
+    source_meta, enabling downstream linkage to structured_measurement.csv.gz.
     """
 
     DATASET_ID     = "MIMIC-IV-ECHO"
     ANATOMY_FAMILY = "cardiac"
     SONODQS        = "gold"
-    DOI            = "https://doi.org/10.13026/7rbq-q661"
+    DOI            = "https://doi.org/10.13026/nrjh-5r77"
 
     def _base_dir(self) -> Path:
         """Locate the 1.0 base directory regardless of how root was provided."""
@@ -61,22 +67,35 @@ class MIMICEchoAdapter(BaseAdapter):
         return deep  # will raise FileNotFoundError below
 
     @staticmethod
-    def _has_pixel_data(path: Path) -> bool:
-        try:
-            import pydicom
-        except ImportError:
-            raise RuntimeError("pydicom required to validate MIMIC-IV-ECHO DICOM records")
+    def _load_study_measurements(base: Path) -> Dict[str, str]:
+        """
+        Load echo-study-list.csv and return a study_id → measurement_id mapping.
 
-        try:
-            ds = pydicom.dcmread(
-                path,
-                force=True,
-                specific_tags=["PixelData", "FloatPixelData", "DoubleFloatPixelData"],
+        ~99% of DICOM studies in MIMIC-IV-ECHO have a corresponding structured
+        measurement record within two days.  Studies without one map to "".
+        """
+        study_csv = base / "echo-study-list.csv"
+        if not study_csv.exists():
+            log.warning(
+                "MIMIC-IV-ECHO: echo-study-list.csv not found at %s; "
+                "measurement_id will be empty for all entries.",
+                study_csv,
             )
-        except Exception as exc:
-            log.warning("MIMIC-IV-ECHO: unreadable DICOM skipped: %s (%s)", path, exc)
-            return False
-        return "PixelData" in ds or "FloatPixelData" in ds or "DoubleFloatPixelData" in ds
+            return {}
+        mapping: Dict[str, str] = {}
+        with open(study_csv, newline="") as fh:
+            for row in csv.DictReader(fh):
+                sid = row.get("study_id", "").strip()
+                mid = row.get("measurement_id", "").strip()
+                if sid:
+                    mapping[sid] = mid
+        log.info(
+            "MIMIC-IV-ECHO: loaded %d study→measurement links from echo-study-list.csv "
+            "(%d with measurement_id)",
+            len(mapping),
+            sum(1 for v in mapping.values() if v),
+        )
+        return mapping
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
         base = self._base_dir()
@@ -88,29 +107,28 @@ class MIMICEchoAdapter(BaseAdapter):
                 "Expected layout: {root}/physionet.org/files/mimic-iv-echo/1.0/echo-record-list.csv"
             )
 
+        study_measurements = self._load_study_measurements(base)
+
         # Read all rows first to get total count for split assignment
         with open(record_csv, newline="") as fh:
             rows = list(csv.DictReader(fh))
 
         n = len(rows)
-        log.info(f"MIMIC-IV-ECHO: {n:,} records in echo-record-list.csv")
+        log.info("MIMIC-IV-ECHO: %d records in echo-record-list.csv", n)
 
         emitted = 0
         missing = 0
-        no_pixels = 0
         for i, row in enumerate(rows):
             rel_path   = row["dicom_filepath"]          # e.g. files/p10/p10002221/s94106955/…
             abs_path   = base / rel_path
             if not abs_path.exists():
                 missing += 1
                 continue
-            if not self._has_pixel_data(abs_path):
-                no_pixels += 1
-                continue
 
-            study_id   = row["study_id"]
-            subject_id = row["subject_id"]
-            split      = self._infer_split(f"{subject_id}_{study_id}", i, n)
+            study_id      = row["study_id"]
+            subject_id    = row["subject_id"]
+            measurement_id = study_measurements.get(study_id, "")
+            split         = self._infer_split(f"{subject_id}_{study_id}", i, n)
 
             emitted += 1
             yield self._make_entry(
@@ -126,6 +144,7 @@ class MIMICEchoAdapter(BaseAdapter):
                 source_meta        = {
                     "subject_id":           subject_id,
                     "study_id":             study_id,
+                    "measurement_id":       measurement_id,
                     "acquisition_datetime": row.get("acquisition_datetime", ""),
                     "doi":                  self.DOI,
                 },
@@ -136,9 +155,4 @@ class MIMICEchoAdapter(BaseAdapter):
                 "MIMIC-IV-ECHO: skipped %d missing DICOM records; emitted %d available records.",
                 missing,
                 emitted,
-            )
-        if no_pixels:
-            log.warning(
-                "MIMIC-IV-ECHO: skipped %d DICOM records without pixel data.",
-                no_pixels,
             )

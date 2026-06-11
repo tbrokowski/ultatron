@@ -27,7 +27,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from data.adapters.busi import BUSIAdapter
+from data.adapters.breast.busi import BUSIAdapter
 from data.schema.manifest import (
     ManifestWriter,
     USManifestEntry,

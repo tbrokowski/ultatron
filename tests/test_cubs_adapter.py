@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from data.adapters.cubs import CUBSAdapter
+from data.adapters.vascular.cubs import CUBSAdapter
 
 
 def test_cubs_adapter_maps_measurement_sample(cubs_root: Path):

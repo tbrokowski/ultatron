@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from data.adapters.stu_hospital import STUHospitalAdapter
+from data.adapters.multi_organ.stu_hospital import STUHospitalAdapter
 
 
 def test_stu_hospital_adapter_maps_png_mask_pairs(stu_hospital_root: Path):

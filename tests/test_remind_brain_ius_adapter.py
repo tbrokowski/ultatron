@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from data.adapters.remind_brain_ius import REMINDBrainIUSAdapter
+from data.adapters.brain.remind_brain_ius import REMINDBrainIUSAdapter
 
 
 def test_remind_brain_ius_adapter_filters_to_us_dicom_series(remind_brain_ius_root: Path):

@@ -624,6 +624,16 @@ def _register_default_heads():
         dataset_ids=["TN3K", "TN5000", "DDTI", "TNSCUI", "TG3K"],
     ))
     R.register(HeadSpec(
+        head_id="thyroid_whole_seg",
+        head_type=HeadType.BINARY_SEG,
+        loss_type=LossType.DICE_CE,
+        anatomy_family="thyroid",
+        label_key="seg_mask",
+        n_classes=1,
+        class_names=["whole_thyroid"],
+        dataset_ids=["Segthy-Dataset"],
+    ))
+    R.register(HeadSpec(
         head_id="thyroid_tirads_ordinal",
         head_type=HeadType.ORDINAL_CLS,
         loss_type=LossType.CORAL,

@@ -41,7 +41,7 @@ _ROOT = Path(__file__).parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from data.adapters.busi import BUSIAdapter
+from data.adapters.breast.busi import BUSIAdapter
 from data.adapters.cardiac.camus import CAMUSAdapter
 from data.adapters.cardiac.echonet import EchoNetDynamicAdapter
 from data.adapters.cardiac.echonet_pediatric import EchoNetPediatricAdapter

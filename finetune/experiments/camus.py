@@ -230,7 +230,7 @@ class CAMUSFinetune(FinetuneExperiment):
     @torch.no_grad()
     def compute_val_metrics(self, val_loader: DataLoader) -> dict:
         self.head.eval()
-        self.img_branch.teacher.eval()
+        self.encoder.eval()
 
         per_sample = []
         total_loss = 0.0
@@ -241,7 +241,7 @@ class CAMUSFinetune(FinetuneExperiment):
                      if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
 
-            feats    = self.img_branch.forward_teacher(batch["image"])
+            feats    = self.encoder.encode_image(batch["image"])
             logits   = self.head(feats["patch_tokens"])
             pred     = F.interpolate(logits, size=batch["mask"].shape[-2:],
                                      mode="bilinear", align_corners=False)
@@ -299,12 +299,12 @@ class CAMUSFinetune(FinetuneExperiment):
         images, preds, gts, ids = [], [], [], []
 
         self.head.eval()
-        self.img_branch.teacher.eval()
+        self.encoder.eval()
         with torch.no_grad():
             for batch in test_loader:
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
-                feats  = self.img_branch.forward_teacher(batch["image"])
+                feats  = self.encoder.encode_image(batch["image"])
                 logits = self.head(feats["patch_tokens"])
                 pred   = F.interpolate(logits, size=(256, 256),
                                        mode="bilinear", align_corners=False)

@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from data.adapters.brain_3d_us_neuroimages import ThreeDUSNeuroimagesAdapter
+from data.adapters.brain.brain_3d_us_neuroimages import ThreeDUSNeuroimagesAdapter
 
 
 def test_brain_3d_us_neuroimages_adapter_maps_unlabeled_brain_volumes(

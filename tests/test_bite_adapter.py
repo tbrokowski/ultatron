@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from data.adapters.bite import BITEAdapter
+from data.adapters.brain.bite import BITEAdapter
 
 
 def test_bite_adapter_keeps_only_ultrasound_content(bite_root: Path):

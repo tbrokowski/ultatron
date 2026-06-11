@@ -228,7 +228,7 @@ class USFoundationDataModule:
         This replaces the zip(image_loader, video_loader) approach in Phase 3,
         guaranteeing n_align_pairs == batch_size every step.
         """
-        from data.pipeline.collators_extended import PairedSSLCollator
+        from data.pipeline.collators import PairedSSLCollator
         self.setup()
         return DataLoader(
             self._paired_dataset,
@@ -245,10 +245,10 @@ class USFoundationDataModule:
         """
         Phase 3: yields AlignedDualStreamBatch objects by zipping both loaders.
         Alignment pairs link image/video samples sharing the same study_id and
-        overlapping frame ranges (see collators_extended.build_alignment_pairs).
+        overlapping frame ranges (see collators.build_alignment_pairs).
         The shorter loader determines epoch length.
         """
-        from data.pipeline.collators_extended import make_aligned_dual_stream
+        from data.pipeline.collators import make_aligned_dual_stream
         self.setup()
         img_loader = self.image_loader()
         vid_loader = self.video_loader()

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from data.adapters.annotated_heterogeneous_us_db import AnnotatedHeterogeneousUSDBAdapter
+from data.adapters.multi_organ.annotated_heterogeneous_us_db import AnnotatedHeterogeneousUSDBAdapter
 
 from ._explore_utils import run_adapter_explore
 

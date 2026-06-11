@@ -1,22 +1,40 @@
 # configs/run1/data_run1.yaml
-# First run: all available cardiac + BUSI + Benin-LUS + RSA-LUS
-# Single-node (4 GPUs), 10k steps (2k image / 4k video / 4k hybrid), dinov3_l + vjepa2_l
+# Run1 data config — dinov3_l + vjepa2_l, 10k steps.
 #
-# Cardiac datasets added in this revision:
-#   CAMUS, EchoNet-Dynamic, EchoNet-Pediatric, EchoNet-LVH,
-#   MIMIC-IV-ECHO, MIMIC-IV-Echo-LVVol-A4C, TED, Unity-Echo,
-#   CardiacUDC, EchoCP
+# Manifest: built from all datasets below (118) via:
+#   python3 scripts/build_manifest.py \
+#     --config configs/run1/data_run1.yaml \
+#     --out dataset_exploration_outputs/run1/run1_train_v2.jsonl
+#
+# Storage layout:
+#   Store:   /capstor/store/cscs/swissai/a127/ultrasound/raw/{anatomy}/{dataset}/
+#   Scratch: /capstor/scratch/cscs/$USER/ultrasound/raw/{anatomy}/{dataset}/
+#
+# datasets: below lists Store paths (source for staging). Manifests are built
+# with Scratch paths when staged (build_manifest.py --prefer-scratch).
+# Stage all: bash scripts/submit_stage.sh --config configs/run1/data_run1.yaml
+#   Cardiac (15), Breast (14), Lung (13), Liver (10), Fetal (17), Thyroid (9),
+#   Vascular (2), Brain (6), Kidney (2), Gallbladder (3), Abdomen (2),
+#   Ovarian (4), Prostate (3), Musculoskeletal (11), Nerve (2),
+#   Multi-organ (3), Ocular (1), Skin (1)
+#
+# Rebuild manifest with:
+#   python scripts/build_manifest.py \
+#     --config configs/run1/data_run1.yaml \
+#     --out dataset_exploration_outputs/run1/run1_train_v2.jsonl
 # =============================================================================
 
 manifest:
-  # Built by:
-  #   python scripts/build_manifest.py \
-  #     --config configs/run1/data_run1.yaml \
-  #     --out dataset_exploration_outputs/run1/run1_train.jsonl
-  # On CSCS: /capstor/scratch/cscs/$USER/ultrasound/manifests/run1_train.jsonl
-  path: "dataset_exploration_outputs/run1/run1_train.jsonl"
+  # v1 (13 datasets, 666k entries):
+  #   dataset_exploration_outputs/run1/run1_train.jsonl
+  # v1.5 (partial, 32 datasets):
+  #   dataset_exploration_outputs/run1/run1_train_all.jsonl
+  # v2 (109 datasets — canonical run1 manifest, lives in repo):
+  path: "dataset_exploration_outputs/run1/run1_train_v2.jsonl"
   val_path: null
-  root_remap: null   # null → auto-remap store→scratch via CSCSConfig.remap_dict()
+  # {} → manifest paths are Scratch-absolute; no store→scratch remap at load time.
+  # Use null only for legacy manifests that still contain Store paths.
+  root_remap: {}
 
 loaders:
   image_batch_size: 64
@@ -78,7 +96,7 @@ transforms:
       band_width_min: 0.20
       band_width_max: 0.50
       mask_ratio: 0.75
-      use_alp_bias: false
+      use_alp_bias: true
       perturb_phase: false
       phase_perturb_sigma: 0.10
       n_bands: 1
@@ -94,28 +112,177 @@ gram_anchoring:
   lambda: 0.0
 
 anatomy_weights:
-  cardiac:  0.7   # down-weighted: cardiac is now the largest single anatomy group
-  thyroid:  1.0
+  cardiac:  0.5   # heavily down-weighted: MIMIC-IV-ECHO alone is 525k entries
+  fetal:    1.0
   breast:   1.2
   lung:     1.5
+  liver:    1.5
+  thyroid:  1.5
+  brain:    2.0
+  vascular-carotid: 2.0
+  kidney:   1.0
+  gallbladder: 1.0
+  abdominal: 1.0
+  ovarian:  1.0
+  prostate: 1.0
+  musculoskeletal: 1.0
+  nerve:    1.0
+  multi_organ: 1.0
+  ocular:   1.0
+  skin:     1.0
 
 datasets:
-  # ── Cardiac ────────────────────────────────────────────────────────────────
-  CAMUS:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CAMUS"
-  EchoNet-Dynamic:          "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-Dynamic"
-  EchoNet-Pediatric:        "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-Pediatric"
-  EchoNet-LVH:              "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-LVH"
-  MIMIC-IV-ECHO:            "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/MIMIC-IV-Echo"
-  MIMIC-IV-Echo-LVVol-A4C:  "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/MIMIC-IV-Echo-LVVol-A4C"
-  TED:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/TED"
-  Unity-Echo:               "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/Unity"
-  CardiacUDC:               "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CardiacUDC"
-  EchoCP:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoCP"
-  # ── Breast ────────────────────────────────────────────────────────────────
-  BUSI:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
-  # ── Lung ──────────────────────────────────────────────────────────────────
-  Benin-LUS:                "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
-  RSA-LUS:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
+  # ── Cardiac ──
+  CACTUS:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CACTUS"
+  CAMUS:                       "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CAMUS"
+  CardiacUDC:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CardiacUDC"
+  EchoCP:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoCP"
+  EchoNet-Dynamic:             "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-Dynamic"
+  EchoNet-LVH:                 "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-LVH"
+  EchoNet-Pediatric:           "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-Pediatric"
+  MIMIC-EchoQA:                "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/MIMIC-EchoQA"
+  MIMIC-IV-ECHO:               "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/MIMIC-IV-Echo"
+  MIMIC-IV-Echo-LVVol-A4C:     "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/MIMIC-IV-Echo-LVVol-A4C"
+  MITEA:                       "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/MITEA"
+  TED:                         "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/TED"
+  Unity-Echo:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/Unity"
+  PhysioNet-cardiac:           "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/physionet.org"  # partial mirror; full data under MIMIC-IV-ECHO
+
+  # ── Breast ──
+  BUID:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUID"
+  BUS-B:                       "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/Breast US B Dataset"
+  BUS-BRA:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSBRA"
+  BUS-UC:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUS_UC"
+  BUS-UCLM:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUS-UCLM"
+  BUSI:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
+  BUSV:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/Miccai 2022 BUV Dataset"
+  BrEaST:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BrEaST"
+  Chinese-US-Report-Breast:    "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/Chinese US-Report Dataset (Breast)"
+  GDPH-SYSUCC:                 "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/GDPH&SYSUCC"
+  S1:                          "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/S1"
+  STAnford-BUS:                "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/STAnford-BUS"
+  busi-whu:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/busi-whu"
+  midi-b:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/midi-b"
+
+  # ── Lung ──
+  Benin-LUS:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
+  BeninVideos:                 "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/BeninVideos"
+  COVID-BLUES:                 "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/COVID-BLUES"
+  COVIDx-US:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/COVIDx-US"
+  LUS-multicenter-2025:        "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/LUS-multicenter-2025"
+  LUSS-PHANTOM:                "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/LUSS PHANTOM"
+  Lung-Database:               "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Lung Database"
+  OpenPOCUS:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/OpenPOCUS"
+  POCUS-LUS:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/POCUS-LUS"
+  Pocus-covid:                 "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Pocus covid"
+  RSA-LUS:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
+  ULTRASOUND-LUS:              "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/ULTRASOUND-LUS"
+  LUS-data:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/data"
+
+  # ── Liver ──
+  105US:                       "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/105US"
+  AUL:                         "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/AUL"
+  B-mode-CEUS-liver:           "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/B-mode-CEUS-liver"
+  BEHSOF:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/BEHSOF"
+  C-TRUS:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/C-TRUS"
+  LEPset:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/LEPset-pancreas"
+  fatty-liver-bmode:           "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/fatty-liver-dataset"
+  liver-CV-project:            "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/liver-CV-project"
+  AbdomenUS-liver:             "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/AbdomenUS/archive/abdominal_US/abdominal_US"  # mis-placed copy of AbdomenUS
+  ultrasound-elastography-liver-cancer: "/capstor/store/cscs/swissai/a127/ultrasound/raw/liver/ultrasound-elastography-liver-cancer"
+
+  # ── Fetal ──
+  ACOUSLIC-AI:                 "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/ACOUSLIC"
+  FASS:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/fetal-abdominal-structures-segmentation"
+  FETAL_PLANES_DB:             "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FETAL-PLANES-DB"
+  FH-PS-AOP:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FH-PS-AOP"
+  FOCUS:                       "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FOCUS"
+  FPUS23:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FPUS23"
+  FUGC:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FUGC"
+  HC18:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/HC18"
+  IUGC2024:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/IUGC-2024"
+  JNU-IFM:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/JNU-IFM"
+  Large-Scale-Fetal-Head-Biometry: "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/large-scale-fetal-head-biometry"
+  OC4US:                       "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/OC4US"
+  PBF-US1:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/PBF-US1"
+  PSFHS:                       "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/PSFHS"
+  maternal-fetal-us-video-intrapartum: "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/maternal-fetal-us-video-intrapartum"
+  ultrasound-fetus-dataset:    "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/ultrasound-fetus-dataset"
+  Fast-U-Net:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/Fast-U-Net"
+
+  # ── Thyroid ──
+  DDTI:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/DDTI"
+  Segthy-Dataset:              "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/Segthy-Dataset"
+  TG3K:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/TG3K"
+  TN3K:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/TN3K"
+  TN5000:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/TN5000"
+  Thyroid-Nodule-Pathology:    "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/Thyroid_Nodule_Pathology"
+  MuSeg:                       "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/MuSeg"  # on disk under thyroid/; verify anatomy
+  Micro-Ultrasound-Prostate-Segmentation: "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/Micro_Ultrasound_Prostate_Segmentation"  # prostate data; mis-placed under thyroid/
+
+  # ── Vascular / carotid ──
+  CUBS:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/vascular-carotid/CUBS"
+  Common-Carotid-Artery-Ultrasound-Images: "/capstor/store/cscs/swissai/a127/ultrasound/raw/vascular-carotid/Common-Carotid-Artery-Ultrasound-Images"
+
+  # ── Brain ──
+  3D-US-Neuroimages-Dataset:   "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/3D-US-Neuroimages-Dataset"
+  BITE:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/BITE"
+  REMIND-Brain-iUS:            "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/REMIND-Brain-iUS"
+  RESECT:                      "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/RESECT"
+  ReMIND2Reg:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/ReMIND2Reg"
+  braTioUS:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/brain/braTioUS"
+
+  # ── Kidney ──
+  KidneyUS:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/kidney/KidneyUS-US43d"
+  Normal-Kidney-CV:            "/capstor/store/cscs/swissai/a127/ultrasound/raw/kidney/Normal-Kidney-CV"
+
+  # ── Gallbladder / GI ──
+  GBCU:                        "/capstor/store/cscs/swissai/a127/ultrasound/raw/gallbladder/GBCU"
+  GIST514-DB:                  "/capstor/store/cscs/swissai/a127/ultrasound/raw/gallbladder/GIST514-DB"
+  RegensburgPedAppend:         "/capstor/store/cscs/swissai/a127/ultrasound/raw/gallbladder/Regensburg Pediatric Appendicitis"
+
+  # ── Abdomen ──
+  AbdomenUS:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/abdominal/abdominal_US"
+  cptac-pda:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/abdominal/cptac-pda"
+
+  # ── Ovarian ──
+  MMOTU-2D:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/ovarian/MMOTU-2D"
+  MMOTU-3D:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/ovarian/MMOTU-3D"
+  PCOSGen:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/ovarian/PCOSGen"
+  Polycystic-Ovary-US-Telkom:  "/capstor/store/cscs/swissai/a127/ultrasound/raw/ovarian/Polycystic-Ovary-US-Telkom"
+
+  # ── Prostate ──
+  ProstateSeg:                 "/capstor/store/cscs/swissai/a127/ultrasound/raw/prostate/openpros"
+  Prostate-MRI-US-Biopsy:      "/capstor/store/cscs/swissai/a127/ultrasound/raw/prostate/Prostate-MRI-US-Biopsy"
+  muregpro:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/prostate/muregpro"
+
+  # ── Musculoskeletal ──
+  FALLMUD:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/FALLMUD"
+  KneeUSJoCoHS:                "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/knee us dataset"
+  LUMINOUS:                    "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/LUMINOUS_Database"
+  STMUS-NDA:                   "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/STMUS NDA "
+  SpinalCordInjuryUS:          "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/Spinal Cord Injury US (Sci. Reports 2025)"
+  TUS-REC:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/TUS-REC (Freehand 3D US Arm:Forearm)"
+  TUS-REC-Val:                 "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/Reconstructing 2D to 3D US (Forearms)"
+  deepMTJ:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/Muscle-Tendon Junction Tracking"
+  msk-heckmatt-radboud:        "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/msk-heckmatt-radboud"
+  msk-nmd-radboud:             "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/msk-nmd-radboud"
+  open-hip-dysplasia:          "/capstor/store/cscs/swissai/a127/ultrasound/raw/musculoskeletal/open-hip-dysplasia"
+
+  # ── Nerve ──
+  optic-nerve-sheaths:         "/capstor/store/cscs/swissai/a127/ultrasound/raw/nerve/optic-nerve-sheaths"
+  us-guided-anesthesia:        "/capstor/store/cscs/swissai/a127/ultrasound/raw/nerve/us guided anesthesia"
+
+  # ── Multi-organ ──
+  STU-Hospital-master:         "/capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/STU-Hospital-master"
+  annotated_heterogeneous_us_db: "/capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/annotated_heterogeneous_us_db"
+  US-365K:                     "/capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/US-365K"
+
+  # ── Ocular ──
+  ERDES:                       "/capstor/store/cscs/swissai/a127/ultrasound/raw/ocular/ERDES"
+
+  # ── Skin ──
+  Dermatologic-US-Skin-Lesions: "/capstor/store/cscs/swissai/a127/ultrasound/raw/skin/Dermatologic-US-Skin-Lesions"
 
 model:
   image_backbone:  dinov3_l

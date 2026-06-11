@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from data.adapters.dermatologic_skin_lesions import DermatologicSkinLesionsAdapter
+from data.adapters.skin.dermatologic_skin_lesions import DermatologicSkinLesionsAdapter
 
 from ._explore_utils import run_adapter_explore
 

@@ -25,7 +25,7 @@ Rules
 -----
 1. Store is the source of truth; never modify files there.
 2. Training always reads from Scratch.
-3. stage_dataset() copies Store -> Scratch (rsync-friendly).
+3. stage_dataset() copies Store -> Scratch (rsync when available, else cp -r).
 4. Root remapping via build_root_remap() so adapters write absolute Store
    paths and the dataloader transparently redirects to Scratch at runtime.
 """
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,7 +46,7 @@ log = logging.getLogger(__name__)
 # Maps dataset_id -> (anatomy_family, store_subdir)
 
 DATASET_STORE_MAP: Dict[str, Tuple[str, str]] = {
-    # Cardiac
+    # ── Cardiac ──────────────────────────────────────────────────────────────
     "CAMUS":                    ("cardiac", "CAMUS"),
     "EchoNet-Dynamic":          ("cardiac", "EchoNet-Dynamic"),
     "EchoNet-LVH":              ("cardiac", "EchoNet-LVH"),
@@ -60,50 +61,127 @@ DATASET_STORE_MAP: Dict[str, Tuple[str, str]] = {
     "Echocardiogram-UCI":       ("cardiac", "Echocardiogram-UCI"),
     "CACTUS":                   ("cardiac", "CACTUS"),
     "MITEA":                    ("cardiac", "MITEA"),
-    # Lung
-    "COVIDx-US":           ("lung",            "COVIDx-US"),
-    "LUS-multicenter-2025":("lung",            "LUS-multicenter-2025"),
-    "POCUS-LUS":           ("lung",            "POCUS-LUS"),
-    "COVID-BLUES":         ("lung",            "COVID-BLUES"),
-    "ULTRASOUND-LUS":      ("lung",            "ULTRASOUND-LUS"),
-    # Breast
-    "BUS-BRA":             ("breast",          "BUS-BRA"),
-    "BUSI":                ("breast",          "BUSI"),
-    "BrEaST":              ("breast",          "BrEaST"),
-    "BUS-UC":              ("breast",          "BUS-UC"),
-    "BUS-UCLM":            ("breast",          "BUS-UCLM"),
-    "BUID":                ("breast",          "BUID"),
-    "STAnford-BUS":        ("breast",          "STAnford-BUS"),
-    # Thyroid
-    "TN3K":                ("thyroid",         "TN3K"),
-    "TN5000":              ("thyroid",         "TN5000"),
-    "TG3K":                ("thyroid",         "TG3K"),
-    "TNSCUI":              ("thyroid",         "TNSCUI"),
-    "DDTI":                ("thyroid",         "DDTI"),
-    # Fetal
-    "FETAL_PLANES_DB":     ("fetal",           "FETAL_PLANES_DB"),
-    "HC18":                ("fetal",           "HC18"),
-    "ACOUSLIC-AI":         ("fetal",           "ACOUSLIC-AI"),
-    "OC4US":               ("fetal",           "OC4US"),
-    # Kidney
-    "KidneyUS":            ("kidney",          "KidneyUS"),
-    # Liver
-    "AUL":                 ("liver",           "AUL"),
-    "BEHSOF":              ("liver",           "BEHSOF"),
-    # Gallbladder
-    "GBCU":                ("gallbladder",     "GBCU"),
-    # Ovarian
-    "MMOTU-2D":            ("ovarian",         "MMOTU-2D"),
-    "PCOSGen":             ("ovarian",         "PCOSGen"),
-    # Prostate
-    "ProstateSeg":         ("prostate",        "ProstateSeg"),
-    # Musculoskeletal
-    "ASUS":                ("musculoskeletal", "ASUS"),
+    "PhysioNet-cardiac":        ("cardiac", "physionet.org"),
+    # ── Lung ─────────────────────────────────────────────────────────────────
+    "Benin-LUS":           ("lung", "Benin_Videos"),
+    "RSA-LUS":             ("lung", "RSA_Videos"),
+    "COVIDx-US":           ("lung", "COVIDx-US"),
+    "LUS-multicenter-2025":("lung", "LUS-multicenter-2025"),
+    "OpenPOCUS":           ("lung", "OpenPOCUS"),       # not yet in store
+    "POCUS-LUS":           ("lung", "POCUS-LUS"),
+    "COVID-BLUES":         ("lung", "COVID-BLUES"),
+    "ULTRASOUND-LUS":      ("lung", "ULTRASOUND-LUS"),
+    "LUSS-PHANTOM":        ("lung", "LUSS PHANTOM"),
+    "Lung-Database":       ("lung", "Lung Database"),
+    "Pocus-covid":         ("lung", "Pocus covid"),
+    "BeninVideos":         ("lung", "BeninVideos"),
+    "LUS-data":            ("lung", "data"),
+    # ── Breast ───────────────────────────────────────────────────────────────
+    "BUS-BRA":             ("breast", "BUSBRA"),
+    "BUS-B":               ("breast", "Breast US B Dataset"),
+    "BUSI":                ("breast", "BUSI"),
+    "BrEaST":              ("breast", "BrEaST"),
+    "BUS-UC":              ("breast", "BUS_UC"),
+    "BUS-UCLM":            ("breast", "BUS-UCLM"),
+    "BUID":                ("breast", "BUID"),
+    "BUSV":                ("breast", "Miccai 2022 BUV Dataset"),
+    "GDPH-SYSUCC":         ("breast", "GDPH&SYSUCC"),
+    "Chinese-US-Report-Breast": ("breast", "Chinese US-Report Dataset (Breast)"),
+    "S1":                  ("breast", "S1"),             # not yet in store
+    "STAnford-BUS":        ("breast", "STAnford-BUS"),
+    "busi-whu":            ("breast", "busi-whu"),
+    "midi-b":              ("breast", "midi-b"),
+    # ── Thyroid ──────────────────────────────────────────────────────────────
+    "TN3K":                ("thyroid", "TN3K"),
+    "TN5000":              ("thyroid", "TN5000"),
+    "TG3K":                ("thyroid", "TG3K"),
+    "TNSCUI":              ("thyroid", "TNSCUI"),
+    "DDTI":                ("thyroid", "DDTI"),
+    "Segthy-Dataset":      ("thyroid", "Segthy-Dataset"),
+    "Thyroid-Nodule-Pathology": ("thyroid", "Thyroid_Nodule_Pathology"),
+    "MuSeg":                    ("thyroid", "MuSeg"),
+    "Micro-Ultrasound-Prostate-Segmentation": ("thyroid", "Micro_Ultrasound_Prostate_Segmentation"),
+    # ── Fetal ────────────────────────────────────────────────────────────────
+    "ACOUSLIC-AI":                         ("fetal", "ACOUSLIC"),
+    "FASS":                                ("fetal", "fetal-abdominal-structures-segmentation"),
+    "FETAL_PLANES_DB":                     ("fetal", "FETAL-PLANES-DB"),
+    "FOCUS":                               ("fetal", "FOCUS"),
+    "FPUS23":                              ("fetal", "FPUS23"),
+    "FUGC":                                ("fetal", "FUGC"),
+    "FH-PS-AOP":                           ("fetal", "FH-PS-AOP"),
+    "HC18":                                ("fetal", "HC18"),
+    "IUGC2024":                            ("fetal", "IUGC-2024"),
+    "JNU-IFM":                             ("fetal", "JNU-IFM"),
+    "Large-Scale-Fetal-Head-Biometry":     ("fetal", "large-scale-fetal-head-biometry"),
+    "maternal-fetal-us-video-intrapartum": ("fetal", "maternal-fetal-us-video-intrapartum"),
+    "OC4US":                               ("fetal", "OC4US"),
+    "PBF-US1":                             ("fetal", "PBF-US1"),
+    "PSFHS":                               ("fetal", "PSFHS"),
+    "ultrasound-fetus-dataset":            ("fetal", "ultrasound-fetus-dataset"),
+    "Fast-U-Net":                          ("fetal", "Fast-U-Net"),
+    # ── Kidney ───────────────────────────────────────────────────────────────
+    "KidneyUS":            ("kidney", "KidneyUS-US43d"),
+    "Normal-Kidney-CV":    ("kidney", "Normal-Kidney-CV"),
+    # ── Liver ────────────────────────────────────────────────────────────────
+    "AUL":                 ("liver", "AUL"),
+    "105US":               ("liver", "105US"),
+    "fatty-liver-bmode":   ("liver", "fatty-liver-dataset"),
+    "liver-CV-project":    ("liver", "liver-CV-project"),
+    "LEPset":              ("liver", "LEPset-pancreas"),
+    "BEHSOF":              ("liver", "BEHSOF"),
+    "B-mode-CEUS-liver":   ("liver", "B-mode-CEUS-liver"),
+    "C-TRUS":              ("liver", "C-TRUS"),
+    "AbdomenUS-liver":     ("liver", "AbdomenUS/archive/abdominal_US/abdominal_US"),
+    "ultrasound-elastography-liver-cancer": ("liver", "ultrasound-elastography-liver-cancer"),
+    # ── Gallbladder / GI ─────────────────────────────────────────────────────
+    "GBCU":                  ("gallbladder", "GBCU"),
+    "GIST514-DB":            ("gallbladder", "GIST514-DB"),
+    "RegensburgPedAppend":   ("gallbladder", "Regensburg Pediatric Appendicitis"),
+    # ── Abdomen ──────────────────────────────────────────────────────────────
+    "AbdomenUS":           ("abdominal", "abdominal_US"),
+    "cptac-pda":           ("abdominal", "cptac-pda"),
+    # ── Ovarian ──────────────────────────────────────────────────────────────
+    "MMOTU-2D":            ("ovarian", "MMOTU-2D"),
+    "PCOSGen":             ("ovarian", "PCOSGen"),
+    "MMOTU-3D":            ("ovarian", "MMOTU-3D"),
+    "Polycystic-Ovary-US-Telkom": ("ovarian", "Polycystic-Ovary-US-Telkom"),
+    # ── Prostate ─────────────────────────────────────────────────────────────
+    "ProstateSeg":             ("prostate", "openpros"),
+    "Prostate-MRI-US-Biopsy":  ("prostate", "Prostate-MRI-US-Biopsy"),
+    "muregpro":                ("prostate", "muregpro"),
+    # ── Musculoskeletal ──────────────────────────────────────────────────────
     "FALLMUD":             ("musculoskeletal", "FALLMUD"),
-    "STMUS-NDA":           ("musculoskeletal", "STMUS-NDA"),
-    # Multi
-    "Unity-Imaging":       ("multi_organ",     "Unity-Imaging"),
-    "STU-Hospital":        ("multi_organ",     "STU-Hospital"),
+    "LUMINOUS":            ("musculoskeletal", "LUMINOUS_Database"),
+    "deepMTJ":             ("musculoskeletal", "Muscle-Tendon Junction Tracking"),
+    "KneeUSJoCoHS":        ("musculoskeletal", "knee us dataset"),
+    "STMUS-NDA":           ("musculoskeletal", "STMUS NDA "),
+    "TUS-REC":             ("musculoskeletal", "TUS-REC (Freehand 3D US Arm:Forearm)"),
+    "TUS-REC-Val":         ("musculoskeletal", "Reconstructing 2D to 3D US (Forearms)"),
+    "SpinalCordInjuryUS":  ("musculoskeletal", "Spinal Cord Injury US (Sci. Reports 2025)"),
+    "msk-heckmatt-radboud": ("musculoskeletal", "msk-heckmatt-radboud"),
+    "msk-nmd-radboud":      ("musculoskeletal", "msk-nmd-radboud"),
+    "open-hip-dysplasia":   ("musculoskeletal", "open-hip-dysplasia"),
+    # ── Nerve ────────────────────────────────────────────────────────────────
+    "optic-nerve-sheaths":  ("nerve", "optic-nerve-sheaths"),
+    "us-guided-anesthesia": ("nerve", "us guided anesthesia"),
+    # ── Vascular / carotid ───────────────────────────────────────────────────
+    "CUBS":                                ("vascular-carotid", "CUBS"),
+    "Common-Carotid-Artery-Ultrasound-Images": ("vascular-carotid", "Common-Carotid-Artery-Ultrasound-Images"),
+    # ── Brain ────────────────────────────────────────────────────────────────
+    "3D-US-Neuroimages-Dataset": ("brain", "3D-US-Neuroimages-Dataset"),
+    "BITE":                      ("brain", "BITE"),
+    "REMIND-Brain-iUS":          ("brain", "REMIND-Brain-iUS"),
+    "RESECT":                    ("brain", "RESECT"),
+    "ReMIND2Reg":                ("brain", "ReMIND2Reg"),
+    "braTioUS":                  ("brain", "braTioUS"),
+    # ── Multi-organ ──────────────────────────────────────────────────────────
+    "STU-Hospital-master":           ("multi_organ", "STU-Hospital-master"),
+    "annotated_heterogeneous_us_db": ("multi_organ", "annotated_heterogeneous_us_db"),
+    "US-365K":                       ("multi_organ", "US-365K"),
+    # ── Ocular ───────────────────────────────────────────────────────────────
+    "ERDES":                     ("ocular", "ERDES"),
+    # ── Skin ─────────────────────────────────────────────────────────────────
+    "Dermatologic-US-Skin-Lesions": ("skin", "Dermatologic-US-Skin-Lesions"),
 }
 
 
@@ -128,8 +206,14 @@ class StorageConfig:
             self.store_root = Path(env)
         if env := os.environ.get("US_SCRATCH_ROOT"):
             self.scratch_root = Path(env)
-        elif user := os.environ.get("CSCS_USER"):
-            self.scratch_root = Path(f"/capstor/scratch/cscs/{user}/ultrasound")
+        elif self.scratch_root is None:
+            user = (
+                os.environ.get("CSCS_USER")
+                or os.environ.get("CSCS_USERNAME")
+                or os.environ.get("USER")
+            )
+            if user:
+                self.scratch_root = Path(f"/capstor/scratch/cscs/{user}/ultrasound")
         if env := os.environ.get("US_LOCAL_DEV_ROOT"):
             self.local_dev_root = Path(env)
 
@@ -219,11 +303,26 @@ class StorageConfig:
             str(self.store_root / "raw"): str(self.scratch_root / "raw"),
         }
 
+    @staticmethod
+    def _has_rsync() -> bool:
+        return shutil.which("rsync") is not None
+
+    def _build_stage_cmd(
+        self,
+        src: Path,
+        dst: Path,
+        rsync_args: str = "-ah --info=progress2",
+    ) -> list[str]:
+        """Build a copy command that safely handles spaces/parentheses in paths."""
+        if self._has_rsync():
+            return ["rsync", *rsync_args.split(), f"{src}/", f"{dst}/"]
+        return ["cp", "-r", f"{src}/.", f"{dst}/"]
+
     def stage_dataset(
         self,
         dataset_id: str,
         dry_run: bool = False,
-        rsync_args: str = "-av --progress",
+        rsync_args: str = "-ah --info=progress2",
     ) -> bool:
         if not self.scratch_root:
             log.error("scratch_root not configured. Cannot stage.")
@@ -238,14 +337,15 @@ class StorageConfig:
             return False
 
         dst.mkdir(parents=True, exist_ok=True)
-        cmd = f"rsync {rsync_args} {src}/ {dst}/"
-        log.info(f"Staging {dataset_id}: {src} -> {dst}")
+        cmd = self._build_stage_cmd(src, dst, rsync_args=rsync_args)
+        copy_tool = "rsync" if self._has_rsync() else "cp"
+        log.info(f"Staging {dataset_id} ({copy_tool}): {src} -> {dst}")
 
         if dry_run:
-            print(f"[DRY RUN] {cmd}")
+            print(f"[DRY RUN] {' '.join(cmd)}")
             return True
 
-        result = subprocess.run(cmd, shell=True)
+        result = subprocess.run(cmd)
         success = result.returncode == 0
         if not success:
             log.error(f"Failed to stage {dataset_id} (code {result.returncode})")
@@ -278,6 +378,27 @@ class StorageConfig:
         anatomy, subdir = DATASET_STORE_MAP.get(dataset_id, ("other", dataset_id))
         src = self.store_root / "raw" / anatomy / subdir
         return src.exists() and any(src.iterdir())
+
+    def resolve_dataset_root(self, dataset_id: str, prefer_scratch: bool = True) -> Optional[Path]:
+        """Return scratch or store path for a dataset if it exists and is non-empty."""
+        anatomy, subdir = DATASET_STORE_MAP.get(dataset_id, ("other", dataset_id))
+        candidates: List[Path] = []
+        if prefer_scratch and self.scratch_root:
+            candidates.append(self.scratch_root / "raw" / anatomy / subdir)
+        candidates.append(self.store_root / "raw" / anatomy / subdir)
+        for path in candidates:
+            if path.exists() and any(path.iterdir()):
+                return path
+        return None
+
+    def resolve_all_dataset_roots(self, prefer_scratch: bool = True) -> Dict[str, str]:
+        """Map every registered dataset_id to an existing root path (scratch preferred)."""
+        roots: Dict[str, str] = {}
+        for dataset_id in sorted(DATASET_STORE_MAP.keys()):
+            path = self.resolve_dataset_root(dataset_id, prefer_scratch=prefer_scratch)
+            if path is not None:
+                roots[dataset_id] = str(path)
+        return roots
 
     def status_report(self) -> str:
         lines = [

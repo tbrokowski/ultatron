@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image
 
+from data.adapters.thyroid.tn3k_layout import list_tn3k_samples
 from eval.benchmarks.base import BaseBenchmark
 from eval.metrics import dice_score, iou_score
 
@@ -27,24 +28,12 @@ class TN3KBenchmarkDataset(Dataset):
     """
     TN3K loader.
     Layout:
-        {root}/image/*.jpg
-        {root}/label/*.png
+        {root}/trainval-image, trainval-mask, test-image, test-mask
     """
 
-    def __init__(self, root: str, split: str = "test", test_frac: float = 0.15):
-        self.root    = Path(root)
-        img_dir      = self.root / "image"
-        lbl_dir      = self.root / "label"
-        all_imgs     = sorted(img_dir.glob("*.jpg")) + sorted(img_dir.glob("*.png"))
-        n_test       = max(1, int(len(all_imgs) * test_frac))
-        subset       = all_imgs[-n_test:] if split == "test" else all_imgs[:-n_test]
-        self.samples = [
-            {"img_path": str(p),
-             "lbl_path": str(lbl_dir / (p.stem + ".png")),
-             "sample_id": p.stem}
-            for p in subset
-            if (lbl_dir / (p.stem + ".png")).exists()
-        ]
+    def __init__(self, root: str, split: str = "test", fold: int = 0):
+        self.root     = Path(root)
+        self.samples  = list_tn3k_samples(self.root, split, fold=fold)
         log.info(f"TN3K {split}: {len(self.samples)} samples")
 
     def __len__(self) -> int:

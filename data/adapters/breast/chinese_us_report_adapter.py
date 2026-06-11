@@ -86,7 +86,7 @@ class ChineseUSReportBreastAdapter(BaseAdapter):
             raise FileNotFoundError(
                 f"Chinese-US-Report-Breast: {self.json_path} not found"
             )
-        with open(self.json_path, encoding="utf-8") as f:
+        with open(self.json_path, encoding="utf-8-sig") as f:
             data = json.load(f)
 
         records = []

@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
+from data.adapters.thyroid.tn3k_layout import list_tn3k_samples
 from finetune.base import FinetuneExperiment, FinetuneConfig
 from models.heads import build_seg_head
 from eval.metrics import dice_score, iou_score
@@ -30,24 +31,9 @@ IMG_SIZE = 224
 
 
 class TN3KFinetuneDataset(Dataset):
-    def __init__(self, root: str, split: str = "train", test_frac: float = 0.15):
+    def __init__(self, root: str, split: str = "train", fold: int = 0):
         self.root    = Path(root)
-        img_dir      = self.root / "image"
-        lbl_dir      = self.root / "label"
-        all_imgs     = sorted(img_dir.glob("*.jpg")) + sorted(img_dir.glob("*.png"))
-        n_test       = max(1, int(len(all_imgs) * test_frac))
-        n_val        = max(1, int(len(all_imgs) * test_frac))
-        if split == "test":
-            subset = all_imgs[-n_test:]
-        elif split == "val":
-            subset = all_imgs[-(n_test + n_val):-n_test]
-        else:
-            subset = all_imgs[:-(n_test + n_val)]
-        self.samples = [
-            {"img": str(p), "lbl": str(lbl_dir / (p.stem + ".png")),
-             "sample_id": p.stem}
-            for p in subset if (lbl_dir / (p.stem + ".png")).exists()
-        ]
+        self.samples = list_tn3k_samples(self.root, split, fold=fold)
         log.info(f"TN3K {split}: {len(self.samples)} samples")
 
     def __len__(self):
@@ -95,7 +81,7 @@ class TN3KFinetune(FinetuneExperiment):
     @torch.no_grad()
     def compute_val_metrics(self, val_loader: DataLoader) -> dict:
         self.head.eval()
-        self.img_branch.teacher.eval()
+        self.encoder.eval()
         per_sample = []
         total_loss = 0.0
         n          = 0
@@ -104,7 +90,7 @@ class TN3KFinetune(FinetuneExperiment):
             batch = {k: v.to(self.device, non_blocking=True)
                      if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            feats   = self.img_branch.forward_teacher(batch["image"])
+            feats   = self.encoder.encode_image(batch["image"])
             logits  = self.head(feats["patch_tokens"])
             pred    = F.interpolate(logits, size=batch["mask"].shape[-2:],
                                     mode="bilinear", align_corners=False)
@@ -134,12 +120,12 @@ class TN3KFinetune(FinetuneExperiment):
         test_loader = self.build_dataloader("test")
         images, preds, gts, ids = [], [], [], []
         self.head.eval()
-        self.img_branch.teacher.eval()
+        self.encoder.eval()
         with torch.no_grad():
             for batch in test_loader:
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
-                feats   = self.img_branch.forward_teacher(batch["image"])
+                feats   = self.encoder.encode_image(batch["image"])
                 logits  = self.head(feats["patch_tokens"])
                 pred    = F.interpolate(logits, size=(IMG_SIZE, IMG_SIZE),
                                         mode="bilinear", align_corners=False)

@@ -56,7 +56,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 if TYPE_CHECKING:
-    from data.pipeline.collators_extended import AlignmentPair
+    from data.pipeline.collators import AlignmentPair
 
 
 # ── Distributed helpers ────────────────────────────────────────────────────────

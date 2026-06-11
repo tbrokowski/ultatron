@@ -147,17 +147,27 @@ class EchoCPFinetune(FinetuneExperiment):
     def build_head(self, embed_dim: int, cfg: FinetuneConfig):
         return build_cls_head(embed_dim, n_classes=2, head_type="mlp")
 
-    def setup(self, img_branch, device="cuda", vid_branch=None):
-        self.img_branch = img_branch
-        self.vid_branch = vid_branch
-        self.device     = device
-        assert vid_branch is not None, "EchoCPFinetune requires vid_branch"
-        if self.cfg.freeze_backbone:
+    def setup(self, img_branch=None, device="cuda", vid_branch=None, encoder=None):
+        from finetune.backbones.ultatron_encoder import UltatronBranchEncoder
+        if encoder is not None:
+            self.encoder = encoder
+            self.img_branch = encoder
+            self.vid_branch = encoder
+        else:
+            assert vid_branch is not None, "EchoCPFinetune requires vid_branch"
+            self.encoder = UltatronBranchEncoder(img_branch, vid_branch)
+            self.img_branch = img_branch
+            self.vid_branch = vid_branch
+        self.device = device
+        if self.cfg.freeze_backbone and vid_branch is not None:
             for p in vid_branch.parameters():
                 p.requires_grad_(False)
             vid_branch.eval()
-        embed_dim      = vid_branch.embed_dim
-        backbone_dtype = next(vid_branch.parameters()).dtype
+        embed_dim = self.encoder.video_embed_dim
+        try:
+            backbone_dtype = next(p for mod in self.encoder._nn_modules() for p in mod.parameters()).dtype
+        except StopIteration:
+            backbone_dtype = torch.bfloat16
         self.head = self.build_head(embed_dim, self.cfg).to(device=device, dtype=backbone_dtype)
         log.info(f"[EchoCP] head={self.head}  dtype={backbone_dtype}")
 
@@ -171,7 +181,7 @@ class EchoCPFinetune(FinetuneExperiment):
         return F.cross_entropy(head_output, batch["target"])
 
     def _train_epoch(self, loader, optimiser, scaler) -> float:
-        self.head.train(); self.vid_branch.teacher.eval()
+        self.head.train(); self.encoder.eval()
         total_loss, n = 0.0, 0
         for batch in loader:
             batch = {k: v.to(self.device, non_blocking=True)
@@ -179,9 +189,8 @@ class EchoCPFinetune(FinetuneExperiment):
                      for k, v in batch.items()}
             with torch.autocast("cuda", dtype=torch.bfloat16,
                                  enabled=torch.cuda.is_available()):
-                with torch.no_grad():
-                    vid_out = self.vid_branch.forward_teacher(batch["clip"])
-                logits = self.head(vid_out["clip_cls"])
+                vid_out = self.encoder.encode_video(batch["clip"])
+                logits  = self.head(vid_out["clip_cls"])
                 loss   = self.compute_loss(batch, {}, logits)
             self._backward_step_with_scaler(
                 loss, optimiser, scaler, self.head.parameters()
@@ -192,14 +201,14 @@ class EchoCPFinetune(FinetuneExperiment):
 
     @torch.no_grad()
     def compute_val_metrics(self, val_loader: DataLoader) -> dict:
-        self.head.eval(); self.vid_branch.teacher.eval()
+        self.head.eval(); self.encoder.eval()
         all_probs, all_labels = [], []
         total_loss, n = 0.0, 0
         for batch in val_loader:
             batch = {k: v.to(self.device, non_blocking=True)
                      if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            vid_out = self.vid_branch.forward_teacher(batch["clip"])
+            vid_out = self.encoder.encode_video(batch["clip"])
             logits  = self.head(vid_out["clip_cls"])
             loss    = self.compute_loss(batch, {}, logits)
             total_loss += loss.item(); n += 1

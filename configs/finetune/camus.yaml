@@ -5,6 +5,8 @@
 # Usage: python -m oura.finetune.camus --config configs/finetune/camus.yaml ...
 # ============================================================
 
+dataset_root: "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CAMUS"
+
 # Model backbone (which checkpoint to load from)
 model:
   image_backbone: dinov3_l

@@ -1,0 +1,83 @@
+# Master comparison config — backbone × head_type × experiment sweep
+#
+# Usage:
+#   python scripts/finetune.py --comparison-config configs/finetune/comparison.yaml
+#
+# Update checkpoint paths below before running external / phase-specific backbones.
+
+train_config: configs/experiments/run1.yaml
+
+output_dir: eval_results
+device: cuda
+eval_only: false
+
+backbones:
+  - key: resnet50
+    type: standard
+    variant: resnet50
+
+  - key: vit_b_16
+    type: standard
+    variant: vit_b_16
+
+  - key: biomedclip
+    type: biomedclip
+
+  - key: vjepa2_l
+    type: vjepa
+    variant: vjepa2_l
+
+  # External FMs — set checkpoint paths before enabling
+  # - key: usfm
+  #   type: usfm
+  #   checkpoint: /path/to/USFM_latest.pth
+  #   embed_dim: 768
+
+  # - key: echocare
+  #   type: echocare
+  #   checkpoint: /path/to/echocare.pth
+  #   embed_dim: 768
+
+  # - key: openus
+  #   type: openus
+  #   checkpoint: /path/to/openus.pth
+  #   embed_dim: 768
+
+  # Ultatron phase checkpoints — update paths to your run
+  - key: ours_phase1
+    type: ours
+    checkpoint: /capstor/scratch/cscs/tbrokowski/ultrasound/checkpoints/run1/phase1_end.pt
+
+  - key: ours_phase2
+    type: ours
+    checkpoint: /capstor/scratch/cscs/tbrokowski/ultrasound/checkpoints/run1/phase2_end.pt
+
+  - key: ours_phase3
+    type: ours
+    checkpoint: /capstor/scratch/cscs/tbrokowski/ultrasound/checkpoints/run1/phase3_end.pt
+
+experiments:
+  - busi
+  - echonet
+  - echonet_ped
+  - echonet_lvh
+  - mimic_lvvol
+  - cardiacudc
+  - echocp
+  - lus
+
+head_types:
+  default: [linear, mlp]
+  lus: [mil]
+
+# Dataset roots (override via env or edit here)
+dataset_roots:
+  busi: ""
+  echonet: ""
+  echonet_ped: ""
+  echonet_lvh: ""
+  mimic_lvvol: ""
+  cardiacudc: ""
+  echocp: ""
+  benin: ""
+  rsa: ""
