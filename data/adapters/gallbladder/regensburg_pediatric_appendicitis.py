@@ -26,6 +26,7 @@ Probe   : curvilinear (abdominal)
 from __future__ import annotations
 
 import csv
+import logging
 import re
 from pathlib import Path
 from typing import Iterator
@@ -33,17 +34,23 @@ from typing import Iterator
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry
 
+log = logging.getLogger(__name__)
+
 _IMG_EXTS = {".bmp", ".png", ".jpg", ".jpeg", ".tif"}
 
-# Filename: {subject_id}.{view_idx}.bmp
-_FNAME_RE = re.compile(r"^(?P<subject_id>\d+)\.(?P<view_idx>\d+)$")
+# Filename prefix: {subject_id}.{view_idx} (optionally followed by a view label)
+_FNAME_RE = re.compile(r"^(?P<subject_id>\d+)\.(?P<view_idx>\d+)")
+
+_ID_COL_NAMES = ("us_number", "subject_id", "id", "subjectid", "patient_id")
+_SHEET_CANDIDATES = ("All cases", "all cases")
 
 # Diagnosis label → label_ontology
 _DIAGNOSIS_MAP = {
-    "appendicitis":    "appendicitis",
-    "no_appendicitis": "no_appendicitis",
-    "1":               "appendicitis",
-    "0":               "no_appendicitis",
+    "appendicitis":      "appendicitis",
+    "no_appendicitis":   "no_appendicitis",
+    "no appendicitis":   "no_appendicitis",
+    "1":                 "appendicitis",
+    "0":                 "no_appendicitis",
 }
 
 
@@ -53,10 +60,27 @@ def _is_image(p: Path) -> bool:
 
 def _parse_stem(stem: str) -> tuple[str | None, str | None]:
     """Return (subject_id, view_idx) from filename stem."""
-    m = _FNAME_RE.match(stem)
+    prefix = stem.split()[0]
+    m = _FNAME_RE.match(prefix)
     if m:
         return m.group("subject_id"), m.group("view_idx")
     return None, None
+
+
+def _iter_image_paths(root: Path) -> list[Path]:
+    """Collect US images from US_Pictures/, including nested archive layouts."""
+    us_dir = root / "US_Pictures"
+    if not us_dir.is_dir():
+        return sorted(f for f in root.iterdir() if _is_image(f))
+
+    nested = us_dir / "US_Pictures"
+    for candidate in (nested, us_dir):
+        if candidate.is_dir():
+            direct = sorted(f for f in candidate.iterdir() if _is_image(f))
+            if direct:
+                return direct
+
+    return sorted(p for p in us_dir.rglob("*") if p.is_file() and _is_image(p))
 
 
 def _load_test_codes(root: Path) -> set[str]:
@@ -89,36 +113,43 @@ def _load_app_data(root: Path) -> dict[str, dict]:
         try:
             import openpyxl
             wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
-            ws = wb.active
+            ws = next(
+                (wb[name] for name in _SHEET_CANDIDATES if name in wb.sheetnames),
+                wb.active,
+            )
             rows = list(ws.iter_rows(values_only=True))
             if not rows:
+                wb.close()
                 return meta
             headers = [str(h).strip() if h is not None else f"col_{i}"
                        for i, h in enumerate(rows[0])]
-            # Detect subject_id column
             id_col = next(
                 (i for i, h in enumerate(headers)
-                 if h.lower() in ("subject_id", "id", "subjectid", "patient_id")),
+                 if h.lower().replace(" ", "_") in _ID_COL_NAMES),
                 0,
             )
             for row in rows[1:]:
                 if row[id_col] is None:
                     continue
-                sid  = str(int(row[id_col])) if isinstance(row[id_col], float) \
-                       else str(row[id_col]).strip()
+                sid = (
+                    str(int(row[id_col]))
+                    if isinstance(row[id_col], float)
+                    else str(row[id_col]).strip()
+                )
                 meta[sid] = {headers[i]: row[i] for i in range(len(headers))}
             wb.close()
             return meta
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to read %s via openpyxl, falling back to CSV: %s", xlsx_path, exc)
 
     if csv_path.exists():
         with open(csv_path, newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 sid_col = next(
-                    (k for k in row if k.lower() in
-                     ("subject_id", "id", "subjectid", "patient_id")), None
+                    (k for k in row
+                     if k.lower().replace(" ", "_") in _ID_COL_NAMES),
+                    None,
                 )
                 if sid_col:
                     sid = row[sid_col].strip()
@@ -163,14 +194,10 @@ class RegensburgPediatricAppendicitisAdapter(BaseAdapter):
     DOI            = "https://doi.org/10.5281/zenodo.7711412"
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
-        us_dir     = self.root / "US_Pictures"
-        if not us_dir.is_dir():
-            us_dir = self.root   # fallback: images at root
-
         test_codes = _load_test_codes(self.root)
         app_meta   = _load_app_data(self.root)
 
-        imgs = sorted(f for f in us_dir.iterdir() if _is_image(f))
+        imgs = _iter_image_paths(self.root)
         n    = len(imgs)
 
         for i, img_path in enumerate(imgs):
@@ -193,7 +220,11 @@ class RegensburgPediatricAppendicitisAdapter(BaseAdapter):
             severity   = _extract_label(smeta, ["severity", "Severity"])
 
             label_raw  = _DIAGNOSIS_MAP.get(diagnosis.lower(), diagnosis)
-            label_onto = "appendicitis" if "appendicitis" == label_raw else "no_appendicitis"
+            label_onto = (
+                "appendicitis"
+                if label_raw == "appendicitis"
+                else "no_appendicitis"
+            )
 
             instance = self._make_instance(
                 instance_id    = f"{subject_id}_{view_idx}",

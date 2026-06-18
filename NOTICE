@@ -1,0 +1,32 @@
+Ultatron
+========
+
+Copyright (c) 2024–2026 Ultatron Contributors. All rights reserved.
+
+This product includes vendored third-party code under finetune/backbones/vendor/.
+These components retain their original licenses as noted below.
+
+
+Third-Party Components
+----------------------
+
+1. OpenUS — Open-Source Foundation Model for Ultrasound Image Analysis
+   Location : finetune/backbones/vendor/openus/
+   Source   : https://github.com/openmedlab/OpenUS (approximate upstream)
+   License  : Creative Commons Attribution-NonCommercial 4.0 International
+              (CC BY-NC 4.0)
+
+2. USFM — UltraSound Foundation Model
+   Location : finetune/backbones/vendor/usfm/
+   Source   : https://github.com/openmedlab/USFM
+   License  : Creative Commons Attribution-NonCommercial 4.0 International
+              (CC BY-NC 4.0)
+   Attribution: Code based on HuggingFace Transformers, pytorch-image-models,
+                and lightning-hydra-template.
+
+The CC BY-NC 4.0 license text is available at:
+  https://creativecommons.org/licenses/by-nc/4.0/
+
+Note: The CC BY-NC 4.0 license restricts commercial use of the vendored
+components. Ensure compliance with this restriction before any commercial
+deployment or distribution of this software.

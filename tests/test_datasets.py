@@ -179,10 +179,14 @@ class TestAdapters:
         entries = list(adapter.iter_entries())
         assert len(entries) > 0, "CAMUS should produce entries"
 
-        # Should have both image and pseudo_video entries
+        # Should have image, pseudo_video, and half_sequence cine entries
         modalities = {e.modality_type for e in entries}
         assert "image" in modalities
         assert "pseudo_video" in modalities
+        assert "video" in modalities
+
+        # EF metadata for volume estimation pipeline
+        assert any(e.source_meta.get("ef") is not None for e in entries)
 
         # All entries should be valid
         for e in entries:
@@ -246,18 +250,24 @@ class TestAdapters:
         entries = list(adapter.iter_entries())
         assert len(entries) > 0
 
-        # Should have all 3 splits
         splits = {e.split for e in entries}
         assert "train" in splits
 
-        # All video modality
-        for e in entries:
-            assert e.modality_type == "video"
+        videos = [e for e in entries if e.modality_type == "video"]
+        images = [e for e in entries if e.modality_type == "image"]
+        assert len(videos) > 0
+        assert len(images) > 0
+
+        for e in videos:
             self._check_entry(e, check_text=True)
+            assert e.source_meta.get("video_labels") is not None
             cls_specs = e.specs_for_task(TaskType.MULTICLASS_CLS)
             assert len(cls_specs) > 0
             assert cls_specs[0].num_classes == 3
             assert cls_specs[0].label_value in (0, 1, 2)
+
+        masked = [e for e in images if e.has_mask]
+        assert len(masked) > 0
 
     def test_fetal_planes_adapter(self, fetal_planes_root):
         adapter = FetalPlanesDBAdapter(fetal_planes_root)
@@ -836,3 +846,40 @@ class TestPatientLevel:
         assert "patient_id" in item
         assert item["frames"].dim() == 4  # (N_frames, 1, H, W)
         assert item["frames"].shape[-1] == 64
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. VARIABLE-SIZE CLIP ALIGNMENT (CEUS multi-DICOM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestVariableSizeClipAlignment:
+    def test_noop_when_frames_match(self):
+        from data.pipeline.dataset import _align_variable_size_frames
+
+        frames = [np.zeros((720, 960), dtype=np.uint8) for _ in range(4)]
+        out = _align_variable_size_frames(frames)
+        assert out is frames
+
+    def test_pads_mixed_sizes_to_common_canvas(self):
+        from data.pipeline.dataset import _align_variable_size_frames
+
+        frames = [
+            np.full((720, 960), 1, dtype=np.uint8),
+            np.full((720, 1280), 2, dtype=np.uint8),
+            np.full((649, 1170), 3, dtype=np.uint8),
+        ]
+        out = _align_variable_size_frames(frames)
+        assert all(f.shape == (720, 1280) for f in out)
+        assert out[0][0, 0] == 1
+        assert out[1][0, 0] == 2
+        assert out[2][0, 0] == 0  # padded border
+
+    def test_rgb_frames_padded(self):
+        from data.pipeline.dataset import _align_variable_size_frames
+
+        frames = [
+            np.ones((64, 48, 3), dtype=np.uint8),
+            np.ones((64, 80, 3), dtype=np.uint8) * 2,
+        ]
+        out = _align_variable_size_frames(frames)
+        assert all(f.shape == (64, 80, 3) for f in out)

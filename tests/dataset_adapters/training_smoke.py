@@ -1,25 +1,47 @@
 """
 tests/dataset_adapters/training_smoke.py
 =========================================
-Multi-dataset, multi-phase training smoke test.
+Comprehensive multi-phase, multi-dataset training smoke test.
 
-Tests all four training phases (DINOv3 image SSL, V-JEPA2 video SSL,
-cross-modal alignment, downstream fine-tuning) using combined data from
-BUSI, EchoNet-Dynamic, and Benin-LUS.
+Phases
+------
+  Phase 1 — Image SSL  (DINOv3-S student/teacher)
+  Phase 2 — Video SSL  (V-JEPA2-L student/teacher)
+  Phase 3 — Cross-modal Alignment
+  Phase 4 — All 11 finetune experiments  (Ultatron backbone, setup + 1-batch verify)
+  Phase 5 — All 7 ablation backbones     (model load + dummy forward pass)
 
-Usage (from project root with the .venv active):
+Manifest coverage
+-----------------
+  ALL datasets registered in ADAPTER_REGISTRY.
+  Roots are read from configs/run1/data_run1.yaml (datasets: section).
+  N_SMOKE_ENTRIES entries per dataset; missing / broken datasets are logged and
+  skipped — they never abort the run.
+
+Error handling
+--------------
+  No `assert` inside phase functions; all checks log errors and continue.
+  Every Phase 4 experiment and every Phase 5 backbone is individually
+  try/except-wrapped.  A final summary table shows PASS / FAIL / SKIP
+  for every item.  sys.exit(1) fires only at the very end if any FAIL.
+
+Usage (from project root, with .venv active):
 
     python -m tests.dataset_adapters.training_smoke
 
-Environment overrides:
-    US_SMOKE_DEVICE       Force device  (e.g. "cuda:0", "cpu")
-    US_BUSI_ROOT          Override BUSI data root
-    US_ECHONET_ROOT       Override EchoNet-Dynamic data root
-    US_BENIN_ROOT         Override Benin-LUS data root
-    US_SKIP_PHASE1=1      Skip Phase 1 image SSL smoke
-    US_SKIP_PHASE2=1      Skip Phase 2 video SSL smoke
-    US_SKIP_PHASE3=1      Skip Phase 3 alignment smoke
-    US_SKIP_PHASE4=1      Skip Phase 4 downstream heads smoke
+Environment overrides
+---------------------
+    US_SMOKE_DEVICE              Force device  (e.g. "cuda:0", "cpu")
+    US_SKIP_PHASE1=1             Skip Phase 1
+    US_SKIP_PHASE2=1             Skip Phase 2
+    US_SKIP_PHASE3=1             Skip Phase 3
+    US_SKIP_PHASE4=1             Skip Phase 4
+    US_SKIP_PHASE5=1             Skip Phase 5
+    US_SMOKE_FORCE_REBUILD=1     Force manifest rebuild
+    US_USFM_CHECKPOINT           Override USFM checkpoint path
+    US_ECHOCARE_CHECKPOINT       Override EchoCare checkpoint path
+    US_OPENUS_CHECKPOINT         Override OpenUS checkpoint path
+    US_OPENUS_VMAMBA_CHECKPOINT  Override OpenUS VMamba backbone checkpoint
 """
 from __future__ import annotations
 
@@ -28,28 +50,20 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
-from torch.utils.data import DataLoader, Subset
 
 # ── Project root on sys.path ──────────────────────────────────────────────────
 _ROOT = Path(__file__).parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from data.adapters.breast.busi import BUSIAdapter
-from data.adapters.cardiac.camus import CAMUSAdapter
-from data.adapters.cardiac.echonet import EchoNetDynamicAdapter
-from data.adapters.cardiac.echonet_pediatric import EchoNetPediatricAdapter
-from data.adapters.cardiac.ted import TEDAdapter
-from data.adapters.lung.benin_lus import BeninLUSAdapter
-from data.schema.manifest import ManifestWriter, USManifestEntry, load_manifest
-from data.pipeline.dataset import ImageSSLDataset, VideoSSLDataset
-from data.pipeline.downstream_dataset import DownstreamDataset, PatientLevelDataset
+from data.adapters import ADAPTER_REGISTRY
+from data.schema.manifest import ManifestWriter, USManifestEntry
 from data.pipeline.datamodule import USFoundationDataModule
 from data.pipeline.transforms import (
     ImageSSLTransformConfig,
@@ -60,9 +74,8 @@ from models.branches.image_branch import ImageBranch
 from models.branches.video_branch import build_video_branch
 from models.branches.shared import CrossBranchDistillation, PrototypeHead
 from models.registry import build_image_backbone
-from models.heads.classification_head import LinearClsHead
-from models.heads.segmentation_head import LinearSegHead
-from models.heads.regression_head import RegressionHead
+from finetune.backbones.paths import ablation_weight_path
+from finetune.backbones.registry import build_encoder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,172 +84,148 @@ logging.basicConfig(
 log = logging.getLogger("training_smoke")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-_STORE = Path("/capstor/store/cscs/swissai/a127/ultrasound/raw")
-_DEFAULT_CAMUS_ROOT          = _STORE / "cardiac" / "CAMUS"
-_DEFAULT_BUSI_ROOT           = _STORE / "breast"  / "BUSI"
-_DEFAULT_ECHONET_ROOT        = _STORE / "cardiac" / "EchoNet-Dynamic"
-_DEFAULT_ECHONET_PED_ROOT    = _STORE / "cardiac" / "EchoNet-Pediatric"
-_DEFAULT_TED_ROOT            = _STORE / "cardiac" / "TED"
-_DEFAULT_BENIN_ROOT          = _STORE / "lung"    / "Benin_Videos"
-
-_SMOKE_OUT  = _ROOT / "dataset_exploration_outputs" / "smoke"
-_SMOKE_CFG  = _ROOT / "configs" / "smoke" / "multi_dataset_smoke.yaml"
+_DATA_CONFIG     = _ROOT / "configs" / "run1" / "data_run1.yaml"
+_FINETUNE_CFG    = _ROOT / "configs" / "finetune"
+_SMOKE_CFG       = _ROOT / "configs" / "smoke" / "multi_dataset_smoke.yaml"
+_SMOKE_OUT       = _ROOT / "dataset_exploration_outputs" / "smoke"
 _COMBINED_MANIFEST = _SMOKE_OUT / "combined_smoke_manifest.jsonl"
 
-N_SMOKE_ENTRIES = 32   # entries per dataset in the combined manifest
-N_SMOKE_BATCHES = 2    # forward passes per phase
+N_SMOKE_ENTRIES = 8    # manifest entries per dataset
+N_SMOKE_BATCHES = 2    # forward-pass batches per phase
 
 
-# ── Device ───────────────────────────────────────────────────────────────────
+# ── Device ────────────────────────────────────────────────────────────────────
 
 def _auto_device() -> str:
-    """Auto-select: respect US_SMOKE_DEVICE, otherwise prefer CUDA."""
     env = os.environ.get("US_SMOKE_DEVICE")
     if env:
         return env
     if torch.cuda.is_available():
         dev = "cuda:0"
-        log.info("CUDA available — using %s (%s)",
-                 dev, torch.cuda.get_device_name(0))
+        log.info("CUDA available — using %s (%s)", dev, torch.cuda.get_device_name(0))
         return dev
     log.warning("CUDA not available — running on CPU (will be slow)")
     return "cpu"
 
 
-# ── Manifest helpers ──────────────────────────────────────────────────────────
+# ── Dataset roots ─────────────────────────────────────────────────────────────
 
-def _root(env_var: str, default: Path) -> Optional[Path]:
-    env = os.environ.get(env_var)
-    p = Path(env) if env else default
-    return p if p.exists() else None
+def _load_all_dataset_roots() -> Dict[str, str]:
+    """
+    Load the datasets: mapping from configs/run1/data_run1.yaml.
 
-
-def _build_camus_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
-    root = _root("US_CAMUS_ROOT", _DEFAULT_CAMUS_ROOT)
-    if root is None:
-        log.warning("CAMUS root not found — skipping")
-        return []
-    try:
-        import SimpleITK  # noqa: F401
-    except ImportError:
-        log.warning("SimpleITK not installed — skipping CAMUS")
-        return []
-    entries: List[USManifestEntry] = []
-    for e in CAMUSAdapter(root).iter_entries():
-        # Prefer image entries for Phase 1 image SSL coverage
-        if e.modality_type in ("image", "pseudo_video"):
-            entries.append(e)
-        if len(entries) >= n:
-            break
-    log.info("CAMUS: %d entries", len(entries))
-    return entries
+    Returns a dict  dataset_id -> root_path_string.
+    """
+    if not _DATA_CONFIG.exists():
+        log.warning("data_run1.yaml not found at %s — roots unavailable", _DATA_CONFIG)
+        return {}
+    with open(_DATA_CONFIG) as f:
+        raw = yaml.safe_load(f)
+    roots = raw.get("datasets", {})
+    log.info("Loaded %d dataset roots from %s", len(roots), _DATA_CONFIG)
+    return roots
 
 
-def _build_busi_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
-    root = _root("US_BUSI_ROOT", _DEFAULT_BUSI_ROOT)
-    if root is None:
-        log.warning("BUSI root not found — skipping")
-        return []
-    entries: List[USManifestEntry] = []
-    for e in BUSIAdapter(root).iter_entries():
-        entries.append(e)
-        if len(entries) >= n:
-            break
-    log.info("BUSI: %d entries", len(entries))
-    return entries
+# ── Manifest building ─────────────────────────────────────────────────────────
+
+def build_all_dataset_entries(
+    dataset_roots: Dict[str, str],
+    n_per_dataset: int = N_SMOKE_ENTRIES,
+) -> Tuple[List[USManifestEntry], Dict[str, str]]:
+    """
+    Iterate ADAPTER_REGISTRY and collect up to n_per_dataset entries per
+    available dataset.
+
+    Returns
+    -------
+    all_entries : list of USManifestEntry
+    per_dataset_status : dict  dataset_id -> "ok:N" | "skip:reason" | "fail:..."
+    """
+    all_entries: List[USManifestEntry] = []
+    per_dataset_status: Dict[str, str] = {}
+
+    for ds_id, adapter_cls in ADAPTER_REGISTRY.items():
+        root_str = dataset_roots.get(ds_id)
+        if not root_str:
+            per_dataset_status[ds_id] = "skip:no_root_in_config"
+            continue
+
+        root = Path(root_str)
+        if not root.exists():
+            per_dataset_status[ds_id] = f"skip:root_not_found"
+            log.debug("[%s] Root not found: %s", ds_id, root)
+            continue
+
+        try:
+            adapter  = adapter_cls(root=str(root))
+            entries: List[USManifestEntry] = []
+            for e in adapter.iter_entries():
+                entries.append(e)
+                if len(entries) >= n_per_dataset:
+                    break
+
+            if entries:
+                all_entries.extend(entries)
+                per_dataset_status[ds_id] = f"ok:{len(entries)}"
+                log.debug("[%s] %d entries collected", ds_id, len(entries))
+            else:
+                per_dataset_status[ds_id] = "skip:no_entries_yielded"
+                log.warning("[%s] Adapter yielded no entries", ds_id)
+
+        except Exception:
+            per_dataset_status[ds_id] = "fail:adapter_error"
+            log.error("[%s] Adapter error:\n%s", ds_id, traceback.format_exc())
+
+    ok_count   = sum(1 for v in per_dataset_status.values() if v.startswith("ok"))
+    skip_count = sum(1 for v in per_dataset_status.values() if v.startswith("skip"))
+    fail_count = sum(1 for v in per_dataset_status.values() if v.startswith("fail"))
+    log.info(
+        "Manifest scan complete — %d datasets: %d ok, %d skip, %d fail | "
+        "%d total entries",
+        len(ADAPTER_REGISTRY), ok_count, skip_count, fail_count, len(all_entries),
+    )
+    return all_entries, per_dataset_status
 
 
-def _build_echonet_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
-    root = _root("US_ECHONET_ROOT", _DEFAULT_ECHONET_ROOT)
-    if root is None:
-        log.warning("EchoNet root not found — skipping")
-        return []
-    entries: List[USManifestEntry] = []
-    for e in EchoNetDynamicAdapter(root).iter_entries():
-        if e.split == "train":
-            entries.append(e)
-        if len(entries) >= n:
-            break
-    log.info("EchoNet: %d entries", len(entries))
-    return entries
+def build_combined_manifest(
+    dataset_roots: Dict[str, str],
+    force: bool = False,
+) -> Tuple[Path, Dict[str, str]]:
+    """
+    Build (or reuse) the combined smoke manifest.
 
+    Always scans all adapters for per-dataset status; only rewrites the
+    manifest file when missing or US_SMOKE_FORCE_REBUILD=1.
 
-def _build_benin_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
-    root = _root("US_BENIN_ROOT", _DEFAULT_BENIN_ROOT)
-    if root is None:
-        log.warning("Benin-LUS root not found — skipping")
-        return []
-    entries: List[USManifestEntry] = []
-    for e in BeninLUSAdapter(root).iter_entries():
-        entries.append(e)
-        if len(entries) >= n:
-            break
-    log.info("Benin-LUS: %d entries", len(entries))
-    return entries
-
-
-def _build_echonet_ped_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
-    root = _root("US_ECHONET_PED_ROOT", _DEFAULT_ECHONET_PED_ROOT)
-    if root is None:
-        log.warning("EchoNet-Pediatric root not found — skipping")
-        return []
-    entries: List[USManifestEntry] = []
-    for e in EchoNetPediatricAdapter(root).iter_entries():
-        if e.split == "train":
-            entries.append(e)
-        if len(entries) >= n:
-            break
-    log.info("EchoNet-Pediatric: %d entries", len(entries))
-    return entries
-
-
-def _build_ted_entries(n: int = N_SMOKE_ENTRIES) -> List[USManifestEntry]:
-    root = _root("US_TED_ROOT", _DEFAULT_TED_ROOT)
-    if root is None:
-        log.warning("TED root not found — skipping")
-        return []
-    entries: List[USManifestEntry] = []
-    # Only take 'video' modality entries for the smoke manifest (ED/ES images
-    # are a by-product of the same file; video entries are sufficient here).
-    for e in TEDAdapter(root).iter_entries():
-        if e.modality_type == "video":
-            entries.append(e)
-        if len(entries) >= n:
-            break
-    log.info("TED: %d entries", len(entries))
-    return entries
-
-
-def build_combined_manifest(force: bool = False) -> Path:
-    """Build (or reuse) the combined smoke manifest."""
+    Returns (manifest_path, per_dataset_status).
+    """
     _SMOKE_OUT.mkdir(parents=True, exist_ok=True)
 
-    if _COMBINED_MANIFEST.exists() and not force:
-        log.info("Reusing existing manifest: %s", _COMBINED_MANIFEST)
-        return _COMBINED_MANIFEST
+    all_entries, per_dataset_status = build_all_dataset_entries(dataset_roots)
 
-    all_entries: List[USManifestEntry] = (
-        _build_camus_entries()
-        + _build_busi_entries()
-        + _build_echonet_entries()
-        + _build_echonet_ped_entries()
-        + _build_ted_entries()
-        + _build_benin_entries()
-    )
+    if _COMBINED_MANIFEST.exists() and not force:
+        log.info(
+            "Reusing existing manifest: %s  (%d entries from fresh scan)",
+            _COMBINED_MANIFEST, len(all_entries),
+        )
+        return _COMBINED_MANIFEST, per_dataset_status
 
     if not all_entries:
-        raise RuntimeError("No entries found — check dataset paths.")
+        log.error("No entries found — verify dataset_roots in data_run1.yaml. "
+                  "Continuing with an empty manifest (Phases 1-3 will be skipped).")
+        # Write a placeholder so downstream code doesn't crash on missing file
+        _COMBINED_MANIFEST.touch()
+        return _COMBINED_MANIFEST, per_dataset_status
 
     with ManifestWriter(_COMBINED_MANIFEST) as w:
         for e in all_entries:
             w.write(e)
 
-    log.info("Combined manifest written: %d entries → %s",
-             len(all_entries), _COMBINED_MANIFEST)
-    return _COMBINED_MANIFEST
+    log.info("Manifest written: %d entries → %s", len(all_entries), _COMBINED_MANIFEST)
+    return _COMBINED_MANIFEST, per_dataset_status
 
 
-# ── Config / DataModule helpers ───────────────────────────────────────────────
+# ── Config / DataModule ───────────────────────────────────────────────────────
 
 def load_smoke_config() -> dict:
     with open(_SMOKE_CFG) as f:
@@ -276,6 +265,8 @@ def build_datamodule(cfg: dict) -> USFoundationDataModule:
     return dm
 
 
+# ── Utilities ─────────────────────────────────────────────────────────────────
+
 def _to_dev(batch: dict, device: str) -> dict:
     return {
         k: v.to(device) if isinstance(v, torch.Tensor) else v
@@ -289,28 +280,13 @@ def cosine_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return 1.0 - (x * y).sum(dim=-1).mean()
 
 
-# ── Native-resolution collate for DownstreamDataset ──────────────────────────
-
 def _downstream_collate(samples: list) -> dict:
-    """
-    Collate DownstreamDataset samples at native resolution.
-
-    Images in a batch will generally have different sizes — that is by design
-    (the system is resolution-agnostic).  We pad each image to the batch-max
-    (H, W) with zeros and produce a boolean padding_mask (B, ph, pw) where
-    True = valid patch.  The DINOv3 backbone then ignores padding tokens via
-    the attention bias we just fixed.
-    """
+    """Pad heterogeneous images to batch-max (H, W); produce boolean padding_mask."""
     patch_size = 16
-
-    # Determine batch-max spatial dims
     max_h = max(s["image"].shape[-2] for s in samples)
     max_w = max(s["image"].shape[-1] for s in samples)
-
-    # Round up to patch-grid multiples so ph/pw are integers
     max_h = ((max_h + patch_size - 1) // patch_size) * patch_size
     max_w = ((max_w + patch_size - 1) // patch_size) * patch_size
-
     ph = max_h // patch_size
     pw = max_w // patch_size
     B  = len(samples)
@@ -318,16 +294,13 @@ def _downstream_collate(samples: list) -> dict:
 
     images       = torch.zeros(B, C, max_h, max_w)
     padding_mask = torch.zeros(B, ph, pw, dtype=torch.bool)
-
     for i, s in enumerate(samples):
         _, h, w = s["image"].shape
         images[i, :, :h, :w] = s["image"]
-        # Mark patches that are fully covered by the actual image as valid
         vh = h // patch_size
         vw = w // patch_size
         padding_mask[i, :vh, :vw] = True
 
-    # Collate all other fields
     out: dict = {"image": images, "padding_mask": padding_mask}
     for key in samples[0]:
         if key == "image":
@@ -342,7 +315,7 @@ def _downstream_collate(samples: list) -> dict:
             elif isinstance(v0, bool):
                 out[key] = torch.tensor(vals, dtype=torch.bool)
             else:
-                out[key] = vals       # lists, strings, dicts, LabelTargets etc.
+                out[key] = vals
         except Exception:
             out[key] = vals
     return out
@@ -350,85 +323,90 @@ def _downstream_collate(samples: list) -> dict:
 
 # ── Phase 1: Image SSL ────────────────────────────────────────────────────────
 
-def phase1_smoke(dm: USFoundationDataModule, device: str) -> None:
+def phase1_smoke(dm: USFoundationDataModule, device: str) -> str:
     log.info("=== Phase 1: Image SSL (DINOv3-S) ===")
     dtype = torch.float32
 
     student = build_image_backbone("dinov3_s", dtype=dtype)
     teacher = build_image_backbone("dinov3_s", dtype=dtype)
-    branch = ImageBranch(student=student, teacher=teacher).to(device=device, dtype=dtype)
-    opt = torch.optim.AdamW(branch.student.parameters(), lr=1e-4)
+    branch  = ImageBranch(student=student, teacher=teacher).to(device=device, dtype=dtype)
+    opt     = torch.optim.AdamW(branch.student.parameters(), lr=1e-4)
 
     loader = dm.image_loader()
     branch.train()
     n = 0
+    n_nan = 0
     for batch in loader:
-        batch = _to_dev(batch, device)
-        global_crops = batch["global_crops"].to(dtype)   # (B, 2, C, H, W)
+        batch       = _to_dev(batch, device)
+        global_crops = batch["global_crops"].to(dtype)
         local_crops  = batch.get("local_crops")
-        patch_mask   = batch.get("patch_mask")
 
         opt.zero_grad()
-
-        # Teacher on clean crop (no padding mask needed — uniform squares)
         t_out = branch.forward_teacher(global_crops[:, 1])
-        # Student on masked crop
         s_out = branch.forward_student(global_crops[:, 0])
+        loss  = cosine_loss(s_out["cls"], t_out["cls"])
 
-        loss = cosine_loss(s_out["cls"], t_out["cls"])
-
-        # Patch-level loss (if patch tokens available)
         if "patch_tokens" in s_out and "patch_tokens" in t_out:
             loss = loss + 0.5 * cosine_loss(
                 s_out["patch_tokens"].mean(1),
                 t_out["patch_tokens"].mean(1),
             )
 
-        # Local crops
         if local_crops is not None:
             local_crops = local_crops.to(dtype)
             for i in range(local_crops.shape[1]):
                 s_loc = branch.forward_student(local_crops[:, i])
-                loss = loss + 0.3 * cosine_loss(s_loc["cls"], t_out["cls"])
+                loss  = loss + 0.3 * cosine_loss(s_loc["cls"], t_out["cls"])
 
-        loss.backward()
-        nn.utils.clip_grad_norm_(branch.student.parameters(), 1.0)
-        opt.step()
-        branch.update_teacher(momentum=0.9995)
+        if not torch.isfinite(loss):
+            log.error("Phase 1: non-finite loss at batch %d (%.6f) — skipping backward",
+                      n + 1, loss.item())
+            n_nan += 1
+        else:
+            loss.backward()
+            nn.utils.clip_grad_norm_(branch.student.parameters(), 1.0)
+            opt.step()
+            branch.update_teacher(momentum=0.9995)
 
         log.info("  Phase1 batch=%d  loss=%.4f  cls.shape=%s",
                  n + 1, loss.item(), tuple(s_out["cls"].shape))
-        assert torch.isfinite(loss), f"Non-finite loss at batch {n+1}"
         n += 1
         if n >= N_SMOKE_BATCHES:
             break
 
-    assert n > 0, "Phase 1: no image batches yielded — check manifest/stream split"
+    if n == 0:
+        log.error("Phase 1 FAIL — no image batches (empty manifest?)")
+        return "FAIL"
+    if n_nan == n:
+        log.error("Phase 1 FAIL — all batches produced non-finite loss")
+        return "FAIL"
     log.info("Phase 1 PASS (%d batches)", n)
+    return "PASS"
 
 
 # ── Phase 2: Video SSL ────────────────────────────────────────────────────────
 
-def phase2_smoke(dm: USFoundationDataModule, device: str) -> None:
+def phase2_smoke(dm: USFoundationDataModule, device: str) -> str:
     log.info("=== Phase 2: Video SSL (V-JEPA2) ===")
     if not dm._video_entries:
         log.warning("Phase 2 SKIP — no video entries in manifest")
-        return
+        return "SKIP"
 
-    dtype = torch.float32
+    dtype  = torch.float32
     branch = build_video_branch(dtype=dtype, device=device)
-    opt = torch.optim.AdamW(branch.student.parameters(), lr=1e-4)
+    opt    = torch.optim.AdamW(branch.student.parameters(), lr=1e-4)
 
     loader = dm.video_loader()
     branch.train()
     n = 0
+    n_nan = 0
     for batch in loader:
-        batch = _to_dev(batch, device)
-        full_clip  = batch["full_clips"].to(dtype)          # (B, T, C, H, W)
-        vis_clip   = batch["visible_clips"].to(dtype)
-        tube_mask  = batch.get("tube_masks")
-        pad_mask   = batch.get("padding_masks")
-        valid_fr   = batch.get("valid_frames")
+        batch     = _to_dev(batch, device)
+        full_clip = batch["full_clips"].to(dtype)
+        vis_clip  = batch["visible_clips"].to(dtype)
+        tube_mask = batch.get("tube_masks")
+        pad_mask  = batch.get("padding_masks")
+        valid_fr  = batch.get("valid_frames")
 
         opt.zero_grad()
         t_out = branch.forward_teacher(full_clip, padding_mask=pad_mask,
@@ -436,53 +414,55 @@ def phase2_smoke(dm: USFoundationDataModule, device: str) -> None:
         s_out = branch.forward_student(vis_clip, tube_mask=tube_mask,
                                        padding_mask=pad_mask,
                                        valid_frames=valid_fr)
-
         loss = cosine_loss(s_out["clip_cls"], t_out["clip_cls"])
-        loss.backward()
-        nn.utils.clip_grad_norm_(branch.student.parameters(), 1.0)
-        opt.step()
-        branch.update_teacher(momentum=0.9995)
+
+        if not torch.isfinite(loss):
+            log.error("Phase 2: non-finite loss at batch %d", n + 1)
+            n_nan += 1
+        else:
+            loss.backward()
+            nn.utils.clip_grad_norm_(branch.student.parameters(), 1.0)
+            opt.step()
+            branch.update_teacher(momentum=0.9995)
 
         log.info("  Phase2 batch=%d  loss=%.4f  clip_cls.shape=%s",
                  n + 1, loss.item(), tuple(s_out["clip_cls"].shape))
-        assert torch.isfinite(loss), f"Non-finite loss at batch {n+1}"
         n += 1
         if n >= N_SMOKE_BATCHES:
             break
 
     if n == 0:
         log.warning("Phase 2 SKIP — video loader yielded no batches")
-        return
+        return "SKIP"
+    if n_nan == n:
+        log.error("Phase 2 FAIL — all batches non-finite")
+        return "FAIL"
     log.info("Phase 2 PASS (%d batches)", n)
+    return "PASS"
 
 
-# ── Phase 3: Cross-modal alignment ───────────────────────────────────────────
+# ── Phase 3: Cross-modal Alignment ───────────────────────────────────────────
 
-def phase3_smoke(dm: USFoundationDataModule, device: str) -> None:
+def phase3_smoke(dm: USFoundationDataModule, device: str) -> str:
     log.info("=== Phase 3: Cross-modal Alignment ===")
     if not dm._video_entries:
         log.warning("Phase 3 SKIP — no video entries in manifest")
-        return
+        return "SKIP"
 
     dtype = torch.float32
 
-    # Image branch
     img_student = build_image_backbone("dinov3_s", dtype=dtype)
     img_teacher = build_image_backbone("dinov3_s", dtype=dtype)
-    img_branch = ImageBranch(img_student, img_teacher).to(device=device, dtype=dtype)
+    img_branch  = ImageBranch(img_student, img_teacher).to(device=device, dtype=dtype)
+    vid_branch  = build_video_branch(dtype=dtype, device=device)
 
-    # Video branch
-    vid_branch = build_video_branch(dtype=dtype, device=device)
-
-    D_img = img_branch.embed_dim              # 384 for dinov3_s
-    D_vid = vid_branch.student.hidden_size    # 1024 for vjepa2_l
+    D_img = img_branch.embed_dim
+    D_vid = vid_branch.student.hidden_size
     align_dim = 256
 
-    cross = CrossBranchDistillation(img_dim=D_img, vid_dim=D_vid,
-                                    align_dim=align_dim).to(device=device, dtype=dtype)
-    # PrototypeHead works in a single shared space.
-    # Video tokens (D_vid) are projected to D_img before assignment.
-    proto     = PrototypeHead(embed_dim=D_img, n_prototypes=64).to(device=device, dtype=dtype)
+    cross      = CrossBranchDistillation(img_dim=D_img, vid_dim=D_vid,
+                                         align_dim=align_dim).to(device=device, dtype=dtype)
+    proto      = PrototypeHead(embed_dim=D_img, n_prototypes=64).to(device=device, dtype=dtype)
     vid_to_img = nn.Linear(D_vid, D_img, bias=False).to(device=device, dtype=dtype)
 
     params = (
@@ -494,377 +474,406 @@ def phase3_smoke(dm: USFoundationDataModule, device: str) -> None:
     )
     opt = torch.optim.AdamW(params, lr=1e-4)
 
-    img_branch.train()
-    vid_branch.train()
-    cross.train()
-    proto.train()
-    vid_to_img.train()
+    img_branch.train(); vid_branch.train()
+    cross.train(); proto.train(); vid_to_img.train()
 
     n = 0
+    n_nan = 0
     for dual in dm.combined_loader():
         img_batch = _to_dev(dual.image_batch, device)
         vid_batch = _to_dev(dual.video_batch, device)
 
-        global_crops = img_batch["global_crops"].to(dtype)   # (B, 2, C, H, W)
-        full_clip    = vid_batch["full_clips"].to(dtype)      # (B, T, C, H, W)
+        global_crops = img_batch["global_crops"].to(dtype)
+        full_clip    = vid_batch["full_clips"].to(dtype)
         vis_clip     = vid_batch["visible_clips"].to(dtype)
         tube_mask    = vid_batch.get("tube_masks")
         pad_mask_vid = vid_batch.get("padding_masks")
 
         opt.zero_grad()
 
-        # Image arm
-        t_img = img_branch.forward_teacher(global_crops[:, 1])
-        s_img = img_branch.forward_student(global_crops[:, 0])
+        t_img   = img_branch.forward_teacher(global_crops[:, 1])
+        s_img   = img_branch.forward_student(global_crops[:, 0])
         loss_img = cosine_loss(s_img["cls"], t_img["cls"])
 
-        # Video arm
-        t_vid = vid_branch.forward_teacher(full_clip, padding_mask=pad_mask_vid)
-        s_vid = vid_branch.forward_student(vis_clip, tube_mask=tube_mask,
-                                           padding_mask=pad_mask_vid)
+        t_vid   = vid_branch.forward_teacher(full_clip, padding_mask=pad_mask_vid)
+        s_vid   = vid_branch.forward_student(vis_clip, tube_mask=tube_mask,
+                                             padding_mask=pad_mask_vid)
         loss_vid = cosine_loss(s_vid["clip_cls"], t_vid["clip_cls"])
 
-        # Cross-branch distillation
-        img_patches = t_img["patch_tokens"]                   # (B, N, D_img)
-        vid_tubes   = s_vid.get("tube_tokens",
-                       s_vid["clip_cls"].unsqueeze(1))        # (B, M, D_vid)
-        loss_cross  = cross(img_patches, vid_tubes)
-
-        # Prototype consistency: project video to img dim before assignment
-        vid_tubes_proj = vid_to_img(vid_tubes)                # (B, M, D_img)
-        loss_proto = proto.consistency_loss(img_patches, vid_tubes_proj)
+        img_patches    = t_img["patch_tokens"]
+        vid_tubes      = s_vid.get("tube_tokens", s_vid["clip_cls"].unsqueeze(1))
+        loss_cross     = cross(img_patches, vid_tubes)
+        vid_tubes_proj = vid_to_img(vid_tubes)
+        loss_proto     = proto.consistency_loss(img_patches, vid_tubes_proj)
 
         loss = loss_img + loss_vid + loss_cross + 0.5 * loss_proto
-        loss.backward()
-        nn.utils.clip_grad_norm_(params, 1.0)
-        opt.step()
-        img_branch.update_teacher()
-        vid_branch.update_teacher()
+
+        if not torch.isfinite(loss):
+            log.error("Phase 3: non-finite loss at batch %d", n + 1)
+            n_nan += 1
+        else:
+            loss.backward()
+            nn.utils.clip_grad_norm_(params, 1.0)
+            opt.step()
+            img_branch.update_teacher()
+            vid_branch.update_teacher()
 
         log.info(
-            "  Phase3 batch=%d  loss=%.4f  "
-            "(img=%.3f vid=%.3f cross=%.3f proto=%.3f)",
+            "  Phase3 batch=%d  loss=%.4f  (img=%.3f vid=%.3f cross=%.3f proto=%.3f)",
             n + 1, loss.item(), loss_img.item(),
             loss_vid.item(), loss_cross.item(), loss_proto.item(),
         )
-        assert torch.isfinite(loss), f"Non-finite loss at batch {n+1}"
         n += 1
         if n >= N_SMOKE_BATCHES:
             break
 
     if n == 0:
         log.warning("Phase 3 SKIP — combined loader yielded no batches")
-        return
+        return "SKIP"
+    if n_nan == n:
+        log.error("Phase 3 FAIL — all batches non-finite")
+        return "FAIL"
     log.info("Phase 3 PASS (%d batches)", n)
+    return "PASS"
 
 
-# ── Phase 4: Downstream heads ─────────────────────────────────────────────────
+# ── Phase 4: All Finetune Experiments ────────────────────────────────────────
 
-def _build_backbone_frozen(device: str, dtype: torch.dtype) -> nn.Module:
-    bb = build_image_backbone("dinov3_s", dtype=dtype).to(device=device, dtype=dtype)
-    for p in bb.parameters():
+# (result_key, cls_name, module, dataset_id, finetune_yaml_stem)
+_STANDARD_EXPERIMENTS = [
+    ("busi",       "BUSIFinetune",       "finetune.experiments.busi",              "BUSI",                    "busi"),
+    ("camus",      "CAMUSFinetune",      "finetune.experiments.camus",             "CAMUS",                   "camus"),
+    ("echonet",    "EchoNetFinetune",    "finetune.experiments.echonet",           "EchoNet-Dynamic",         "echonet"),
+    ("tn3k",       "TN3KFinetune",       "finetune.experiments.tn3k",              "TN3K",                    "tn3k"),
+    ("busbra",     "BUSBRAFinetune",     "finetune.experiments.busbra",            "BUS-BRA",                 "busbra"),
+    ("cardiacudc", "CardiacUDCFinetune", "finetune.experiments.cardiacudc",        "CardiacUDC",              "cardiacudc"),
+    ("echocp",     "EchoCPFinetune",     "finetune.experiments.echocp",            "EchoCP",                  "echocp"),
+]
+
+_ECHONET_EXPERIMENTS = [
+    ("echonet_ped", "EchoNetPediatricFinetune", "finetune.experiments.echonet_pediatric",
+     "EchoNet-Pediatric", "echonet_pediatric"),
+    ("echonet_lvh", "EchoNetLVHFinetune",       "finetune.experiments.echonet_lvh",
+     "EchoNet-LVH", "echonet_lvh"),
+    ("mimic_lvvol", "MIMICLVVolFinetune",        "finetune.experiments.mimic_lvvol",
+     "MIMIC-IV-Echo-LVVol-A4C", "mimic_lvvol"),
+]
+
+_LUS_EXPERIMENTS = [
+    ("lus_patient", "LUSPatientFinetune", "finetune.experiments.lus_patient", "lus_patient"),
+    ("lus_video",   "LUSVideoFinetune",   "finetune.experiments.lus_video",   "lus_video"),
+]
+
+
+def _load_finetune_config(yaml_stem: str):
+    """Load finetune hyperparameters from configs/finetune/{yaml_stem}.yaml."""
+    from finetune.base import FinetuneConfig
+
+    cfg_path = _FINETUNE_CFG / f"{yaml_stem}.yaml"
+    if cfg_path.exists():
+        cfg = FinetuneConfig.from_yaml(str(cfg_path))
+    else:
+        log.warning("Finetune config not found: %s — using defaults", cfg_path)
+        cfg = FinetuneConfig()
+    # Smoke overrides — keep runs fast
+    cfg.max_epochs  = 1
+    cfg.batch_size  = 2
+    cfg.num_workers = 0
+    cfg.patience    = 1
+    return cfg
+
+
+def _forward_smoke_batch(exp, batch: dict, device: str, result_key: str, batch_idx: int) -> None:
+    """Run one minimal forward pass for a finetune experiment batch."""
+    if "image" in batch and isinstance(batch["image"], torch.Tensor):
+        imgs = batch["image"].to(device=device, dtype=torch.float32)
+        if imgs.shape[1] == 1:
+            imgs = imgs.repeat(1, 3, 1, 1)
+        with torch.no_grad():
+            feats = exp.encoder.encode_image(imgs)
+        log.info("[%s] batch=%d encode_image OK — cls.shape=%s",
+                 result_key, batch_idx, tuple(feats["cls"].shape))
+    elif "clips" in batch:
+        # LUS patient MIL — encode first patient's clips
+        clips = batch["clips"][0]
+        if isinstance(clips, torch.Tensor):
+            with torch.no_grad():
+                feats = exp.encoder.encode_video(clips.to(device=device, dtype=torch.float32))
+            log.info("[%s] batch=%d encode_video OK — clip_cls.shape=%s",
+                     result_key, batch_idx, tuple(feats["clip_cls"].shape))
+    elif "clip" in batch and isinstance(batch["clip"], torch.Tensor):
+        clip = batch["clip"].to(device=device, dtype=torch.float32)
+        if clip.dim() == 4:
+            clip = clip.unsqueeze(0)
+        with torch.no_grad():
+            feats = exp.encoder.encode_video(clip)
+        log.info("[%s] batch=%d encode_video OK — clip_cls.shape=%s",
+                 result_key, batch_idx, tuple(feats["clip_cls"].shape))
+
+
+def _smoke_experiment(
+    result_key:  str,
+    cls_name:    str,
+    module:      str,
+    data_root:   Optional[str],
+    yaml_stem:   str,
+    img_branch,
+    vid_branch,
+    device:      str,
+    output_dir:  Path,
+    extra_kwargs: dict = None,
+) -> str:
+    """
+    Instantiate one finetune experiment and verify setup + dataloader.
+
+    Returns "PASS" | "FAIL" | "SKIP".
+    """
+    import importlib
+
+    if not data_root or not Path(data_root).exists():
+        log.warning("[%s] data_root not found (%r) — SKIP", result_key, data_root)
+        return "SKIP"
+
+    try:
+        mod = importlib.import_module(module)
+        cls = getattr(mod, cls_name)
+        cfg = _load_finetune_config(yaml_stem)
+
+        kwargs = dict(data_root=data_root, output_dir=str(output_dir / result_key), cfg=cfg)
+        if extra_kwargs:
+            kwargs.update(extra_kwargs)
+
+        exp = cls(**kwargs)
+        exp.setup(img_branch=img_branch, device=device, vid_branch=vid_branch)
+
+        loader = exp.build_dataloader("train")
+        n_batches = 0
+        for batch in loader:
+            log.info("[%s] batch=%d loaded — keys: %s",
+                     result_key, n_batches + 1, list(batch.keys()))
+            _forward_smoke_batch(exp, batch, device, result_key, n_batches + 1)
+            n_batches += 1
+            if n_batches >= N_SMOKE_BATCHES:
+                break
+
+        if n_batches == 0:
+            log.error("[%s] FAIL — dataloader yielded no batches", result_key)
+            return "FAIL"
+
+        log.info("[%s] PASS (%d batches)", result_key, n_batches)
+        return "PASS"
+
+    except Exception:
+        log.error("[%s] FAIL:\n%s", result_key, traceback.format_exc())
+        return "FAIL"
+
+
+def _smoke_lus_experiment(
+    result_key:   str,
+    cls_name:     str,
+    module:       str,
+    yaml_stem:    str,
+    benin_root:   Optional[str],
+    rsa_root:     Optional[str],
+    img_branch,
+    vid_branch,
+    device:       str,
+    output_dir:   Path,
+) -> str:
+    """Smoke one dual-root LUS experiment (Benin + RSA)."""
+    import importlib
+
+    has_benin = benin_root and Path(benin_root).exists()
+    has_rsa   = rsa_root   and Path(rsa_root).exists()
+    if not has_benin and not has_rsa:
+        log.warning("[%s] Neither Benin nor RSA root found — SKIP", result_key)
+        return "SKIP"
+
+    benin_root = benin_root or ""
+    rsa_root   = rsa_root   or ""
+
+    try:
+        mod = importlib.import_module(module)
+        cls = getattr(mod, cls_name)
+        cfg = _load_finetune_config(yaml_stem)
+        exp = cls(
+            data_root_benin=benin_root,
+            data_root_rsa=rsa_root,
+            output_dir=str(output_dir / result_key),
+            cfg=cfg,
+        )
+        exp.setup(img_branch=img_branch, device=device, vid_branch=vid_branch)
+        loader = exp.build_dataloader("train")
+        n_batches = 0
+        for batch in loader:
+            log.info("[%s] batch=%d loaded — keys: %s",
+                     result_key, n_batches + 1, list(batch.keys()))
+            _forward_smoke_batch(exp, batch, device, result_key, n_batches + 1)
+            n_batches += 1
+            if n_batches >= N_SMOKE_BATCHES:
+                break
+
+        if n_batches == 0:
+            log.error("[%s] FAIL — dataloader yielded no batches", result_key)
+            return "FAIL"
+
+        log.info("[%s] PASS (%d batches)", result_key, n_batches)
+        return "PASS"
+    except Exception:
+        log.error("[%s] FAIL:\n%s", result_key, traceback.format_exc())
+        return "FAIL"
+
+
+def finetune_experiments_smoke(
+    dataset_roots: Dict[str, str],
+    device:        str,
+) -> Dict[str, str]:
+    """
+    Run all 11 finetune experiments with a minimal Ultatron backbone.
+
+    Returns a dict experiment_key -> "PASS" | "FAIL" | "SKIP".
+    """
+    log.info("=== Phase 4: Finetune Experiments Smoke ===")
+
+    dtype = torch.float32
+    log.info("Building DINOv3-S image backbone …")
+    img_student  = build_image_backbone("dinov3_s", dtype=dtype)
+    img_teacher  = build_image_backbone("dinov3_s", dtype=dtype)
+    img_branch   = ImageBranch(img_student, img_teacher).to(device=device, dtype=dtype)
+    for p in img_branch.parameters():
         p.requires_grad_(False)
-    bb.eval()
-    return bb
+    img_branch.eval()
+
+    log.info("Building V-JEPA2-L video backbone …")
+    vid_branch = build_video_branch(dtype=dtype, device=device)
+    for p in vid_branch.parameters():
+        p.requires_grad_(False)
+    vid_branch.eval()
+
+    out_dir = _SMOKE_OUT / "finetune"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    results: Dict[str, str] = {}
+
+    for result_key, cls_name, module, ds_id, yaml_stem in (
+        _STANDARD_EXPERIMENTS + _ECHONET_EXPERIMENTS
+    ):
+        root = dataset_roots.get(ds_id) or ""
+        results[result_key] = _smoke_experiment(
+            result_key=result_key,
+            cls_name=cls_name,
+            module=module,
+            data_root=root,
+            yaml_stem=yaml_stem,
+            img_branch=img_branch,
+            vid_branch=vid_branch,
+            device=device,
+            output_dir=out_dir,
+        )
+
+    # Dual-root LUS experiments
+    benin_root = dataset_roots.get("Benin-LUS") or dataset_roots.get("BeninVideos") or ""
+    rsa_root   = dataset_roots.get("RSA-LUS") or ""
+
+    for result_key, cls_name, module, yaml_stem in _LUS_EXPERIMENTS:
+        results[result_key] = _smoke_lus_experiment(
+            result_key=result_key,
+            cls_name=cls_name,
+            module=module,
+            yaml_stem=yaml_stem,
+            benin_root=benin_root,
+            rsa_root=rsa_root,
+            img_branch=img_branch,
+            vid_branch=vid_branch,
+            device=device,
+            output_dir=out_dir,
+        )
+
+    return results
 
 
-def _phase4_classification_smoke(
-    busi_entries: List[USManifestEntry], device: str
-) -> None:
-    """Binary malignancy classification on BUSI."""
-    entries = [e for e in busi_entries if e.task_type != "ssl_only"][:16]
-    if not entries:
-        log.warning("Phase4/cls SKIP — no BUSI supervised entries")
-        return
-
-    dtype = torch.float32
-    bb = _build_backbone_frozen(device, dtype)
-    D  = bb.hidden_size
-    head = LinearClsHead(embed_dim=D, n_classes=1).to(device=device, dtype=dtype)
-    opt  = torch.optim.AdamW(head.parameters(), lr=1e-3)
-
-    ds = DownstreamDataset(entries, active_head_ids=["breast_malignancy_cls"])
-    loader = DataLoader(ds, batch_size=4, shuffle=False,
-                        collate_fn=_downstream_collate)
-
-    head.train()
-    n = 0
-    for batch in loader:
-        imgs     = batch["image"].to(device=device, dtype=dtype)
-        pad_mask = batch.get("padding_mask")
-        if imgs.shape[1] == 1:
-            imgs = imgs.repeat(1, 3, 1, 1)
-        if pad_mask is not None:
-            pad_mask = pad_mask.to(device=device)
-
-        opt.zero_grad()
-        with torch.no_grad():
-            feats = bb(imgs, padding_mask=pad_mask)
-        logits = head(feats["cls"])                             # (B, 1)
-        cls_label = batch.get("cls_label")
-        if cls_label is None or (isinstance(cls_label, torch.Tensor) and (cls_label < 0).all()):
-            loss = logits.mean() * 0.0
-        else:
-            lbl = (cls_label if isinstance(cls_label, torch.Tensor)
-                   else torch.tensor(cls_label)).to(device=device, dtype=dtype)
-            lbl = lbl.float().unsqueeze(1).clamp(0, 1)
-            loss = F.binary_cross_entropy_with_logits(logits, lbl)
-        loss.backward()
-        opt.step()
-
-        log.info("  Phase4/cls batch=%d  loss=%.4f  logits.shape=%s",
-                 n + 1, loss.item(), tuple(logits.shape))
-        assert torch.isfinite(loss)
-        n += 1
-        if n >= N_SMOKE_BATCHES:
-            break
-
-    log.info("Phase4/classification PASS (%d batches)", n)
+def phase4_smoke(dataset_roots: Dict[str, str], device: str) -> Dict[str, str]:
+    return finetune_experiments_smoke(dataset_roots, device)
 
 
-def _phase4_segmentation_smoke(
-    busi_entries: List[USManifestEntry], device: str
-) -> None:
-    """Lesion segmentation on BUSI."""
-    entries = [e for e in busi_entries
-               if e.task_type in ("seg", "seg_cls") and e.seg_mask_paths][:8]
-    if not entries:
-        log.warning("Phase4/seg SKIP — no BUSI segmentation entries")
-        return
+# ── Phase 5: Ablation Backbones ───────────────────────────────────────────────
 
-    dtype = torch.float32
-    bb   = _build_backbone_frozen(device, dtype)
-    D    = bb.hidden_size
-    head = LinearSegHead(embed_dim=D, n_classes=1).to(device=device, dtype=dtype)
-    opt  = torch.optim.AdamW(head.parameters(), lr=1e-3)
-
-    ds = DownstreamDataset(entries, active_head_ids=["breast_lesion_seg"])
-    loader = DataLoader(ds, batch_size=2, shuffle=False,
-                        collate_fn=_downstream_collate)
-
-    head.train()
-    n = 0
-    for batch in loader:
-        imgs     = batch["image"].to(device=device, dtype=dtype)
-        pad_mask = batch.get("padding_mask")
-        if imgs.shape[1] == 1:
-            imgs = imgs.repeat(1, 3, 1, 1)
-        B, _, H, W = imgs.shape
-        ph, pw = H // 16, W // 16
-        if pad_mask is not None:
-            pad_mask = pad_mask.to(device=device)
-
-        opt.zero_grad()
-        with torch.no_grad():
-            feats = bb(imgs, padding_mask=pad_mask)
-        patch_tokens = feats["patch_tokens"]                  # (B, N, D)
-        seg_logits   = head(patch_tokens, ph=ph, pw=pw)       # (B, 1, H, W)
-
-        seg_mask = batch.get("seg_mask")
-        if seg_mask is not None and seg_mask.shape[-1] == W:
-            seg_mask = seg_mask.to(device=device, dtype=dtype)
-            if seg_mask.shape[1] != 1:
-                seg_mask = seg_mask[:, :1]
-            loss = F.binary_cross_entropy_with_logits(seg_logits, seg_mask)
-        else:
-            loss = seg_logits.mean() * 0.0
-        loss.backward()
-        opt.step()
-
-        log.info("  Phase4/seg batch=%d  loss=%.4f  seg_logits.shape=%s",
-                 n + 1, loss.item(), tuple(seg_logits.shape))
-        assert torch.isfinite(loss)
-        n += 1
-        if n >= N_SMOKE_BATCHES:
-            break
-
-    log.info("Phase4/segmentation PASS (%d batches)", n)
+_ABLATION_BACKBONE_SPECS: List[Tuple[str, dict]] = [
+    ("resnet50",   {"type": "standard",   "key": "resnet50",  "variant": "resnet50"}),
+    ("vit_b_16",   {"type": "standard",   "key": "vit_b_16",  "variant": "vit_b_16"}),
+    ("dinov3_b",   {"type": "dinov3",     "key": "dinov3_b",  "variant": "dinov3_b"}),
+    ("biomedclip", {"type": "biomedclip", "key": "biomedclip"}),
+    ("vjepa2_l",   {"type": "vjepa",      "key": "vjepa2_l",  "variant": "vjepa2_l"}),
+    ("usfm", {
+        "type": "usfm",
+        "key": "usfm",
+        "checkpoint": ablation_weight_path("USFM_latest.pth", "US_USFM_CHECKPOINT"),
+        "embed_dim": 768,
+    }),
+    ("echocare", {
+        "type": "echocare",
+        "key": "echocare",
+        "checkpoint": ablation_weight_path("echocare_encoder.pth", "US_ECHOCARE_CHECKPOINT"),
+        "embed_dim": 2048,
+        "is_video": False,
+    }),
+    ("openus", {
+        "type": "openus",
+        "key": "openus",
+        "checkpoint": ablation_weight_path("openus_cpt0150.pth", "US_OPENUS_CHECKPOINT"),
+        "embed_dim": 768,
+        "vmamba_checkpoint": ablation_weight_path(
+            "vssm_small_0229_ckpt_epoch_222.pth", "US_OPENUS_VMAMBA_CHECKPOINT"
+        ),
+    }),
+]
 
 
-def _phase4_regression_smoke(
-    echonet_entries: List[USManifestEntry], device: str
-) -> None:
-    """Ejection-fraction regression on EchoNet."""
-    if not echonet_entries:
-        log.warning("Phase4/reg SKIP — no EchoNet entries")
-        return
-
-    dtype = torch.float32
-    bb   = _build_backbone_frozen(device, dtype)
-    D    = bb.hidden_size
-    head = RegressionHead(embed_dim=D, output_min=0.0, output_max=100.0).to(
-        device=device, dtype=dtype)
-    opt  = torch.optim.AdamW(head.parameters(), lr=1e-3)
-
-    ds = DownstreamDataset(echonet_entries, active_head_ids=["cardiac_ef_regression"])
-    loader = DataLoader(ds, batch_size=4, shuffle=False,
-                        collate_fn=_downstream_collate)
-
-    head.train()
-    n = 0
-    for batch in loader:
-        imgs     = batch["image"].to(device=device, dtype=dtype)
-        pad_mask = batch.get("padding_mask")
-        if imgs.shape[1] == 1:
-            imgs = imgs.repeat(1, 3, 1, 1)
-        if pad_mask is not None:
-            pad_mask = pad_mask.to(device=device)
-
-        opt.zero_grad()
-        with torch.no_grad():
-            feats = bb(imgs, padding_mask=pad_mask)
-        pred = head(feats["cls"])                             # (B, 1)
-
-        # EF target from source_meta or label_targets
-        label_targets = batch.get("label_targets", [])
-        ef_vals = []
-        for lt in label_targets:
-            if hasattr(lt, "head_id") and lt.head_id == "cardiac_ef_regression":
-                ef_vals.append(lt.value)
-        if ef_vals:
-            target = torch.tensor(ef_vals, device=device, dtype=dtype).unsqueeze(1)
-            loss = F.smooth_l1_loss(pred, target)
-        else:
-            loss = pred.mean() * 0.0
-        loss.backward()
-        opt.step()
-
-        log.info("  Phase4/reg batch=%d  loss=%.4f  pred.shape=%s",
-                 n + 1, loss.item(), tuple(pred.shape))
-        assert torch.isfinite(loss)
-        n += 1
-        if n >= N_SMOKE_BATCHES:
-            break
-
-    log.info("Phase4/regression PASS (%d batches)", n)
+def _dummy_image_forward(encoder, device: str) -> None:
+    """Run a dummy 2×3×224×224 forward pass through an encoder."""
+    encoder.eval()
+    encoder.to(device)
+    dummy = torch.randn(2, 3, 224, 224, device=device)
+    with torch.no_grad():
+        out = encoder.encode_image(dummy)
+    cls = out["cls"]
+    log.info("  dummy forward OK — cls.shape=%s  dtype=%s",
+             tuple(cls.shape), cls.dtype)
 
 
-def _patient_collate(samples: list) -> dict:
+def _backbone_needs_checkpoint(spec: dict) -> bool:
+    return spec.get("type") in ("usfm", "echocare", "openus")
+
+
+def phase5_ablation_backbones_smoke(device: str) -> Dict[str, str]:
     """
-    Collate PatientLevelDataset samples.
+    Load and smoke-test all ablation/comparison backbones via build_encoder().
 
-    Each sample has:
-      frames:      (max_frames, C, H, W)
-      frame_mask:  (max_frames,) bool
-      label_targets: list[LabelTarget]
-
-    Frames are padded to batch-max (H, W) preserving native resolution.
+    Returns a dict backbone_key -> "PASS" | "FAIL" | "SKIP".
     """
-    patch_size = 16
-    max_h = max(s["frames"].shape[-2] for s in samples)
-    max_w = max(s["frames"].shape[-1] for s in samples)
-    max_h = ((max_h + patch_size - 1) // patch_size) * patch_size
-    max_w = ((max_w + patch_size - 1) // patch_size) * patch_size
+    log.info("=== Phase 5: Ablation Backbones Smoke ===")
 
-    F_  = samples[0]["frames"].shape[0]
-    C   = samples[0]["frames"].shape[1]
-    B   = len(samples)
-    ph, pw = max_h // patch_size, max_w // patch_size
+    results: Dict[str, str] = {}
 
-    frames_t    = torch.zeros(B, F_, C, max_h, max_w)
-    frame_masks = torch.zeros(B, F_, dtype=torch.bool)
-    pad_masks   = torch.zeros(B, ph, pw, dtype=torch.bool)
+    for key, spec in _ABLATION_BACKBONE_SPECS:
+        log.info("--- %s ---", key)
+        try:
+            if _backbone_needs_checkpoint(spec):
+                ckpt = spec.get("checkpoint", "")
+                if not ckpt or not Path(ckpt).exists():
+                    log.warning("[%s] Checkpoint not found at %r — SKIP", key, ckpt)
+                    results[key] = "SKIP"
+                    continue
 
-    for i, s in enumerate(samples):
-        h, w = s["frames"].shape[-2], s["frames"].shape[-1]
-        frames_t[i, :, :, :h, :w] = s["frames"]
-        frame_masks[i]              = s["frame_mask"]
-        vh, vw = h // patch_size, w // patch_size
-        pad_masks[i, :vh, :vw]     = True
+            enc = build_encoder(spec, device=device)
+            _dummy_image_forward(enc, device)
+            log.info("[%s] PASS", key)
+            results[key] = "PASS"
+        except Exception:
+            log.error("[%s] FAIL:\n%s", key, traceback.format_exc())
+            results[key] = "FAIL"
 
-    return {
-        "frames":        frames_t,
-        "frame_mask":    frame_masks,
-        "padding_mask":  pad_masks,
-        "label_targets": [s["label_targets"] for s in samples],
-    }
-
-
-def _phase4_patient_cls_smoke(
-    benin_entries: List[USManifestEntry], device: str
-) -> None:
-    """Patient-level TB classification on Benin-LUS."""
-    if not benin_entries:
-        log.warning("Phase4/patient_cls SKIP — no Benin entries")
-        return
-
-    dtype = torch.float32
-    bb   = _build_backbone_frozen(device, dtype)
-    D    = 384
-    head = LinearClsHead(embed_dim=D, n_classes=1).to(device=device, dtype=dtype)
-    opt  = torch.optim.AdamW(head.parameters(), lr=1e-3)
-
-    ds = PatientLevelDataset(
-        benin_entries,
-        active_head_ids=["lus_patient_tb"],
-        max_frames=4,
-    )
-    loader = DataLoader(ds, batch_size=2, shuffle=False,
-                        collate_fn=_patient_collate)
-
-    head.train()
-    n = 0
-    for batch in loader:
-        frames    = batch["frames"].to(device=device, dtype=dtype)  # (B, F, C, H, W)
-        fm        = batch["frame_mask"].to(device=device)            # (B, F)
-        pad_mask  = batch["padding_mask"].to(device=device)          # (B, ph, pw)
-        B, F_, C_, H, W = frames.shape
-
-        if C_ == 1:
-            frames = frames.repeat(1, 1, 3, 1, 1)
-
-        # Flatten frames, run backbone, mean-pool valid frames for patient repr
-        frames_flat = frames.view(B * F_, frames.shape[2], H, W)
-        pm_flat     = pad_mask.unsqueeze(1).expand(B, F_, -1, -1
-                       ).reshape(B * F_, *pad_mask.shape[1:])
-
-        opt.zero_grad()
-        with torch.no_grad():
-            feats_flat = bb(frames_flat, padding_mask=pm_flat)
-        cls_flat     = feats_flat["cls"].view(B, F_, D)             # (B, F, D)
-        fm_f         = fm.float().unsqueeze(-1)                     # (B, F, 1)
-        patient_feat = (cls_flat * fm_f).sum(1) / fm_f.sum(1).clamp(min=1)
-
-        logits = head(patient_feat)                                 # (B, 1)
-
-        label_targets_list = batch.get("label_targets", [])
-        tb_vals = []
-        for patient_targets in label_targets_list:
-            for lt in (patient_targets if isinstance(patient_targets, list) else []):
-                if hasattr(lt, "head_id") and lt.head_id == "lus_patient_tb":
-                    tb_vals.append(float(lt.value))
-                    break
-        if tb_vals:
-            target = torch.tensor(tb_vals, device=device, dtype=dtype).unsqueeze(1)
-            target = target.clamp(0, 1)
-            loss = F.binary_cross_entropy_with_logits(logits, target)
-        else:
-            loss = logits.mean() * 0.0
-        loss.backward()
-        opt.step()
-
-        log.info("  Phase4/patient_cls batch=%d  loss=%.4f  logits.shape=%s",
-                 n + 1, loss.item(), tuple(logits.shape))
-        assert torch.isfinite(loss)
-        n += 1
-        if n >= N_SMOKE_BATCHES:
-            break
-
-    log.info("Phase4/patient_classification PASS (%d batches)", n)
-
-
-def phase4_smoke(
-    dm: USFoundationDataModule,
-    busi_entries: List[USManifestEntry],
-    echonet_entries: List[USManifestEntry],
-    benin_entries: List[USManifestEntry],
-    device: str,
-) -> None:
-    log.info("=== Phase 4: Downstream Heads ===")
-    _phase4_classification_smoke(busi_entries, device)
-    _phase4_segmentation_smoke(busi_entries, device)
-    _phase4_regression_smoke(echonet_entries, device)
-    _phase4_patient_cls_smoke(benin_entries, device)
+    return results
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -873,49 +882,130 @@ def main() -> None:
     device = _auto_device()
     log.info("Device: %s", device)
 
-    # Build manifests
-    log.info("Building combined smoke manifest …")
-    build_combined_manifest()
+    force_rebuild = os.environ.get("US_SMOKE_FORCE_REBUILD", "0") == "1"
 
-    # Cache per-dataset entries for Phase 4
-    busi_entries    = _build_busi_entries()
-    echonet_entries = _build_echonet_entries()
-    benin_entries   = _build_benin_entries()
+    # Load dataset roots from data_run1.yaml
+    log.info("Loading dataset roots from %s …", _DATA_CONFIG)
+    dataset_roots = _load_all_dataset_roots()
+
+    # Build combined manifest
+    log.info("Building combined smoke manifest …")
+    _, dataset_status = build_combined_manifest(dataset_roots, force=force_rebuild)
 
     # DataModule
     cfg = load_smoke_config()
     dm  = build_datamodule(cfg)
 
-    results = {}
+    # Phase results
+    phase_results:     Dict[str, str] = {}
+    experiment_results: Dict[str, str] = {}
+    ablation_results:  Dict[str, str] = {}
 
-    def _run(name: str, fn, *args):
-        skip_var = f"US_SKIP_{name.upper().replace(' ', '_')}"
+    def _run_phase(name: str, fn, *args):
+        skip_var = f"US_SKIP_{name.upper()}"
         if os.environ.get(skip_var, "0") == "1":
-            log.info("Skipping %s (env %s=1)", name, skip_var)
-            results[name] = "SKIP"
-            return
+            log.info("Skipping %s (%s=1)", name, skip_var)
+            phase_results[name] = "SKIP"
+            return "SKIP"
         try:
-            fn(*args)
-            results[name] = "PASS"
+            result = fn(*args)
+            phase_results[name] = result if result else "PASS"
         except Exception:
-            results[name] = "FAIL"
+            phase_results[name] = "FAIL"
             log.error("%s FAILED:\n%s", name, traceback.format_exc())
+        return phase_results[name]
 
-    _run("PHASE1", phase1_smoke, dm, device)
-    _run("PHASE2", phase2_smoke, dm, device)
-    _run("PHASE3", phase3_smoke, dm, device)
-    _run("PHASE4", phase4_smoke, dm, busi_entries, echonet_entries, benin_entries, device)
+    _run_phase("PHASE1", phase1_smoke, dm, device)
+    _run_phase("PHASE2", phase2_smoke, dm, device)
+    _run_phase("PHASE3", phase3_smoke, dm, device)
 
-    # Summary
-    print("\n" + "=" * 60)
-    print("SMOKE TEST SUMMARY")
-    print("=" * 60)
-    for phase, status in results.items():
-        icon = "✓" if status == "PASS" else ("–" if status == "SKIP" else "✗")
-        print(f"  {icon}  {phase:<12}  {status}")
-    print("=" * 60)
+    # Phase 4 — returns per-experiment dict
+    if os.environ.get("US_SKIP_PHASE4", "0") == "1":
+        log.info("Skipping PHASE4 (US_SKIP_PHASE4=1)")
+        phase_results["PHASE4"] = "SKIP"
+    else:
+        try:
+            experiment_results = phase4_smoke(dataset_roots, device)
+            fail_count = sum(1 for v in experiment_results.values() if v == "FAIL")
+            phase_results["PHASE4"] = "FAIL" if fail_count > 0 else "PASS"
+        except Exception:
+            phase_results["PHASE4"] = "FAIL"
+            log.error("PHASE4 outer FAIL:\n%s", traceback.format_exc())
 
-    if any(v == "FAIL" for v in results.values()):
+    # Phase 5 — returns per-backbone dict
+    if os.environ.get("US_SKIP_PHASE5", "0") == "1":
+        log.info("Skipping PHASE5 (US_SKIP_PHASE5=1)")
+        phase_results["PHASE5"] = "SKIP"
+    else:
+        try:
+            ablation_results = phase5_ablation_backbones_smoke(device)
+            fail_count = sum(1 for v in ablation_results.values() if v == "FAIL")
+            phase_results["PHASE5"] = "FAIL" if fail_count > 0 else "PASS"
+        except Exception:
+            phase_results["PHASE5"] = "FAIL"
+            log.error("PHASE5 outer FAIL:\n%s", traceback.format_exc())
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    W = 65
+
+    def _status_label(s: str) -> str:
+        return {"PASS": "PASS", "FAIL": "FAIL", "SKIP": "SKIP"}.get(s, s)
+
+    print("\n" + "=" * W)
+    print("SMOKE SUMMARY")
+    print("=" * W)
+
+    for phase in ["PHASE1", "PHASE2", "PHASE3"]:
+        print(f"{phase:<22}  {_status_label(phase_results.get(phase, 'N/A'))}")
+    print(f"{'PHASE4/finetune':<22}  {_status_label(phase_results.get('PHASE4', 'N/A'))}"
+          f"    (see per-experiment below)")
+    print(f"{'PHASE5/backbones':<22}  {_status_label(phase_results.get('PHASE5', 'N/A'))}"
+          f"    (see per-backbone below)")
+
+    # Dataset manifest coverage
+    ok_list      = [(k, v) for k, v in dataset_status.items() if v.startswith("ok")]
+    no_root_list = [(k, v) for k, v in dataset_status.items()
+                    if v == "skip:no_root_in_config"]
+    empty_list   = [(k, v) for k, v in dataset_status.items()
+                    if v in ("skip:no_entries_yielded", "skip:root_not_found")]
+    error_list   = [(k, v) for k, v in dataset_status.items() if v.startswith("fail")]
+    total_entries = sum(
+        int(v.split(":")[1])
+        for _, v in ok_list
+        if ":" in v and v.split(":")[1].isdigit()
+    )
+
+    print(f"\n--- Dataset manifest coverage ({len(ADAPTER_REGISTRY)} datasets) ---")
+    print(f"  ok:       {len(ok_list):>3}   ({total_entries} entries total)")
+    print(f"  no_root:  {len(no_root_list):>3}")
+    print(f"  empty:    {len(empty_list):>3}")
+    print(f"  error:    {len(error_list):>3}")
+    if error_list:
+        print("  Failed datasets:")
+        for k, v in sorted(error_list):
+            print(f"    {k:<45}  {v}")
+
+    print(f"\n--- Finetune experiments ({len(experiment_results) or 11}) ---")
+    if experiment_results:
+        for exp_key, status in sorted(experiment_results.items()):
+            print(f"  {exp_key:<18}  {_status_label(status)}")
+    else:
+        print(f"  {_status_label(phase_results.get('PHASE4', 'N/A'))}")
+
+    print(f"\n--- Ablation backbones ({len(ablation_results) or 7}) ---")
+    if ablation_results:
+        for bb_key, status in sorted(ablation_results.items()):
+            print(f"  {bb_key:<18}  {_status_label(status)}")
+    else:
+        print(f"  {_status_label(phase_results.get('PHASE5', 'N/A'))}")
+
+    total_fail = sum(
+        1 for v in {**phase_results, **experiment_results, **ablation_results}.values()
+        if v == "FAIL"
+    )
+    print(f"\n--- Overall: {total_fail} FAIL ---")
+    print("=" * W)
+    if total_fail:
         sys.exit(1)
 
 

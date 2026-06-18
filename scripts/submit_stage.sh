@@ -66,6 +66,7 @@ trap "rm -f ${OUTERSCRIPT}" EXIT
 cat > "${INNERSCRIPT}" << INNER_EOF
 #!/bin/bash
 set -euo pipefail
+ulimit -c 0
 cd ${REPO_DIR}
 export PYTHONPATH="${REPO_DIR}:\${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1

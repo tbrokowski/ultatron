@@ -46,10 +46,6 @@ V-JEPA2 uses the same SDPA attention.  We register the same -inf bias approach
 as in the image branch.  Padding tokens (from variable-resolution clips) are
 excluded from both context and target index sets — they are never visible or
 predicted.
-
-TODO: refactor to a model-agnostic VideoBackboneBase / VideoBranchBase pattern
-      matching image_branch.py, so other video backbone (e.g. VideoMAE, InternVideo)
-      can be swapped in without touching this file.
 """
 from __future__ import annotations
 
@@ -74,7 +70,6 @@ VJEPA2_L_HF = "facebook/vjepa2-vitl-fpc64-256"
 # (_tube_mask_to_indices).  Both are kept independent to avoid a cross-package
 # import cycle between branches/ and video_backbones/ at module load time.
 # If the logic ever needs to change, update both copies.
-# TODO: extract to a shared models/mask_utils.py and import from both files.
 
 def _tube_mask_to_indices(
     tube_mask: torch.Tensor,                  # (B, T, ph, pw) bool  True=masked

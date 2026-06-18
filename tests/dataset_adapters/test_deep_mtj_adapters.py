@@ -76,10 +76,10 @@ class TestDeepMTJAdapter:
         assert "deepMTJ" in ADAPTER_REGISTRY
 
     def test_iter_entries_count(self, deepmtj_root):
-        """3 fullres + 3 256x128px = 6 total."""
+        """Default indexes fullres only."""
         from data.adapters.muscle.deep_mtj import DeepMTJAdapter
         entries = list(DeepMTJAdapter(root=deepmtj_root).iter_entries())
-        assert len(entries) == 6
+        assert len(entries) == 3
 
     def test_entry_schema(self, deepmtj_root):
         from data.adapters.muscle.deep_mtj import DeepMTJAdapter
@@ -102,8 +102,11 @@ class TestDeepMTJAdapter:
         assert len(entries) == 3
         for e in entries:
             assert e.task_type == "keypoint"
+            assert e.has_points is True
             assert e.source_meta["mtj_x"] is not None
             assert e.source_meta["mtj_y"] is not None
+            assert len(e.instances) == 1
+            assert e.instances[0].keypoints == [[e.source_meta["mtj_x"], e.source_meta["mtj_y"]]]
 
     def test_ssl_only_without_csv_match(self, deepmtj_root):
         """256x128px frames without CSV entry → task_type = ssl_only."""
@@ -126,8 +129,7 @@ class TestDeepMTJAdapter:
         from data.adapters.muscle.deep_mtj import DeepMTJAdapter
         entries = list(DeepMTJAdapter(root=deepmtj_root).iter_entries())
         resolutions = {e.source_meta["resolution"] for e in entries}
-        assert "fullres"   in resolutions
-        assert "256x128px" in resolutions
+        assert resolutions == {"fullres"}
 
     def test_frame_idx_parsed(self, deepmtj_root):
         from data.adapters.muscle.deep_mtj import DeepMTJAdapter
@@ -157,6 +159,6 @@ class TestDeepMTJAdapter:
         out = tmp_path / "deepmtj.jsonl"
         with ManifestWriter(out) as writer:
             count = build_manifest_for_dataset("deepMTJ", deepmtj_root, writer)
-        assert count == 6
+        assert count == 3
         entries = load_manifest(out)
         assert all(e.dataset_id == "deepMTJ" for e in entries)

@@ -2,12 +2,14 @@
 data/adapters/maternal_fetal/iugc2024.py  ·  IUGC2024 adapter
 ==============================================================
 
-IUGC2024 is an intrapartum ultrasound video dataset with split directories:
+IUGC2024 is an intrapartum ultrasound video dataset with split directories.
 
-  new/
-  ├── train/
-  ├── val/
-  └── test/
+On capstor the release is under ``DatasetV3/`` with Google-Drive zip folder names
+(``train-*/train/``, etc.).  The canonical ``new/`` layout from the README is
+also supported.  Video files may carry ``__`` suffixes that differ from CSV
+metadata stems; metadata lookup uses the prefix before ``__`` when needed.
+Val/test mask PNG naming differs between releases (frame suffix vs stem-only);
+both conventions are accepted.
 
 Each split contains videos, segmentation metadata/masks, classification frame
 indices, and split-level metadata CSVs.  This adapter emits one manifest entry
@@ -129,12 +131,14 @@ class IUGC2024Adapter(BaseAdapter):
         seg_rows = self._load_csv_by_stem(seg_dir / "seg_info.csv")
         cls_rows = self._load_csv_by_stem(cls_dir / cls_csv_name)
         landmarks = self._load_landmarks(seg_dir / "landmark.json")
+        known_stems = set(info_rows) | set(seg_rows) | set(cls_rows)
 
         for video_path in sorted(videos_dir.glob("*.avi")):
             stem = video_path.stem
-            info = info_rows.get(stem, {})
-            seg_info = seg_rows.get(stem, {})
-            cls_info = cls_rows.get(stem, {})
+            meta_stem = self._canonical_stem(stem, known_stems)
+            info = info_rows.get(meta_stem, {})
+            seg_info = seg_rows.get(meta_stem, {})
+            cls_info = cls_rows.get(meta_stem, {})
 
             frame_count = self._to_int(
                 info.get("frame_count") or seg_info.get("frame_count") or cls_info.get("frame_count")
@@ -147,7 +151,7 @@ class IUGC2024Adapter(BaseAdapter):
             )
             mask_infos = [
                 mask_info for idx in labeled_indices
-                if (mask_info := self._mask_info(split_name, seg_dir, stem, idx)) is not None
+                if (mask_info := self._mask_info(split_name, seg_dir, meta_stem, idx)) is not None
             ]
 
             instances = []
@@ -200,6 +204,8 @@ class IUGC2024Adapter(BaseAdapter):
                 source_meta={
                     "split_dir": split_name,
                     "video_filename": video_path.name,
+                    "video_stem": stem,
+                    "metadata_stem": meta_stem,
                     "info": info,
                     "seg_info": seg_info,
                     "cls_info": cls_info,
@@ -224,25 +230,47 @@ class IUGC2024Adapter(BaseAdapter):
             )
 
     @staticmethod
-    def _load_csv_by_stem(path: Path) -> Dict[str, dict]:
+    def _canonical_stem(stem: str, known_stems: set[str]) -> str:
+        if stem in known_stems:
+            return stem
+        if "__" in stem:
+            base = stem.split("__", 1)[0]
+            if base in known_stems:
+                return base
+        return stem
+
+    _TEXT_ENCODINGS: Tuple[str, ...] = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
+
+    @classmethod
+    def _read_text(cls, path: Path) -> str:
+        raw_bytes = path.read_bytes()
+        for encoding in cls._TEXT_ENCODINGS:
+            try:
+                return raw_bytes.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw_bytes.decode("latin-1", errors="replace")
+
+    @classmethod
+    def _load_csv_by_stem(cls, path: Path) -> Dict[str, dict]:
         if not path.exists():
             return {}
         out: Dict[str, dict] = {}
-        with path.open(newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                filename = (row.get("filename") or "").strip()
-                if not filename:
-                    continue
-                out[Path(filename).stem] = {k: (v or "").strip() for k, v in row.items()}
+        text = cls._read_text(path)
+        for row in csv.DictReader(text.splitlines()):
+            filename = (row.get("filename") or "").strip()
+            if not filename:
+                continue
+            out[Path(filename).stem] = {k: (v or "").strip() for k, v in row.items()}
         return out
 
-    @staticmethod
-    def _load_landmarks(path: Path) -> Dict[str, dict]:
+    @classmethod
+    def _load_landmarks(cls, path: Path) -> Dict[str, dict]:
         if not path.exists():
             return {}
         try:
-            raw = path.read_text(encoding="utf-8-sig").strip()
-        except UnicodeDecodeError:
+            raw = cls._read_text(path).strip()
+        except (UnicodeDecodeError, OSError):
             return {}
         if not raw:
             return {}
@@ -293,22 +321,28 @@ class IUGC2024Adapter(BaseAdapter):
     @staticmethod
     def _mask_info(split_name: str, seg_dir: Path, video_stem: str, frame_idx: int) -> Optional[dict]:
         if split_name == "train":
-            mask_path = seg_dir / video_stem / "mask" / f"{video_stem}_{frame_idx}_6.png"
-            mask_name = mask_path.name
+            candidates = (
+                seg_dir / video_stem / "mask" / f"{video_stem}_{frame_idx}_6.png",
+            )
         elif split_name == "val":
-            mask_path = seg_dir / f"{video_stem}_{frame_idx}.png"
-            mask_name = mask_path.name
+            candidates = (
+                seg_dir / f"{video_stem}_{frame_idx}.png",
+                seg_dir / f"{video_stem}.png",
+            )
         else:
-            mask_path = seg_dir / f"{video_stem}.png"
-            mask_name = mask_path.name
+            candidates = (
+                seg_dir / f"{video_stem}.png",
+                seg_dir / f"{video_stem}_{frame_idx}.png",
+            )
 
-        if not mask_path.exists():
-            return None
-        return {
-            "frame_index": frame_idx,
-            "name": mask_name,
-            "path": str(mask_path),
-        }
+        for mask_path in candidates:
+            if mask_path.exists():
+                return {
+                    "frame_index": frame_idx,
+                    "name": mask_path.name,
+                    "path": str(mask_path),
+                }
+        return None
 
     @staticmethod
     def _xy_point(point) -> Optional[List[float]]:

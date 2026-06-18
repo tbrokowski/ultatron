@@ -1,0 +1,140 @@
+# configs/smoke/student_smoke.yaml
+# ============================================================
+# Full student-pipeline smoke test: 800 training steps (200 per stage)
+# across all four curriculum stages, sampling from every available dataset.
+#
+# Used ONLY by tests/dataset_adapters/student_training_smoke.py
+
+manifest:
+  path: "dataset_exploration_outputs/smoke/student_combined_manifest.jsonl"
+
+# ── Training budget ───────────────────────────────────────────────────────────
+training:
+  total_steps: 800
+  log_every: 50
+  metrics_every: 1        # write metrics.jsonl / TensorBoard every N steps
+  ckpt_every: 0          # stage-end checkpoints only (stage1/2/3_end.pt + latest.pt)
+
+  # Equal 200 steps per stage (must sum to 1.0)
+  stage_fracs: [0.25, 0.25, 0.25, 0.25]
+  stage3_curriculum_boundaries: [0.33, 0.67]
+
+  optimizer: adamw
+  lr: 1.0e-4
+  lr_min: 1.0e-6
+  weight_decay: 0.05
+  grad_clip: 1.0
+  warmup_steps: 40
+  use_amp: true
+
+loaders:
+  image_batch_size: 4
+  video_batch_size: 2
+  paired_batch_size: 2
+  num_workers: 2   # 4 ranks × 2 = 8 readers; avoids Capstor thrashing
+  pin_memory: true
+
+transforms:
+  image:
+    n_global_crops: 2
+    n_local_crops: 0
+    max_global_crop_px: 160
+    min_crop_px: 32
+    spatial_mask_ratio: 0.30
+
+  video:
+    n_frames: 8
+    max_n_frames: 16
+    temporal_stride: 2
+    tube_mask_ratio: 0.60
+    max_crop_px: 160
+    min_crop_px: 32
+    mask_strategy: "both"
+    tube_size: 2
+    spatial_mask_ratio: 0.30
+
+curriculum:
+  total_training_steps: 800
+  image_samples_per_epoch: 512
+  video_samples_per_epoch: 256
+
+student_data:
+  image_batch_size: 4
+  video_batch_size: 2
+  paired_batch_size: 2
+  num_workers: 2
+  patch_size: 4
+  stage_mixes:
+    - {image_frac: 1.00, video_frac: 0.00, paired_frac: 0.00}  # stage 1: image-only (no full-video decode)
+    - {image_frac: 0.40, video_frac: 0.60, paired_frac: 0.00}
+    - {image_frac: 0.50, video_frac: 0.30, paired_frac: 0.20}
+    - {image_frac: 0.50, video_frac: 0.50, paired_frac: 0.00}
+
+model:
+  student:
+    hiera_variant: sam2_hiera_large
+    hiera_hf_cache_dir: null   # inherited from smoke.hf_cache_dir at runtime
+    temporal_mixing: factorized_attn
+    temporal_adapter_stages: [2, 3]
+    max_frames: 16
+    trainable_stages: null   # null = full encoder trainable
+    align_dim: 1024
+    n_prototypes: 256
+    ema_momentum: 0.9995
+    dino_teacher_key: dinov3_l
+    vjepa_teacher_key: vjepa2_l
+    fusion_radius: 2
+    fusion_init_gate: -3.0
+    dtype: bfloat16
+
+loss_weights:
+  lam_global: 1.0
+  lam_patch: 1.0
+  lam_masked: 0.5
+  lam_proto: 0.5
+  lam_ema_max: 0.15
+  lam_ema_floor: 0.0
+  lam_ema_warmup_steps: 50
+  lam_tube: 1.0
+  lam_temp: 0.5
+  lam_fused: 0.5
+  lam_preserve: 0.1
+  lam_fc: 0.5
+  lam_seg: 1.0
+  lam_seg_dice: 1.0
+
+smoke:
+  # HuggingFace model cache (DINOv3, V-JEPA2, Hiera). null = auto-resolve Capstor
+  # scratch/store hf_cache at runtime; override with US_HF_CACHE_DIR env.
+  hf_cache_dir: null
+  loader_warmup_batches: 2   # prefetch before training loop (0 to disable)
+
+  # Datasets not on Capstor store — never scanned for smoke manifests
+  exclude_datasets:
+    - BEHSOF  # encrypted image_Data.zip (BEH01121/*) — unreadable without password
+    - BITE
+    - BeninVideos
+    - Echocardiogram-UCI
+    - GBCU
+    - LUS-data
+    - LUS-multicenter-2025
+    - OC4US
+    - OpenPOCUS
+    - POCUS-LUS
+    - PhysioNet-cardiac
+    - STAnford-BUS
+    - TG3K
+    - TNSCUI
+    - ULTRASOUND-LUS
+    - ultrasound-elastography-liver-cancer
+
+  # At least this many manifest entries per configured dataset
+  entries_per_dataset: 8
+  # Warn (don't abort) when configured datasets yield no entries
+  require_all_datasets: false
+  # Capstor store, sibling of checkpoints/Ablations/
+  ckpt_dir: "/capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentSmoke"
+  save_stage_end_ckpts: true
+  # metrics.jsonl + TensorBoard for Run:ai monitoring (defaults to ckpt_dir/logs)
+  log_dir: null
+  tensorboard: true

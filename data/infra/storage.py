@@ -13,6 +13,7 @@ Store  (permanent archive):
     raw/{anatomy_family}/{dataset_id}/
     manifests/
     checkpoints/
+      Ablations/              <- external FM weights for finetune comparison
 
 Scratch (fast I/O for training, ~30-day TTL):
   /capstor/scratch/cscs/{user}/ultrasound/
@@ -53,7 +54,7 @@ DATASET_STORE_MAP: Dict[str, Tuple[str, str]] = {
     "EchoNet-Pediatric":        ("cardiac", "EchoNet-Pediatric"),
     "MIMIC-IV-ECHO":            ("cardiac", "MIMIC-IV-Echo"),
     "MIMIC-IV-Echo-LVVol-A4C":  ("cardiac", "MIMIC-IV-Echo-LVVol-A4C"),
-    "MIMIC-EchoQA":             ("cardiac", "MIMIC-EchoQA"),
+    "MIMIC-EchoQA":             ("cardiac", "MIMIC-IV-EchoQA"),
     "TED":                      ("cardiac", "TED"),
     "Unity-Echo":               ("cardiac", "Unity"),
     "CardiacUDC":               ("cardiac", "CardiacUDC"),
@@ -75,7 +76,7 @@ DATASET_STORE_MAP: Dict[str, Tuple[str, str]] = {
     "Lung-Database":       ("lung", "Lung Database"),
     "Pocus-covid":         ("lung", "Pocus covid"),
     "BeninVideos":         ("lung", "BeninVideos"),
-    "LUS-data":            ("lung", "data"),
+    "LUS-data":            ("lung", "COVIDx-US/data"),
     # ── Breast ───────────────────────────────────────────────────────────────
     "BUS-BRA":             ("breast", "BUSBRA"),
     "BUS-B":               ("breast", "Breast US B Dataset"),
@@ -87,7 +88,7 @@ DATASET_STORE_MAP: Dict[str, Tuple[str, str]] = {
     "BUSV":                ("breast", "Miccai 2022 BUV Dataset"),
     "GDPH-SYSUCC":         ("breast", "GDPH&SYSUCC"),
     "Chinese-US-Report-Breast": ("breast", "Chinese US-Report Dataset (Breast)"),
-    "S1":                  ("breast", "S1"),             # not yet in store
+    "S1":                  ("breast", "S1"),
     "STAnford-BUS":        ("breast", "STAnford-BUS"),
     "busi-whu":            ("breast", "busi-whu"),
     "midi-b":              ("breast", "midi-b"),
@@ -118,7 +119,7 @@ DATASET_STORE_MAP: Dict[str, Tuple[str, str]] = {
     "PBF-US1":                             ("fetal", "PBF-US1"),
     "PSFHS":                               ("fetal", "PSFHS"),
     "ultrasound-fetus-dataset":            ("fetal", "ultrasound-fetus-dataset"),
-    "Fast-U-Net":                          ("fetal", "Fast-U-Net"),
+    "Fast-U-Net":                          ("fetal", "Fast-U-Net-main"),
     # ── Kidney ───────────────────────────────────────────────────────────────
     "KidneyUS":            ("kidney", "KidneyUS-US43d"),
     "Normal-Kidney-CV":    ("kidney", "Normal-Kidney-CV"),
@@ -178,6 +179,7 @@ DATASET_STORE_MAP: Dict[str, Tuple[str, str]] = {
     "STU-Hospital-master":           ("multi_organ", "STU-Hospital-master"),
     "annotated_heterogeneous_us_db": ("multi_organ", "annotated_heterogeneous_us_db"),
     "US-365K":                       ("multi_organ", "US-365K"),
+    "USAnotAI-master":               ("multi_organ", "USAnotAI-master"),
     # ── Ocular ───────────────────────────────────────────────────────────────
     "ERDES":                     ("ocular", "ERDES"),
     # ── Skin ─────────────────────────────────────────────────────────────────

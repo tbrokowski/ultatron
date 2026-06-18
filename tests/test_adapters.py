@@ -61,19 +61,28 @@ def test_camus_adapter(camus_root):
 
     _validate_entries(entries, min_count=6)
 
-    image_entries = [e for e in entries if e.modality_type == "image"]
-    video_entries = [e for e in entries if e.modality_type == "pseudo_video"]
+    image_entries  = [e for e in entries if e.modality_type == "image"]
+    pseudo_entries = [e for e in entries if e.modality_type == "pseudo_video"]
+    cine_entries   = [e for e in entries if e.modality_type == "video"]
 
     assert len(image_entries) > 0, "Should have image entries"
-    assert len(video_entries) > 0, "Should have pseudo_video entries"
+    assert len(pseudo_entries) > 0, "Should have pseudo_video entries"
+    assert len(cine_entries) > 0, "Should have half_sequence video entries"
 
     for e in image_entries:
         assert e.anatomy_family == "cardiac"
         assert e.ssl_stream in ("both", "image")
         assert e.view_type in ("2CH", "4CH")
+        assert e.source_meta.get("ef") is not None
 
-    for e in video_entries:
+    for e in pseudo_entries + cine_entries:
+        assert e.ssl_stream == "both"
         assert e.num_frames >= 1
+
+    for e in cine_entries:
+        assert e.is_cine
+        assert e.has_mask
+        assert e.source_meta.get("ed_frame") is not None
 
     masked = [e for e in image_entries if e.has_mask]
     assert len(masked) > 0, "Some image entries should have masks"
@@ -373,18 +382,18 @@ def test_echonet_pediatric_adapter(echonet_pediatric_root):
 
     _validate_entries(entries, min_count=2)
 
-    for e in entries:
+    video_entries = [e for e in entries if e.modality_type == "video"]
+    for e in video_entries:
         assert e.dataset_id     == "EchoNet-Pediatric"
         assert e.anatomy_family == "cardiac"
-        assert e.modality_type  == "video"
         assert e.is_cine        is True
         assert e.ssl_stream     in ("both", "video")
         assert "ef"   in e.source_meta
         assert "view" in e.source_meta
         assert e.source_meta["view"] in ("A4C", "PSAX")
 
-    # Both views should be present
-    views = {e.source_meta["view"] for e in entries}
+    # Both views should be present on video entries
+    views = {e.source_meta["view"] for e in video_entries}
     assert "A4C" in views
     assert "PSAX" in views
 
@@ -409,6 +418,41 @@ def test_echonet_pediatric_video_paths_exist(echonet_pediatric_root):
     for e in EchoNetPediatricAdapter(echonet_pediatric_root).iter_entries():
         assert len(e.image_paths) == 1
         assert Path(e.image_paths[0]).exists(), f"AVI not found: {e.image_paths[0]}"
+
+
+def test_echonet_pediatric_tracing_alignment(echonet_pediatric_root):
+    """Volume tracings must align to video frames and emit ED/ES image entries."""
+    from data.adapters.cardiac.echonet_pediatric import EchoNetPediatricAdapter
+
+    entries = list(EchoNetPediatricAdapter(echonet_pediatric_root).iter_entries())
+    video_entries = [e for e in entries if e.modality_type == "video"]
+    image_entries = [e for e in entries if e.modality_type == "image"]
+
+    assert video_entries, "expected video entries"
+    assert image_entries, "expected ED/ES image entries"
+
+    traced_videos = [e for e in video_entries if e.has_points]
+    assert traced_videos, "expected traced video entries"
+    for e in traced_videos:
+        assert e.source_meta.get("labeled_frame_indices")
+        assert e.source_meta.get("volume_tracings")
+        assert e.frame_indices == e.source_meta["labeled_frame_indices"]
+
+    for e in image_entries:
+        assert e.source_meta.get("frame_idx") is not None
+        assert e.source_meta.get("phase") in ("ED", "ES")
+        assert e.study_id
+        assert e.instances[0].keypoints
+        assert len(e.instances[0].keypoints) >= 8
+
+    # Last synthetic sample marks only diastole ("No Systolic").
+    no_sys = [
+        e for e in video_entries
+        if "No Systolic" in (e.source_meta.get("phase_markers") or [])
+    ]
+    assert no_sys, "expected a No Systolic tracing marker in fixtures"
+    assert no_sys[0].source_meta.get("ed_frame") is not None
+    assert no_sys[0].source_meta.get("es_frame") is None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -475,12 +519,34 @@ def test_unity_adapter(unity_root):
         assert e.dataset_id     == "Unity-Echo"
         assert e.anatomy_family == "cardiac"
         assert e.modality_type  == "image"
-        assert e.ssl_stream     in ("image", "both")
+        assert e.ssl_stream     == "image"
         assert "keypoints" in e.source_meta
         assert isinstance(e.source_meta["keypoints"], dict)
         # Only active keypoints should be present
         for kp_name, kp_val in e.source_meta["keypoints"].items():
             assert kp_val.get("type") not in ("off", "blurred", "")
+        if e.source_meta["keypoints"]:
+            assert e.task_type == "keypoint"
+            assert e.has_points is True
+            assert e.is_promptable is True
+            assert len(e.instances) == len(e.source_meta["keypoints"])
+            for inst in e.instances:
+                assert inst.keypoints
+                assert inst.label_raw in e.source_meta["keypoints"]
+        else:
+            assert e.task_type == "ssl_only"
+            assert e.has_points is False
+            assert e.instances == []
+
+
+def test_unity_adapter_ssl_only_entry(unity_root):
+    from data.adapters.cardiac.unity import UnityAdapter
+
+    entries = list(UnityAdapter(unity_root).iter_entries())
+    ssl = [e for e in entries if e.task_type == "ssl_only"]
+    assert len(ssl) == 1
+    assert ssl[0].has_points is False
+    assert ssl[0].instances == []
 
 
 def test_unity_adapter_split_assignment(unity_root):
@@ -498,6 +564,41 @@ def test_unity_adapter_images_exist(unity_root):
 
     for e in UnityAdapter(unity_root).iter_entries():
         assert Path(e.image_paths[0]).exists(), f"PNG not found: {e.image_paths[0]}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MIMIC-EchoQA
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_mimic_echoqa_adapter(mimic_echoqa_root):
+    from data.adapters.cardiac.mimic_echoqa import MIMICEchoQAAdapter
+
+    adapter = MIMICEchoQAAdapter(mimic_echoqa_root)
+    entries = list(adapter.iter_entries())
+
+    _validate_entries(entries, min_count=3)
+
+    for e in entries:
+        assert e.dataset_id     == "MIMIC-EchoQA"
+        assert e.anatomy_family == "cardiac"
+        assert e.modality_type  == "video"
+        assert e.task_type      == "classification"
+        assert e.ssl_stream     == "video"
+        assert e.is_promptable  is True
+        assert e.view_type in ("A4C", "PLAX", "A3C")
+        assert "question" in e.source_meta
+        assert "options" in e.source_meta
+        assert len(e.instances) == 1
+        assert e.instances[0].classification_label is not None
+        assert e.image_paths[0].endswith(".mp4")
+
+
+def test_mimic_echoqa_mp4_paths_exist(mimic_echoqa_root):
+    from data.adapters.cardiac.mimic_echoqa import MIMICEchoQAAdapter
+
+    entries = list(MIMICEchoQAAdapter(mimic_echoqa_root).iter_entries())
+    for e in entries:
+        assert Path(e.image_paths[0]).exists(), f"MP4 not found: {e.image_paths[0]}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -543,6 +644,7 @@ def test_cardiac_adapter_registry_completeness():
     required_cardiac = [
         "CAMUS", "EchoNet-Dynamic", "EchoNet-Pediatric",
         "EchoNet-LVH", "MIMIC-IV-ECHO", "MIMIC-IV-Echo-LVVol-A4C",
+        "MIMIC-EchoQA",
         "TED", "Unity-Echo", "CardiacUDC", "EchoCP",
     ]
     for ds_id in required_cardiac:

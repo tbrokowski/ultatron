@@ -38,6 +38,7 @@ For cross-rank sharing, call ALPScoreCache.sync_across_ranks() once per epoch.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from collections import OrderedDict
@@ -47,7 +48,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 import numpy as np
 import torch
 from torch import Tensor
-from torch.utils.data import Sampler
+from torch.utils.data import Sampler, get_worker_info
 from data.pipeline.alp_interface import ALPReader, NullALPReader
 
 log = logging.getLogger(__name__)
@@ -84,17 +85,30 @@ class ALPScoreCache:
         self,
         max_entries: int = 1_000_000,
         disk_cache_dir: Optional[str] = None,
+        score_ema: float = 0.9,
     ):
         self.max_entries = max_entries
         self.disk_cache_dir = Path(disk_cache_dir) if disk_cache_dir else None
         if self.disk_cache_dir:
             self.disk_cache_dir.mkdir(parents=True, exist_ok=True)
+        # EMA momentum for online score updates (higher = smoother, slower to adapt).
+        self.score_ema = float(score_ema)
 
         # OrderedDict used as LRU (move-to-end on access)
         self._cache: OrderedDict[str, dict] = OrderedDict()
         self._lock = threading.Lock()
+        # NOTE: _hits/_misses are incremented inside DataLoader worker processes
+        # (forked copies of this object) so they never reflect back to the main
+        # process.  Do not rely on them for reporting — use _rewrites/_first_writes
+        # instead, which are incremented by _write() on the main process.
         self._hits = 0
         self._misses = 0
+        self._updates = 0
+        # Write-side hit tracking (main-process visible):
+        # _rewrites = score updates for samples already in cache (re-visit)
+        # _first_writes = score updates for brand-new samples (cold start)
+        self._rewrites = 0
+        self._first_writes = 0
 
     # ── Write ─────────────────────────────────────────────────────────────────
 
@@ -126,6 +140,39 @@ class ALPScoreCache:
             for sid, h in zip(sample_ids, err):
                 self._write(sid, hardness=h.numpy(), step=step)
 
+    @staticmethod
+    def _align_length(prev: np.ndarray, new: np.ndarray) -> np.ndarray:
+        """Resize new scores to prev length (or vice versa) via linear interpolation."""
+        if len(prev) == len(new):
+            return new
+        if len(prev) == 0:
+            return new
+        x_prev = np.linspace(0.0, 1.0, len(prev))
+        x_new = np.linspace(0.0, 1.0, len(new))
+        if len(new) < len(prev):
+            return np.interp(x_prev, x_new, new).astype(np.float32)
+        return np.interp(x_new, x_prev, prev).astype(np.float32)
+
+    def _ema_blend(self, prev: Optional[np.ndarray], new: np.ndarray) -> np.ndarray:
+        if prev is None:
+            return new.astype(np.float32)
+        beta = self.score_ema
+        if len(prev) == len(new):
+            return (beta * prev + (1.0 - beta) * new).astype(np.float32)
+        # Blend at len(new): resample cached scores when patch count changes
+        # (e.g. same sample_id as image vs video).
+        x_new = np.linspace(0.0, 1.0, len(new))
+        x_prev = np.linspace(0.0, 1.0, len(prev))
+        prev_at_new = np.interp(x_new, x_prev, prev).astype(np.float32)
+        return (beta * prev_at_new + (1.0 - beta) * new).astype(np.float32)
+
+    def _disk_path(self, sample_id: str) -> Path:
+        assert self.disk_cache_dir is not None
+        safe = sample_id.replace("/", "_").replace("\\", "_")
+        if len(safe) > 200:
+            safe = hashlib.sha256(sample_id.encode()).hexdigest()
+        return self.disk_cache_dir / f"{safe}.npz"
+
     def _write(
         self,
         sample_id: str,
@@ -133,31 +180,34 @@ class ALPScoreCache:
         hardness: Optional[np.ndarray] = None,
         step: int = 0,
     ):
-        """Internal: update or create cache entry. Lock must be held."""
+        """Internal: EMA-merge new scores and persist. Lock must be held."""
         if sample_id in self._cache:
             entry = self._cache.pop(sample_id)  # remove for LRU promotion
+            self._rewrites += 1
         else:
             entry = {"saliency": None, "hardness": None, "step": 0, "hit_count": 0}
             if len(self._cache) >= self.max_entries:
                 self._cache.popitem(last=False)  # evict LRU
+            self._first_writes += 1
 
         if saliency is not None:
-            entry["saliency"] = saliency
+            entry["saliency"] = self._ema_blend(entry.get("saliency"), saliency)
         if hardness is not None:
-            entry["hardness"] = hardness
+            entry["hardness"] = self._ema_blend(entry.get("hardness"), hardness)
         entry["step"] = max(entry["step"], step)
-        # Invalidate derived ALP so it's recomputed on next get()
         entry.pop("alp", None)
 
         self._cache[sample_id] = entry  # re-insert at end (MRU)
+        self._updates += 1
 
-        # Persist to disk
         if self.disk_cache_dir is not None:
-            path = self.disk_cache_dir / f"{sample_id}.npz"
-            saves = {}
-            if entry["saliency"] is not None: saves["saliency"] = entry["saliency"]
-            if entry["hardness"] is not None: saves["hardness"] = entry["hardness"]
-            if saves:
+            path = self._disk_path(sample_id)
+            saves = {"step": np.array(entry["step"], dtype=np.int64)}
+            if entry["saliency"] is not None:
+                saves["saliency"] = entry["saliency"]
+            if entry["hardness"] is not None:
+                saves["hardness"] = entry["hardness"]
+            if len(saves) > 1:
                 np.savez(path, **saves)
 
     # ── Read ──────────────────────────────────────────────────────────────────
@@ -181,12 +231,13 @@ class ALPScoreCache:
         alpha     : float  — current α from CurriculumSampler.current_alpha()
         n_patches : int or None — expected number of patches (for validation)
         """
+        # DataLoader workers fork a stale in-memory cache; always read disk there.
+        in_worker = get_worker_info() is not None
         with self._lock:
-            entry = self._cache.get(sample_id)
+            entry = None if in_worker else self._cache.get(sample_id)
 
         if entry is None:
-            # Try disk fallback
-            entry = self._load_from_disk(sample_id)
+            entry = self._load_from_disk(sample_id, promote=not in_worker)
             if entry is None:
                 self._misses += 1
                 return None
@@ -228,10 +279,40 @@ class ALPScoreCache:
 
         return alp.astype(np.float32)
 
-    def _load_from_disk(self, sample_id: str) -> Optional[dict]:
+    def get_saliency_hardness(
+        self,
+        sample_id: str,
+        n_patches: Optional[int] = None,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Return raw (S_k, H_k) arrays for live alpha blending in transforms."""
+        in_worker = get_worker_info() is not None
+        with self._lock:
+            entry = None if in_worker else self._cache.get(sample_id)
+        if entry is None:
+            entry = self._load_from_disk(sample_id, promote=not in_worker)
+        if entry is None:
+            return None, None
+
+        sal = entry.get("saliency")
+        hard = entry.get("hardness")
+
+        def _resize(x: Optional[np.ndarray]) -> Optional[np.ndarray]:
+            if x is None:
+                return None
+            if n_patches is not None and len(x) != n_patches:
+                x = np.interp(
+                    np.linspace(0, 1, n_patches),
+                    np.linspace(0, 1, len(x)),
+                    x,
+                )
+            return x.astype(np.float32)
+
+        return _resize(sal), _resize(hard)
+
+    def _load_from_disk(self, sample_id: str, promote: bool = True) -> Optional[dict]:
         if self.disk_cache_dir is None:
             return None
-        path = self.disk_cache_dir / f"{sample_id}.npz"
+        path = self._disk_path(sample_id)
         if not path.exists():
             return None
         try:
@@ -239,15 +320,15 @@ class ALPScoreCache:
             entry = {
                 "saliency": data["saliency"] if "saliency" in data else None,
                 "hardness": data["hardness"] if "hardness" in data else None,
-                "step": 0,
+                "step": int(data["step"]) if "step" in data else 0,
                 "hit_count": 0,
             }
-            # Warm the in-memory cache
-            with self._lock:
-                self._cache[sample_id] = entry
+            if promote:
+                with self._lock:
+                    self._cache[sample_id] = entry
             return entry
         except Exception as e:
-            log.warning(f"Failed to load ALP cache from disk for {sample_id}: {e}")
+            log.warning("Failed to load ALP cache from disk for %s: %s", sample_id, e)
             return None
 
     # ── Aggregate per-sample hardness (for HardnessAwareSampler) ─────────────
@@ -258,11 +339,22 @@ class ALPScoreCache:
         Used by HardnessAwareSampler to bias sampling toward hard samples.
         Returns 0.5 (neutral) if not cached.
         """
+        in_worker = get_worker_info() is not None
         with self._lock:
-            entry = self._cache.get(sample_id)
+            entry = None if in_worker else self._cache.get(sample_id)
+        if entry is None:
+            entry = self._load_from_disk(sample_id, promote=not in_worker)
         if entry is None or entry.get("hardness") is None:
             return 0.5
         return float(np.mean(entry["hardness"]))
+
+    def aggregate_hardness(self, sample_id: str) -> float:
+        """ALPReader protocol alias."""
+        return self.sample_aggregate_hardness(sample_id)
+
+    @property
+    def update_count(self) -> int:
+        return self._updates
 
     # ── Sync across ranks ─────────────────────────────────────────────────────
 
@@ -279,15 +371,28 @@ class ALPScoreCache:
 
     @property
     def hit_rate(self) -> float:
-        total = self._hits + self._misses
-        return self._hits / total if total > 0 else 0.0
+        """
+        Fraction of score updates that were re-visits (sample already in cache).
+
+        Computed from write-side counters (_rewrites / _updates) which are
+        incremented by _write() on the main training process.  This is the only
+        reliable hit-rate signal: the read-side _hits/_misses counters live in
+        forked DataLoader worker processes and never propagate back here.
+
+        Interpretation:
+          0.0  — all updates are first-time scores (cache still warming up)
+          1.0  — all updates are re-scores of already-seen samples (fully warm)
+        """
+        total = self._rewrites + self._first_writes
+        return self._rewrites / total if total > 0 else 0.0
 
     def __len__(self) -> int:
         return len(self._cache)
 
     def __repr__(self) -> str:
         return (f"ALPScoreCache(entries={len(self)}, "
-                f"hit_rate={self.hit_rate:.2%}, "
+                f"revisit_rate={self.hit_rate:.2%}, "
+                f"updates={self._updates}, "
                 f"disk={self.disk_cache_dir})")
 
 
@@ -305,8 +410,8 @@ class HardnessFeedback:
         feedback.update(batch["sample_ids"], patch_errors, global_step)
 
         # After teacher forward (for saliency):
-        attn = img_branch.teacher.get_attention_maps()  # (B, H, N, N)
-        saliency = attn.mean(1).mean(1)  # (B, N) — mean over heads and query tokens
+        t_img = dino_teacher(clean_crop, padding_mask=pmask, return_attention=True)
+        saliency = t_img["cls_patch_attention"]  # (B, N) — mean CLS→patch, last layer
         feedback.update_saliency(batch["sample_ids"], saliency, global_step)
     """
 
@@ -341,6 +446,22 @@ class HardnessFeedback:
         else:
             sal = attention_maps  # already (B, N_patches)
         self.cache.update_saliency(sample_ids, sal, step)
+
+    def update_from_distill(
+        self,
+        sample_ids: List[str],
+        patch_hardness: Tensor,
+        saliency: Tensor,
+        step: int,
+    ) -> None:
+        """
+        Online ALP update from one image distillation step.
+
+        Scores are EMA-merged into the cache and flushed to disk so DataLoader
+        workers see fresh priorities on the next batch.
+        """
+        self.update(sample_ids, patch_hardness, step)
+        self.update_saliency(sample_ids, saliency, step)
 
 
 # ── Hardness-Aware Sampler ─────────────────────────────────────────────────────
@@ -449,7 +570,8 @@ def get_alp_cache() -> ALPScoreCache:
 def configure_alp_cache(
     max_entries: int = 1_000_000,
     disk_cache_dir: Optional[str] = None,
+    score_ema: float = 0.9,
 ) -> ALPScoreCache:
     global _global_cache
-    _global_cache = ALPScoreCache(max_entries, disk_cache_dir)
+    _global_cache = ALPScoreCache(max_entries, disk_cache_dir, score_ema=score_ema)
     return _global_cache

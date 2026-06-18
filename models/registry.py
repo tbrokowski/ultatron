@@ -126,3 +126,47 @@ def list_video_backbones() -> list[str]:
 
 def list_frozen_teachers() -> list[str]:
     return sorted(_TEACHER_REGISTRY.keys())
+
+
+# ---------------------------------------------------------------------------
+# Student backbone registry (separate from the existing dual-branch registries)
+# ---------------------------------------------------------------------------
+
+_STUDENT_BACKBONE_REGISTRY: Dict[str, Callable] = {}
+
+
+def register_student_backbone(key: str):
+    """Decorator: @register_student_backbone("hiera_large_video_mae_k400")"""
+    def decorator(fn: Callable) -> Callable:
+        if key in _STUDENT_BACKBONE_REGISTRY:
+            raise ValueError(f"Student backbone already registered: '{key}'")
+        _STUDENT_BACKBONE_REGISTRY[key] = fn
+        return fn
+    return decorator
+
+
+def build_student_backbone(
+    key: str,
+    hf_cache_dir: Optional[str] = None,
+    **kwargs,
+):
+    """
+    Instantiate a registered student backbone by key.
+
+    Parameters
+    ----------
+    key          : e.g. "hiera_large_video_mae_k400" or "sam2_hiera_large"
+    hf_cache_dir : HuggingFace model cache directory override
+    **kwargs     : forwarded to the factory (e.g. trainable_stages, temporal_mixing)
+    """
+    if key not in _STUDENT_BACKBONE_REGISTRY:
+        available = sorted(_STUDENT_BACKBONE_REGISTRY.keys())
+        raise KeyError(
+            f"Unknown student backbone '{key}'. "
+            f"Available: {available}"
+        )
+    return _STUDENT_BACKBONE_REGISTRY[key](hf_cache_dir=hf_cache_dir, **kwargs)
+
+
+def list_student_backbones() -> list[str]:
+    return sorted(_STUDENT_BACKBONE_REGISTRY.keys())

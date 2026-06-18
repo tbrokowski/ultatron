@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-scripts/train.py  ·  Oura training entry point
-===============================================
+scripts/train.py  ·  Ultatron training entry point
+===================================================
 
-Thin CLI wrapper.  All logic lives in oura/train/trainer.py.
+Thin CLI wrapper.  All logic lives in train/trainer.py.
 
 Usage (single node / testing):
     python scripts/train.py \\
-        --config configs/experiments/full_oura.yaml
+        --config configs/experiments/full.yaml
 
 Usage (multi-node via torchrun, called by run_training_job.sh):
     torchrun \\
@@ -19,7 +19,7 @@ Usage (multi-node via torchrun, called by run_training_job.sh):
         --rdzv_backend=c10d \\
         --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \\
         scripts/train.py \\
-            --config configs/experiments/full_oura.yaml
+            --config configs/experiments/full.yaml
 
 Flags:
     --config   Path to experiment YAML (inherits from base configs)

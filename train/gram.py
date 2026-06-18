@@ -1,9 +1,9 @@
 """
-oura/train/gram.py  ·  Gram anchoring (DINOv3)
-===============================================
+train/gram.py  ·  Gram anchoring (DINOv3)
+==========================================
 
-Extracted from training_integration.py into its own module so it can be
-imported by phase_steps.py without pulling in the entire training scaffold.
+Extracted into its own module so it can be imported by phase_steps.py
+without pulling in the entire training scaffold.
 
 GramTeacher
 -----------

@@ -33,6 +33,7 @@ from data.pipeline.dataset import ImageSSLDataset, VideoSSLDataset, PairedSSLDat
 from data.pipeline.collators import ImageSSLCollator, VideoSSLCollator, DualStreamBatch
 from data.pipeline.samplers import CombinedSampler
 from data.pipeline.transforms import ImageSSLTransformConfig, VideoSSLTransformConfig
+from data.pipeline.alp_interface import ALPReader, NullALPReader
 
 log = logging.getLogger(__name__)
 
@@ -54,8 +55,17 @@ class USFoundationDataModule:
         total_training_steps: int = 300_000,
         image_samples_per_epoch: int = 500_000,
         video_samples_per_epoch: int = 100_000,
+        curriculum_stage_fracs: Optional[List[float]] = None,
+        alp_alpha_init: float = 0.1,
+        alp_alpha_final: float = 0.9,
+        alp_guidance_threshold_init: float = 0.1,
+        alp_guidance_threshold_final: float = 0.9,
+        alp_n_frames: Optional[List[int]] = None,
+        alp_reader: Optional[ALPReader] = None,
+        hardness_temperature: float = 1.0,
         # Filtering
         anatomy_weights: Optional[Dict[str, float]] = None,
+        exclude_datasets: Optional[List[str]] = None,
         split: str = "train",
         root_remap: Optional[Dict[str, str]] = None,
     ):
@@ -68,7 +78,16 @@ class USFoundationDataModule:
         self.total_steps = total_training_steps
         self.image_samples = image_samples_per_epoch
         self.video_samples = video_samples_per_epoch
+        self.curriculum_stage_fracs = curriculum_stage_fracs
+        self.alp_alpha_init = alp_alpha_init
+        self.alp_alpha_final = alp_alpha_final
+        self.alp_guidance_threshold_init = alp_guidance_threshold_init
+        self.alp_guidance_threshold_final = alp_guidance_threshold_final
+        self.alp_n_frames = alp_n_frames
+        self.alp_reader = alp_reader or NullALPReader()
+        self._hardness_temperature = hardness_temperature
         self.anatomy_weights = anatomy_weights
+        self.exclude_datasets = set(exclude_datasets or ())
         self.split = split
         self.root_remap = root_remap or {}
 
@@ -93,6 +112,13 @@ class USFoundationDataModule:
         if self._setup_done: return
         log.info(f"Loading manifest: {self.manifest_path}")
         all_entries = load_manifest(self.manifest_path, split=self.split)
+        if self.exclude_datasets:
+            before = len(all_entries)
+            all_entries = [e for e in all_entries if e.dataset_id not in self.exclude_datasets]
+            log.info(
+                "Excluded datasets %s: %d → %d entries",
+                sorted(self.exclude_datasets), before, len(all_entries),
+            )
         log.info(f"Manifest loaded: {len(all_entries)} entries")
 
         stats = manifest_stats(all_entries)
@@ -117,6 +143,7 @@ class USFoundationDataModule:
             self._image_entries,
             cfg=self.image_cfg,
             root_remap=self.root_remap,
+            alp_reader=self.alp_reader,
         )
         self._video_dataset = VideoSSLDataset(
             self._video_entries,
@@ -130,26 +157,38 @@ class USFoundationDataModule:
             vid_cfg=self.video_cfg,
             patch_size=self.patch_size,
             root_remap=self.root_remap,
+            alp_reader=self.alp_reader,
         )
 
-        # Samplers
+        sampler_kw = dict(
+            global_step=0,
+            total_steps=self.total_steps,
+            anatomy_weights=self.anatomy_weights,
+            stage_fracs=self.curriculum_stage_fracs,
+            alpha_init=self.alp_alpha_init,
+            alpha_final=self.alp_alpha_final,
+            guidance_threshold_init=self.alp_guidance_threshold_init,
+            guidance_threshold_final=self.alp_guidance_threshold_final,
+            n_frames_by_stage=self.alp_n_frames,
+            alp_reader=None if isinstance(self.alp_reader, NullALPReader) else self.alp_reader,
+            hardness_temperature=float(
+                getattr(self, "_hardness_temperature", 1.0)
+            ),
+        )
         self._image_sampler = CombinedSampler(
             self._image_entries,
-            total_steps=self.total_steps,
             samples_per_epoch=self.image_samples,
-            anatomy_weights=self.anatomy_weights,
+            **sampler_kw,
         )
         self._video_sampler = CombinedSampler(
             self._video_entries,
-            total_steps=self.total_steps,
             samples_per_epoch=self.video_samples,
-            anatomy_weights=self.anatomy_weights,
+            **sampler_kw,
         )
         self._paired_sampler = CombinedSampler(
             self._paired_entries,
-            total_steps=self.total_steps,
             samples_per_epoch=self.video_samples,
-            anatomy_weights=self.anatomy_weights,
+            **sampler_kw,
         )
         self._setup_done = True
 
@@ -162,11 +201,15 @@ class USFoundationDataModule:
         # Push current alpha and mask_ratio into datasets
         if self._image_dataset:
             self._image_dataset.alpha = self.current_alpha()
+            self._image_dataset.mask_ratio = self.current_mask_ratio()
+            self._image_dataset.mask_guidance_threshold = self.current_mask_guidance_threshold()
         if self._video_dataset:
             self._video_dataset.mask_ratio = self.current_mask_ratio()
             self._video_dataset.transform.cfg.n_frames = self.current_n_frames()
         if self._paired_dataset:
             self._paired_dataset.img_alpha = self.current_alpha()
+            self._paired_dataset.img_mask_ratio = self.current_mask_ratio()
+            self._paired_dataset.img_mask_guidance_threshold = self.current_mask_guidance_threshold()
             self._paired_dataset.vid_mask_ratio = self.current_mask_ratio()
             self._paired_dataset.vid_transform.cfg.n_frames = self.current_n_frames()
 
@@ -176,15 +219,49 @@ class USFoundationDataModule:
     def current_mask_ratio(self) -> float:
         return self._video_sampler.current_mask_ratio() if self._video_sampler else 0.75
 
+    def current_mask_guidance_threshold(self) -> float:
+        return (
+            self._image_sampler.current_mask_guidance_threshold()
+            if self._image_sampler else 0.5
+        )
+
     def current_n_frames(self) -> int:
         return self._video_sampler.current_n_frames() if self._video_sampler else 16
 
     def current_stage(self) -> int:
         if self._image_sampler:
-            return self._image_sampler.curriculum._stage(
-                self._image_sampler.curriculum.current_step
-            )
+            return self._image_sampler.current_stage()
         return 1
+
+    def curriculum_snapshot(self) -> dict:
+        """Scalar curriculum state for logging / monitoring."""
+        cs = self._image_sampler.curriculum if self._image_sampler else None
+        stage = self.current_stage()
+        tier_counts = {}
+        tier_in_pool = {}
+        if cs is not None:
+            for tier in sorted(cs.tier_idx.keys()):
+                tier_counts[tier] = len(cs.tier_idx[tier])
+                tier_in_pool[tier] = 0
+            for idx in cs._pool:
+                tier = cs.entries[idx].curriculum_tier
+                tier_in_pool[tier] = tier_in_pool.get(tier, 0) + 1
+        return {
+            "alp_stage": stage,
+            "alp_alpha": self.current_alpha(),
+            "mask_guidance_threshold": self.current_mask_guidance_threshold(),
+            "mask_ratio": self.current_mask_ratio(),
+            "hardness_weight": self._image_sampler.current_hardness_weight()
+            if self._image_sampler else 0.0,
+            "n_frames": self.current_n_frames(),
+            "tier_pool_size": len(cs._pool) if cs else 0,
+            "tier1_in_pool": tier_in_pool.get(1, 0),
+            "tier2_in_pool": tier_in_pool.get(2, 0),
+            "tier3_in_pool": tier_in_pool.get(3, 0),
+            "tier1_total": tier_counts.get(1, 0),
+            "tier2_total": tier_counts.get(2, 0),
+            "tier3_total": tier_counts.get(3, 0),
+        }
 
     # ── Loaders ───────────────────────────────────────────────────────────────
 

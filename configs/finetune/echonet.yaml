@@ -26,7 +26,8 @@ finetune:
   # "linear" = LinearSegHead (1 linear layer on patch tokens)
   # "dpt"    = DPTSegHead (conv neck + bilinear upsample; better for dense pred)
   # "mlp"    = MLPClsHead (2-layer MLP on CLS token, for classification tasks)
-  head_type:  linear   # regression uses clip_cls token, not patch tokens
+  head_type:  mlp      # mlp = VideoRegressionHead (frame attention + deep MLP)
+                       # linear = legacy shallow RegressionHead on clip_cls
   # Note: uses video branch (vid_branch), not image branch.
 
   # ── Early stopping ───────────────────────────────────────────────────────────

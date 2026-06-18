@@ -1,0 +1,101 @@
+# OpenUS segmentation comparison — BUS-BRA + TN3K (arXiv:2511.11510)
+#
+# BUS-BRA uses the BUSI UPerNet head recipe (500px, augmentations, refine_up).
+# TN3K keeps the OpenUS 224×224 DPT protocol for paper-aligned comparison.
+#
+# Prepare BUS-BRA split once:
+#   python scripts/prepare_busbra_openus_split.py
+#
+# Usage:
+#   python scripts/finetune/busbra.py --comparison-config configs/finetune/openus_segmentation.yaml
+#   python scripts/finetune/tn3k.py   --comparison-config configs/finetune/openus_segmentation.yaml
+#   bash scripts/finetune/submit_openus_segmentation.sh
+
+train_config: configs/student/student_pretrain.yaml
+
+output_dir: dataset_exploration_outputs/finetune_openus_seg
+device: cuda
+eval_only: false
+
+parallel_experiments: true
+parallel_strategy: per_experiment
+num_gpus: 2
+
+smoke_overrides:
+  max_epochs: 100
+  batch_size: 16
+  patience: 100
+  num_workers: 4
+  lr: 1.0e-4
+  weight_decay: 0.05
+  freeze_backbone: true
+  head_type: dpt
+  input_size: 224
+  output_size: 224
+  monitor: val_dice
+  monitor_mode: max
+
+experiment_smoke_overrides:
+  busbra:
+    cv_fold: 0
+    split_manifest: dataset_exploration_outputs/busbra_openus/split_manifest.json
+    # BUSI-style breast segmentation head + training (see configs/finetune/busbra.yaml)
+    lr: 3.0e-4
+    weight_decay: 0.01
+    max_epochs: 300
+    batch_size: 8
+    patience: 80
+    input_size: 500
+    output_size: 500
+    boundary_loss_weight: 0.5
+    refine_up: true
+    seg_use_adapters: true
+    seg_use_aspp: true
+    seg_use_attention_gates: true
+  tn3k:
+    cv_fold: 0
+
+backbones:
+  - key: student_stage1
+    type: student
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_10000.pt
+    use_ema: true
+
+  - key: resnet50
+    type: standard
+    variant: resnet50
+
+  - key: vit_b_16
+    type: standard
+    variant: vit_b_16
+
+  - key: dinov3_l
+    type: dinov3
+    variant: dinov3_l
+
+  - key: biomedclip
+    type: biomedclip
+
+  - key: usfm
+    type: usfm
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Ablations/USFM_latest.pth
+    embed_dim: 768
+
+  - key: openus
+    type: openus
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Ablations/openus_cpt0150.pth
+    vmamba_checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Ablations/vssm_small_0229_ckpt_epoch_222.pth
+    embed_dim: 768
+
+experiments:
+  - busbra
+  - tn3k
+
+head_types:
+  default: [dpt]
+  busbra: [upernet, dpt]
+  tn3k: [dpt]
+
+dataset_roots:
+  busbra: "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSBRA"
+  tn3k:   "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/TN3K"

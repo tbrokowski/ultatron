@@ -10,7 +10,7 @@ Breast US B Dataset — Al-Dhabyani et al. (2020), Data in Brief.
 Dataset layout
 --------------
   {root}/
-    DatasetB.xlsx          ← per-image metadata (image_name, label, ...)
+    DatasetB.xlsx          ← per-image metadata (Image, Type, Diagnosis, ...)
     original/
       000001.png           ← US images (zero-padded 6-digit index)
       000002.png
@@ -25,13 +25,22 @@ SonoDQS : silver (single-centre, single rater, 310 images)
 """
 from __future__ import annotations
 
+import logging
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry
 
+log = logging.getLogger(__name__)
+
 _IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif"}
+
+_NAME_COLS = ("image_name", "filename", "name", "image", "id")
+# Prefer coarse lesion type (Benign/Malignant) over fine-grained diagnosis.
+_LABEL_COLS = ("label", "class", "category", "type", "diagnosis")
 
 # Label mapping: raw xlsx value → (label_raw, label_ontology)
 _LABEL_MAP: dict[str, tuple[str, str]] = {
@@ -50,45 +59,117 @@ def _is_image(p: Path) -> bool:
     return p.suffix.lower() in _IMG_EXTS
 
 
+def _parse_label_rows(rows: Sequence[Sequence]) -> dict[str, str]:
+    """Parse spreadsheet rows into {image_stem: coarse_label}."""
+    labels: dict[str, str] = {}
+    if not rows:
+        return labels
+
+    headers = [
+        str(h).strip().lower() if h is not None else f"col_{i}"
+        for i, h in enumerate(rows[0])
+    ]
+    name_col = next(
+        (i for i, h in enumerate(headers) if h in _NAME_COLS), 0
+    )
+    label_col = next(
+        (i for i, h in enumerate(headers) if h in _LABEL_COLS), 1
+    )
+
+    for row in rows[1:]:
+        if name_col >= len(row) or row[name_col] is None:
+            continue
+        stem = Path(str(row[name_col]).strip()).stem
+        raw = row[label_col] if label_col < len(row) else None
+        label = str(raw).strip().lower() if raw is not None else ""
+        if label:
+            labels[stem] = label
+    return labels
+
+
+def _load_xlsx_stdlib(xlsx: Path) -> list[tuple]:
+    """
+    Read the first worksheet from an .xlsx file using only the stdlib.
+
+    Handles simple single-sheet workbooks such as DatasetB.xlsx.
+    """
+    with zipfile.ZipFile(xlsx) as zf:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in zf.namelist():
+            root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            for si in root.findall("m:si", ns):
+                text = si.find("m:t", ns)
+                if text is not None and text.text is not None:
+                    shared.append(text.text)
+                else:
+                    parts = [node.text or "" for node in si.findall(".//m:t", ns)]
+                    shared.append("".join(parts))
+
+        sheet_name = "xl/worksheets/sheet1.xml"
+        if sheet_name not in zf.namelist():
+            sheet_candidates = sorted(
+                n for n in zf.namelist() if n.startswith("xl/worksheets/sheet")
+            )
+            if not sheet_candidates:
+                return []
+            sheet_name = sheet_candidates[0]
+
+        sheet = ET.fromstring(zf.read(sheet_name))
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        rows: list[tuple] = []
+        for row_el in sheet.findall(".//m:row", ns):
+            vals: list = []
+            for cell in row_el.findall("m:c", ns):
+                value_el = cell.find("m:v", ns)
+                if value_el is None or value_el.text is None:
+                    vals.append(None)
+                elif cell.get("t") == "s":
+                    vals.append(shared[int(value_el.text)])
+                else:
+                    vals.append(value_el.text)
+            rows.append(tuple(vals))
+        return rows
+
+
 def _load_xlsx_labels(root: Path) -> dict[str, str]:
     """
-    Load DatasetB.xlsx → {image_stem: label_raw}.
-    Returns empty dict if openpyxl not available.
+    Load DatasetB.xlsx → {image_stem: coarse_label}.
+
+    Tries openpyxl first, then a stdlib .xlsx reader. Logs and returns an
+    empty dict only when the file is missing or unreadable.
     """
-    labels: dict[str, str] = {}
     xlsx = root / "DatasetB.xlsx"
     if not xlsx.exists():
-        return labels
+        return {}
+
+    rows: list[tuple] | None = None
+
     try:
         import openpyxl
+
         wb = openpyxl.load_workbook(xlsx, read_only=True, data_only=True)
         ws = wb.active
         rows = list(ws.iter_rows(values_only=True))
-        if not rows:
-            return labels
-        headers = [str(h).strip().lower() if h is not None else f"col_{i}"
-                   for i, h in enumerate(rows[0])]
-
-        # Find name and label columns
-        name_col = next(
-            (i for i, h in enumerate(headers)
-             if h in ("image_name", "filename", "name", "image", "id")), 0
-        )
-        label_col = next(
-            (i for i, h in enumerate(headers)
-             if h in ("label", "class", "category", "type", "diagnosis")), 1
-        )
-
-        for row in rows[1:]:
-            if row[name_col] is None:
-                continue
-            stem  = Path(str(row[name_col]).strip()).stem
-            label = str(row[label_col]).strip().lower() if row[label_col] else ""
-            if label:
-                labels[stem] = label
         wb.close()
-    except Exception:
-        pass
+    except ImportError:
+        log.warning(
+            "BUS-B: openpyxl not installed — reading %s via stdlib fallback",
+            xlsx,
+        )
+    except Exception as exc:
+        log.warning("BUS-B: openpyxl failed for %s: %s", xlsx, exc)
+
+    if rows is None:
+        try:
+            rows = _load_xlsx_stdlib(xlsx)
+        except Exception as exc:
+            log.warning("BUS-B: failed to read %s: %s", xlsx, exc)
+            return {}
+
+    labels = _parse_label_rows(rows)
+    if not labels:
+        log.warning("BUS-B: no labels parsed from %s", xlsx)
     return labels
 
 
@@ -121,10 +202,8 @@ class BUSBAdapter(BaseAdapter):
         if not img_dir.is_dir():
             img_dir = self.root   # fallback
 
-        # Load xlsx metadata
         xlsx_labels = _load_xlsx_labels(self.root)
 
-        # Build mask index: stem → path
         mask_index: dict[str, Path] = {}
         if mask_dir.is_dir():
             for f in mask_dir.iterdir():
@@ -139,16 +218,12 @@ class BUSBAdapter(BaseAdapter):
             mask_path = mask_index.get(img_path.stem)
             has_mask  = mask_path is not None
 
-            # Resolve label
             raw_label = xlsx_labels.get(img_path.stem, "").lower()
-            if not raw_label:
-                # Infer from mask presence as fallback
-                raw_label = "benign" if has_mask else "normal"
             label_raw, label_onto = _LABEL_MAP.get(
                 raw_label, ("unknown", "breast_lesion")
             )
 
-            # Normal images typically have no mask
+            # Normal images typically have no mask.
             is_normal = label_raw == "normal"
             has_mask  = has_mask and not is_normal
 
@@ -173,5 +248,6 @@ class BUSBAdapter(BaseAdapter):
                 source_meta   = {
                     "doi":       self.DOI,
                     "label_raw": label_raw,
+                    "type_raw":  raw_label or None,
                 },
             )

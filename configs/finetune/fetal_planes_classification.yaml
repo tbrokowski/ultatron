@@ -1,0 +1,70 @@
+# FETAL_PLANES_DB classification comparison — OpenUS linear-probe protocol
+#
+# Usage:
+#   python scripts/finetune/fetal_planes_db.py
+#   bash scripts/finetune/submit_fetal_planes_db.sh
+
+train_config: configs/student/student_pretrain.yaml
+
+output_dir: dataset_exploration_outputs/finetune_fetal_planes
+device: cuda
+eval_only: false
+
+parallel_experiments: false
+parallel_strategy: per_experiment
+
+smoke_overrides:
+  max_epochs: 100
+  batch_size: 16
+  patience: 20
+  num_workers: 4
+  lr: 1.0e-3
+  weight_decay: 0.0
+  freeze_backbone: true
+  head_type: linear
+  input_size: 224
+  output_size: 224
+  monitor: val_acc
+  monitor_mode: max
+
+backbones:
+  - key: student_stage1
+    type: student
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_10000.pt
+    use_ema: true
+
+  - key: resnet50
+    type: standard
+    variant: resnet50
+
+  - key: vit_b_16
+    type: standard
+    variant: vit_b_16
+
+  - key: dinov3_l
+    type: dinov3
+    variant: dinov3_l
+
+  - key: biomedclip
+    type: biomedclip
+
+  - key: usfm
+    type: usfm
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Ablations/USFM_latest.pth
+    embed_dim: 768
+
+  - key: openus
+    type: openus
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Ablations/openus_cpt0150.pth
+    vmamba_checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Ablations/vssm_small_0229_ckpt_epoch_222.pth
+    embed_dim: 768
+
+experiments:
+  - fetal_planes_db
+
+head_types:
+  default: [linear]
+  fetal_planes_db: [linear]
+
+dataset_roots:
+  fetal_planes_db: "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FETAL-PLANES-DB"

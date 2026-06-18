@@ -2,9 +2,23 @@
 /data/pipeline/alp_interface.py  ·  ALPReader protocol
 ===========================================================
 
-This module defines the *read-only* interface that data/pipeline/ components
-use to access Adaptive Learning Priority (ALP) scores at dataset load time.
+Read-only interface for **online-updated** Adaptive Learning Priority (ALP)
+scores.  ALP is not a learned neural head — it is a feedback signal that
+evolves during training (OpenUS ``student_feedback`` + ``adaptive_weighting``):
 
+    masking_score = α · S_k + (1-α) · H_k
+
+  S_k  teacher saliency (DINO last-layer CLS→patch attention, EMA-smoothed)
+  H_k  student patch hardness (distillation error; EMA-smoothed)
+  α    cosine curriculum: ``alpha_init`` → ``alpha_final`` (OpenUS default 0.1→0.9)
+       Early training: low α → student hardness drives masking (learn from errors).
+       Late training: high α → teacher saliency refines where to mask.
+
+  m_t  mask guidance threshold (OpenUS default 0.1→0.9): fraction of the mask
+       budget drawn from highest-scoring patches; remainder is random fill.
+
+Scores are written by ``HardnessFeedback`` after each image step and read
+back by datasets / samplers on subsequent batches (disk cache for workers).
 """
 from __future__ import annotations
 

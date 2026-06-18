@@ -22,7 +22,7 @@ Usage
 -----
     python scripts/data_prep_analysis.py                        # defaults
     python scripts/data_prep_analysis.py \\
-        --manifest dataset_exploration_outputs/run1/run1_train_v2.jsonl \\
+        --manifest dataset_exploration_outputs/run1/run1_train_v3.jsonl \\
         --out      dataset_exploration_outputs/data_prep_analysis.html \\
         --n-per-dataset 1 \\
         --n-video-datasets 8
@@ -389,7 +389,7 @@ def _load_entry_image(entry: USManifestEntry) -> Optional[np.ndarray]:
             return load_image(path, frame_idx=-1)
         if (
             entry.modality_type in ("video", "pseudo_video", "volume")
-            and ext in (".mp4", ".avi", ".mov", ".mkv", ".gif", ".h5", ".hdf5")
+            and ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".gif", ".h5", ".hdf5")
         ):
             frames = load_video_frames(path, max_frames=4)
             return frames[len(frames) // 2] if frames else None
@@ -556,6 +556,28 @@ def _badge_html(text: str, kind: str) -> str:
     return f'<span class="badge {cls}">{_esc(text)}</span>'
 
 
+# modality_type on each manifest entry (set by adapters via BaseAdapter._make_entry)
+_IMAGE_MODALITIES = frozenset({"image"})
+_VIDEO_MODALITIES = frozenset({"video", "pseudo_video"})
+
+
+def _modality_counts(entries: List[USManifestEntry]) -> Dict[str, int]:
+    """Count loadable samples by modality_type (not ssl_stream routing)."""
+    return {
+        "image": sum(1 for e in entries if e.modality_type in _IMAGE_MODALITIES),
+        "video": sum(1 for e in entries if e.modality_type in _VIDEO_MODALITIES),
+        "volume": sum(1 for e in entries if e.modality_type == "volume"),
+    }
+
+
+def _is_image_entry(entry: USManifestEntry) -> bool:
+    return entry.modality_type in _IMAGE_MODALITIES
+
+
+def _is_video_entry(entry: USManifestEntry) -> bool:
+    return entry.modality_type in _VIDEO_MODALITIES
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Section builders
 # ─────────────────────────────────────────────────────────────────────────────
@@ -568,6 +590,7 @@ def section_manifest_summary(report: HTMLReport, entries: List[USManifestEntry])
     families  = {e.anatomy_family for e in entries}
     streams   = defaultdict(int)
     tiers     = defaultdict(int)
+    modalities = _modality_counts(entries)
     for e in entries:
         streams[e.ssl_stream] += 1
         tiers[e.curriculum_tier] += 1
@@ -575,53 +598,77 @@ def section_manifest_summary(report: HTMLReport, entries: List[USManifestEntry])
     n_mask  = sum(1 for e in entries if e.has_mask)
     n_label = sum(1 for e in entries if e.task_type != "ssl_only")
 
-    report.stat_grid({
-        "Total entries":   f"{len(entries):,}",
-        "Datasets":        str(len(datasets)),
+    stat_grid = {
+        "Total entries":    f"{len(entries):,}",
+        "Datasets":         str(len(datasets)),
         "Anatomy families": str(len(families)),
-        "With annotation": f"{n_mask + n_label:,}",
-        "Image stream":    f"{streams['image']:,}",
-        "Video stream":    f"{streams['video']:,}",
-        "Both streams":    f"{streams['both']:,}",
-        "Tier 1":          f"{tiers[1]:,}",
-        "Tier 2":          f"{tiers[2]:,}",
-        "Tier 3":          f"{tiers[3]:,}",
-    })
+        "Images":           f"{modalities['image']:,}",
+        "Videos":           f"{modalities['video']:,}",
+        "With annotation":  f"{n_mask + n_label:,}",
+        "SSL image-only":   f"{streams['image']:,}",
+        "SSL video-only":   f"{streams['video']:,}",
+        "SSL both":         f"{streams['both']:,}",
+        "Tier 1":           f"{tiers[1]:,}",
+        "Tier 2":           f"{tiers[2]:,}",
+        "Tier 3":           f"{tiers[3]:,}",
+    }
+    if modalities["volume"]:
+        stat_grid["Volumes"] = f"{modalities['volume']:,}"
+    report.stat_grid(stat_grid)
+
+    report.html(
+        "<p><b>Images / Videos</b> count manifest entries by "
+        "<code>modality_type</code> (what each sample actually is on disk). "
+        "<b>SSL *</b> counts show how entries are routed to image vs video "
+        "training streams via <code>ssl_stream</code>; a single dataset can "
+        "appear in both columns when entries are tagged "
+        "<code>ssl_stream=&quot;both&quot;</code>.</p>"
+    )
 
     # Per-dataset table
     report.h3("Per-dataset breakdown")
+    try:
+        from data.infra.storage import DATASET_STORE_MAP
+    except ImportError:
+        DATASET_STORE_MAP = {}
+
     ds_map: Dict[str, List[USManifestEntry]] = defaultdict(list)
     for e in entries:
         ds_map[e.dataset_id].append(e)
 
+    has_volumes = any(_modality_counts(es)["volume"] for es in ds_map.values())
     rows = []
     for ds_id in sorted(ds_map):
         es = ds_map[ds_id]
         n  = len(es)
         fam = es[0].anatomy_family
-        n_img = sum(1 for e in es if e.ssl_stream == "image")
-        n_vid = sum(1 for e in es if e.ssl_stream in ("video", "both"))
+        mc = _modality_counts(es)
         n_msk = sum(1 for e in es if e.has_mask)
         t1 = sum(1 for e in es if e.curriculum_tier == 1)
         t2 = sum(1 for e in es if e.curriculum_tier == 2)
         t3 = sum(1 for e in es if e.curriculum_tier == 3)
         task_types = ", ".join(sorted({e.task_type for e in es}))
-        rows.append([
+        store_slug = DATASET_STORE_MAP.get(ds_id, (None, ds_id))[1]
+        row = [
             f"<code>{_esc(ds_id)}</code>",
+            f"<code>{_esc(store_slug)}</code>",
             _esc(fam),
             f"{n:,}",
-            f"{n_img:,}",
-            f"{n_vid:,}",
+            f"{mc['image']:,}",
+            f"{mc['video']:,}",
             f"{n_msk:,}",
             f"{t1:,} / {t2:,} / {t3:,}",
             _esc(task_types),
-        ])
+        ]
+        if has_volumes:
+            row.insert(6, f"{mc['volume']:,}")
+        rows.append(row)
 
-    report.table(
-        ["Dataset", "Anatomy Family", "Entries", "Image", "Video", "Masked",
-         "Tier 1/2/3", "Task Types"],
-        rows,
-    )
+    table_cols = ["Dataset ID", "Store dir", "Anatomy Family", "Entries", "Images", "Videos"]
+    if has_volumes:
+        table_cols.append("Volumes")
+    table_cols += ["Masked", "Tier 1/2/3", "Task Types"]
+    report.table(table_cols, rows)
 
     # Per-anatomy-family summary plot
     fam_counts = defaultdict(int)
@@ -642,27 +689,40 @@ def section_manifest_summary(report: HTMLReport, entries: List[USManifestEntry])
     fig.tight_layout()
     report.figure(fig, "Entry counts by anatomy family")
 
-    # Stream mix plot
-    fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    # Modality + SSL stream + curriculum tier plots
+    fig2, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(14, 4))
     fig2.patch.set_facecolor("#0f1117")
-    for ax in (ax1, ax2):
+    for ax in (ax1, ax2, ax3):
         _dark_ax(ax)
-    colors = ["#60a5fa", "#4ade80", "#fb923c"]
+    mod_labels, mod_values, mod_colors = ["image", "video"], [
+        modalities["image"], modalities["video"],
+    ], ["#60a5fa", "#4ade80"]
+    if modalities["volume"]:
+        mod_labels.append("volume")
+        mod_values.append(modalities["volume"])
+        mod_colors.append("#c084fc")
     ax1.pie(
+        mod_values, labels=mod_labels, colors=mod_colors,
+        autopct="%1.1f%%", textprops={"color": "#e2e8f0", "fontsize": 9},
+    )
+    ax1.set_title("Modality distribution", color="#e2e8f0", fontsize=10)
+    stream_colors = ["#60a5fa", "#4ade80", "#fb923c"]
+    ax2.pie(
         [streams["image"], streams["video"], streams["both"]],
         labels=["image", "video", "both"],
-        colors=colors, autopct="%1.1f%%", textprops={"color": "#e2e8f0", "fontsize": 9},
+        colors=stream_colors, autopct="%1.1f%%",
+        textprops={"color": "#e2e8f0", "fontsize": 9},
     )
-    ax1.set_title("SSL stream distribution", color="#e2e8f0", fontsize=10)
+    ax2.set_title("SSL stream routing", color="#e2e8f0", fontsize=10)
     tier_colors = ["#4ade80", "#fbbf24", "#f87171"]
-    ax2.pie(
+    ax3.pie(
         [tiers[1], tiers[2], tiers[3]],
         labels=["Tier 1", "Tier 2", "Tier 3"],
         colors=tier_colors, autopct="%1.1f%%", textprops={"color": "#e2e8f0", "fontsize": 9},
     )
-    ax2.set_title("Curriculum tier distribution", color="#e2e8f0", fontsize=10)
+    ax3.set_title("Curriculum tier distribution", color="#e2e8f0", fontsize=10)
     fig2.tight_layout()
-    report.figure(fig2, "Stream and curriculum tier breakdown")
+    report.figure(fig2, "Modality, SSL stream, and curriculum tier breakdown")
 
 
 def section_label_spaces(report: HTMLReport):
@@ -712,8 +772,10 @@ def section_image_loading(
 
         for ds_id in sorted(ds_by_family[fam]):
             ds_entries = ds_by_family[fam][ds_id]
-            # Prefer image-stream entries (incl. "both"); DCM-only datasets fall back to all
-            img_entries = [e for e in ds_entries if e.ssl_stream in ("image", "both")]
+            # Sample actual image modalities; fall back to volumes then any entry.
+            img_entries = [e for e in ds_entries if _is_image_entry(e)]
+            if not img_entries:
+                img_entries = [e for e in ds_entries if e.modality_type == "volume"]
             if not img_entries:
                 img_entries = ds_entries
             max_tries = min(20, len(img_entries))
@@ -786,8 +848,9 @@ def section_image_loading(
                 fig, ds_id,
                 [
                     f"family: {fam}",
+                    f"modality: {entry.modality_type}",
                     f"task: {entry.task_type}",
-                    f"stream: {entry.ssl_stream}",
+                    f"ssl: {entry.ssl_stream}",
                     f"tier: {entry.curriculum_tier}",
                     f"shape: {H}×{W}",
                     f"frames: {entry.num_frames}",
@@ -811,20 +874,10 @@ def section_video_loading(
         "Loaded via <code>load_video_frames()</code>.</p>"
     )
 
-    # Collect video-capable datasets (one entry per dataset)
+    # One representative video-modality entry per dataset
     video_entries: Dict[str, USManifestEntry] = {}
     for e in entries:
-        if e.dataset_id not in video_entries and \
-                e.ssl_stream in ("video", "both") and \
-                e.modality_type in ("video", "pseudo_video"):
-            video_entries[e.dataset_id] = e
-        if len(video_entries) >= n_datasets * 3:
-            break
-
-    # Also try image-stream entries with video modality
-    for e in entries:
-        if e.dataset_id not in video_entries and \
-                e.modality_type in ("video", "pseudo_video"):
+        if e.dataset_id not in video_entries and _is_video_entry(e):
             video_entries[e.dataset_id] = e
         if len(video_entries) >= n_datasets * 3:
             break
@@ -886,15 +939,18 @@ def section_mask_loading(
         "Sampled across anatomy families.</p>"
     )
 
-    # Collect entries with masks, diverse across families
+    # One representative masked entry per (anatomy, dataset) — scan the full manifest
+    # so late datasets (e.g. FASS at ~640k lines) are not skipped by an early break.
     mask_entries: Dict[str, USManifestEntry] = {}
     for e in entries:
-        if e.has_mask and e.instances:
-            inst = e.instances[0]
-            if inst.mask_path and inst.mask_path not in mask_entries:
-                mask_entries[e.anatomy_family + "::" + e.dataset_id] = e
-        if len(mask_entries) >= n_samples * 4:
-            break
+        if not (e.has_mask and e.instances):
+            continue
+        inst = e.instances[0]
+        if not inst.mask_path:
+            continue
+        key = f"{e.anatomy_family}::{e.dataset_id}"
+        if key not in mask_entries:
+            mask_entries[key] = e
 
     selected = list(mask_entries.values())
     random.shuffle(selected)
@@ -1328,7 +1384,7 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Ultatron data pipeline analysis report")
     ap.add_argument(
         "--manifest",
-        default=str(PROJECT_ROOT / "dataset_exploration_outputs/run1/run1_train_v2.jsonl"),
+        default=str(PROJECT_ROOT / "dataset_exploration_outputs/run1/run1_train_v3.jsonl"),
         help="Path to the JSONL manifest",
     )
     ap.add_argument(
@@ -1366,15 +1422,8 @@ def main():
         format="%(levelname)s  %(message)s",
     )
 
-    for dep in ("pydicom", "h5py"):
-        try:
-            __import__(dep)
-        except ImportError:
-            log.warning(
-                "%s is not installed — DICOM/HDF5 samples will fail. "
-                "Install with: pip install %s",
-                dep, dep,
-            )
+    from scripts.ensure_deps import ensure_deps
+    ensure_deps()
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)

@@ -9,19 +9,22 @@ raw AVI videos, frame-level standard-plane classification metadata, and
 pre-extracted 512x512 grayscale segmentation masks for pubic symphysis and
 fetal head.  Mask naming differs by split:
 
-  train: seg/<video_name>/mask/<video_name>_<frame>_6.png
-  val:   seg/<video_name>_<frame>.png
-  test:  seg/<video_name>.png
+  train: seg/<seg_stem>/mask/<seg_stem>_<frame>_6.png
+  val:   seg/<seg_stem>_<frame>.png  or  seg/<seg_stem>.png
+  test:  seg/<seg_stem>.png          or  seg/<seg_stem>_<frame>.png
 
-The train suffix "_6" is fixed and is not a frame index.  Landmark coordinates
-in landmark.json are [y, x] strings and are converted to [x, y] keypoints.
-Empty or missing landmark JSON files are handled as absent annotations.
+CSV metadata is ISO-8859 encoded and video filenames on disk may differ from
+CSV rows (duplicate stems ``A__A``, Chinese characters, ``__B_产科`` suffixes).
+Landmark coordinates in landmarks.json are [y, x] strings and are converted to
+[x, y] keypoints.  Empty or missing landmark JSON files are handled as absent
+annotations.
 """
 from __future__ import annotations
 
 import ast
 import csv
 import json
+import re
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -46,6 +49,8 @@ class MaternalFetalUSVideoIntrapartumAdapter(BaseAdapter):
     ANATOMY_FAMILY = "intrapartum"
     SONODQS        = "silver"
     DOI            = ""
+
+    _TEXT_ENCODINGS: Tuple[str, ...] = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
 
     def __init__(self, root: str | Path, split_override: Optional[str] = None):
         super().__init__(
@@ -110,16 +115,17 @@ class MaternalFetalUSVideoIntrapartumAdapter(BaseAdapter):
         if not videos_dir.exists():
             return
 
-        info_rows = self._load_csv_by_stem(split_dir / info_csv_name)
-        seg_rows = self._load_csv_by_stem(seg_dir / "seg_info.csv")
-        cls_rows = self._load_csv_by_stem(cls_dir / cls_csv_name)
-        landmarks = self._load_landmarks(seg_dir / "landmark.json")
+        info_rows = self._build_row_lookup(split_dir / info_csv_name)
+        seg_rows = self._build_row_lookup(seg_dir / "seg_info.csv")
+        cls_rows = self._build_row_lookup(cls_dir / cls_csv_name)
+        landmarks = self._load_landmarks(seg_dir)
 
         for video_path in sorted(videos_dir.glob("*.avi")):
             stem = video_path.stem
-            info = info_rows.get(stem, {})
-            seg_info = seg_rows.get(stem, {})
-            cls_info = cls_rows.get(stem, {})
+            info = self._lookup_row(info_rows, stem)
+            seg_info = self._lookup_row(seg_rows, stem)
+            cls_info = self._lookup_row(cls_rows, stem)
+            seg_stem = self._seg_stem(seg_info, stem)
 
             frame_count = self._to_int(
                 info.get("frame_count")
@@ -134,7 +140,7 @@ class MaternalFetalUSVideoIntrapartumAdapter(BaseAdapter):
             )
             mask_infos = [
                 mask_info for frame_idx in labeled_indices
-                if (mask_info := self._mask_info(split_name, seg_dir, stem, frame_idx)) is not None
+                if (mask_info := self._mask_info(split_name, seg_dir, seg_stem, frame_idx)) is not None
             ]
 
             instances = []
@@ -189,6 +195,7 @@ class MaternalFetalUSVideoIntrapartumAdapter(BaseAdapter):
                 source_meta={
                     "split_dir": split_name,
                     "video_filename": video_path.name,
+                    "seg_stem": seg_stem,
                     "info": info,
                     "seg_info": seg_info,
                     "cls_info": cls_info,
@@ -214,36 +221,85 @@ class MaternalFetalUSVideoIntrapartumAdapter(BaseAdapter):
                 },
             )
 
-    @staticmethod
-    def _load_csv_by_stem(path: Path) -> Dict[str, dict]:
+    @classmethod
+    def _read_text(cls, path: Path) -> str:
+        raw_bytes = path.read_bytes()
+        for encoding in cls._TEXT_ENCODINGS:
+            try:
+                return raw_bytes.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw_bytes.decode("latin-1", errors="replace")
+
+    @classmethod
+    def _build_row_lookup(cls, path: Path) -> Dict[str, dict]:
         if not path.exists():
             return {}
-        out: Dict[str, dict] = {}
-        with path.open(newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                filename = (row.get("filename") or "").strip()
-                if not filename:
-                    continue
-                out[Path(filename).stem] = {
-                    k: (v or "").strip() for k, v in row.items()
-                }
-        return out
+        lookup: Dict[str, dict] = {}
+        for row in csv.DictReader(cls._read_text(path).splitlines()):
+            filename = (row.get("filename") or "").strip()
+            if not filename:
+                continue
+            cleaned = {k: (v or "").strip() for k, v in row.items()}
+            stem = Path(filename).stem
+            for key in (stem, cls._canonical_stem(stem)):
+                lookup.setdefault(key, cleaned)
+            sig = cls._b_ob_signature(stem)
+            if sig is not None:
+                lookup.setdefault(sig, cleaned)
+        return lookup
+
+    @classmethod
+    def _lookup_row(cls, lookup: Dict[str, dict], video_stem: str) -> dict:
+        for key in (video_stem, cls._canonical_stem(video_stem)):
+            if key in lookup:
+                return lookup[key]
+        sig = cls._b_ob_signature(video_stem)
+        if sig is not None and sig in lookup:
+            return lookup[sig]
+        return {}
 
     @staticmethod
-    def _load_landmarks(path: Path) -> Dict[str, dict]:
-        if not path.exists():
-            return {}
-        try:
-            raw = path.read_text(encoding="utf-8-sig").strip()
-        except UnicodeDecodeError:
-            return {}
-        if not raw:
-            return {}
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-        return data if isinstance(data, dict) else {}
+    def _canonical_stem(stem: str) -> str:
+        if "__" in stem:
+            left, right = stem.split("__", 1)
+            if left == right:
+                return left
+        return stem
+
+    @staticmethod
+    def _b_ob_signature(stem: str) -> Optional[str]:
+        match = re.match(r"^(\d{8}T\d{6})__B_.*?(_tmp)?_(\d+)$", stem)
+        if match is None:
+            return None
+        return f"{match.group(1)}__B_{match.group(3)}"
+
+    @staticmethod
+    def _seg_stem(seg_info: dict, video_stem: str) -> str:
+        filename = (seg_info.get("filename") or "").strip()
+        if filename:
+            return Path(filename).stem
+        return MaternalFetalUSVideoIntrapartumAdapter._canonical_stem(video_stem)
+
+    @classmethod
+    def _load_landmarks(cls, seg_dir: Path) -> Dict[str, dict]:
+        for name in ("landmarks.json", "landmark.json"):
+            path = seg_dir / name
+            if not path.exists():
+                continue
+            try:
+                raw = cls._read_text(path).strip()
+            except OSError:
+                continue
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                return data
+        return {}
 
     @staticmethod
     def _parse_index_list(raw: Optional[str]) -> List[int]:
@@ -284,21 +340,35 @@ class MaternalFetalUSVideoIntrapartumAdapter(BaseAdapter):
         return cls._parse_index_list(value)
 
     @staticmethod
-    def _mask_info(split_name: str, seg_dir: Path, video_stem: str, frame_idx: int) -> Optional[dict]:
+    def _mask_candidates(split_name: str, seg_dir: Path, seg_stem: str, frame_idx: int) -> List[Path]:
         if split_name == "train":
-            mask_path = seg_dir / video_stem / "mask" / f"{video_stem}_{frame_idx}_6.png"
-        elif split_name == "val":
-            mask_path = seg_dir / f"{video_stem}_{frame_idx}.png"
-        else:
-            mask_path = seg_dir / f"{video_stem}.png"
+            return [seg_dir / seg_stem / "mask" / f"{seg_stem}_{frame_idx}_6.png"]
+        if split_name == "val":
+            return [
+                seg_dir / f"{seg_stem}_{frame_idx}.png",
+                seg_dir / f"{seg_stem}.png",
+            ]
+        return [
+            seg_dir / f"{seg_stem}.png",
+            seg_dir / f"{seg_stem}_{frame_idx}.png",
+        ]
 
-        if not mask_path.exists():
-            return None
-        return {
-            "frame_index": frame_idx,
-            "name": mask_path.name,
-            "path": str(mask_path),
-        }
+    @classmethod
+    def _mask_info(
+        cls,
+        split_name: str,
+        seg_dir: Path,
+        seg_stem: str,
+        frame_idx: int,
+    ) -> Optional[dict]:
+        for mask_path in cls._mask_candidates(split_name, seg_dir, seg_stem, frame_idx):
+            if mask_path.exists():
+                return {
+                    "frame_index": frame_idx,
+                    "name": mask_path.name,
+                    "path": str(mask_path),
+                }
+        return None
 
     @staticmethod
     def _xy_point(point) -> Optional[List[float]]:

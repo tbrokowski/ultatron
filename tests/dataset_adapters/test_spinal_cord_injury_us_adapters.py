@@ -120,6 +120,24 @@ class TestSpinalCordInjuryUSAdapter:
             assert e.curriculum_tier in {1, 2, 3}
             assert e.probe_type      == "linear"
 
+    def test_boxless_detection_is_ssl_only(self, tmp_path):
+        from data.adapters.muscle.spinal_cord_injury_us import SpinalCordInjuryUSAdapter
+        root = tmp_path / "sci_boxless"
+        det_dir = root / "Final dataset for object detection" / "train"
+        det_dir.mkdir(parents=True)
+        stem = "predict11_scaled-A0067_frame1"
+        (det_dir / f"{stem}.png").write_bytes(b"\x89PNG")
+        (det_dir / f"{stem}.xml").write_text(
+            "<annotation><filename>{}</filename></annotation>".format(stem)
+        )
+        entries = list(SpinalCordInjuryUSAdapter(
+            root=root, include_segmentation=False
+        ).iter_entries())
+        assert len(entries) == 1
+        assert entries[0].task_type == "ssl_only"
+        assert entries[0].has_box is False
+        assert entries[0].instances == []
+
     def test_detection_bbox_parsed(self, sci_root):
         from data.adapters.muscle.spinal_cord_injury_us import SpinalCordInjuryUSAdapter
         det_entries = [

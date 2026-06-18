@@ -1,5 +1,5 @@
 """
-oura/models/losses/__init__.py
+models/losses/__init__.py
 All SSL and supervised loss functions.  Pure functions — no nn.Module state.
 Learnable parameters live in models/branches/shared.py (CrossBranchDistillation,
 PrototypeHead) and models/heads/.  These modules only compute loss values.

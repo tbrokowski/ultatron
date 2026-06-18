@@ -39,7 +39,13 @@ This adapter handles ALL known variants:
   Variant D — top-level images/ and masks/ flat (muscle from filename token):
     {root}/images/BB_001.bmp   ->  {root}/masks/BB_001.bmp
 
-The adapter tries A → B → C/D in order.
+  Variant E — per-muscle cohort subdirs (Mendeley release):
+    {root}/BB/Healthy/Images/anon_001.png  +  {root}/BB/Healthy/Masks/anon_001.png
+    {root}/BB/Pathological/Images/...
+    {root}/TA/Healthy/Images/...
+    {root}/GM/Pathological/Images/...
+
+The adapter tries E → A → B → C/D in order.
 
 Label ontology
 --------------
@@ -78,6 +84,8 @@ _MUSCLE_MAP: dict[str, tuple[str, str]] = {
 _KNOWN_MUSCLE_DIRS = {"bb", "ta", "gm",
                       "biceps_brachii", "tibialis_anterior", "gastrocnemius_medialis",
                       "biceps", "tibialis", "gastrocnemius", "gastroc"}
+
+_COHORT_DIRS = {"healthy", "pathological"}
 
 _IMG_EXTENSIONS = {".png", ".bmp", ".jpg", ".jpeg", ".tif", ".tiff"}
 _MASK_SUFFIX_RE = re.compile(r"(_mask|_gt|_label|_seg|_annotation)$", re.IGNORECASE)
@@ -126,8 +134,8 @@ class STMUSNDAAdapter(BaseAdapter):
 
     def _detect_layout(self) -> str:
         """
-        Return one of: "per_muscle_coloc", "per_muscle_parallel",
-                       "flat_named", "flat_images_masks".
+        Return one of: "per_muscle_cohort", "per_muscle_coloc",
+                       "per_muscle_parallel", "flat_named", "flat_images_masks".
         """
         # Check for per-muscle subdirs
         muscle_dirs = [
@@ -135,8 +143,13 @@ class STMUSNDAAdapter(BaseAdapter):
             if d.is_dir() and d.name.lower() in _KNOWN_MUSCLE_DIRS
         ]
         if muscle_dirs:
-            # Sub-layout: co-located masks or parallel images/masks?
             sample_dir = muscle_dirs[0]
+            # Variant E: {MUSCLE}/{Healthy,Pathological}/{Images,Masks}/
+            for sub in sample_dir.iterdir():
+                if sub.is_dir() and sub.name.lower() in _COHORT_DIRS:
+                    if (sub / "Images").is_dir() or (sub / "images").is_dir():
+                        return "per_muscle_cohort"
+            # Sub-layout: co-located masks or parallel images/masks?
             has_images_subdir = (sample_dir / "images").is_dir()
             return "per_muscle_parallel" if has_images_subdir else "per_muscle_coloc"
 
@@ -147,6 +160,48 @@ class STMUSNDAAdapter(BaseAdapter):
         return "flat_named"  # last resort: all files at root
 
     # ── Entry builders ─────────────────────────────────────────────────────────
+
+    def _iter_per_muscle_cohort(self) -> list[tuple[Path, Optional[Path], str, str, str]]:
+        """
+        Variant E: {root}/{MUSCLE}/{Healthy,Pathological}/{Images,Masks}/.
+        Returns (img_path, mask_path|None, label_raw, label_ontology, cohort).
+        """
+        samples: list[tuple[Path, Optional[Path], str, str, str]] = []
+        for muscle_dir in sorted(self.root.iterdir()):
+            if not muscle_dir.is_dir():
+                continue
+            info = _muscle_info(muscle_dir.name)
+            if info is None:
+                continue
+            label_raw, label_ontology = info
+
+            for cohort_dir in sorted(muscle_dir.iterdir()):
+                if not cohort_dir.is_dir():
+                    continue
+                cohort = cohort_dir.name.lower()
+                if cohort not in _COHORT_DIRS:
+                    continue
+
+                img_dir = cohort_dir / "Images"
+                if not img_dir.is_dir():
+                    img_dir = cohort_dir / "images"
+                mask_dir = cohort_dir / "Masks"
+                if not mask_dir.is_dir():
+                    mask_dir = cohort_dir / "masks"
+                if not img_dir.is_dir():
+                    continue
+
+                mask_index = {f.stem: f for f in mask_dir.glob("*") if _is_image(f)} \
+                    if mask_dir.is_dir() else {}
+
+                for f in sorted(img_dir.glob("*")):
+                    if not _is_image(f):
+                        continue
+                    mask_path = mask_index.get(f.stem) or mask_index.get(
+                        _strip_mask_suffix(f.stem)
+                    )
+                    samples.append((f, mask_path, label_raw, label_ontology, cohort))
+        return samples
 
     def _iter_per_muscle_coloc(self) -> list[tuple[Path, Optional[Path], str, str]]:
         """
@@ -245,7 +300,11 @@ class STMUSNDAAdapter(BaseAdapter):
     def iter_entries(self) -> Iterator[USManifestEntry]:
         layout = self._detect_layout()
 
-        if layout == "per_muscle_coloc":
+        cohort_samples: list[tuple[Path, Optional[Path], str, str, str]] = []
+        if layout == "per_muscle_cohort":
+            cohort_samples = self._iter_per_muscle_cohort()
+            samples = [(a, b, c, d) for a, b, c, d, _ in cohort_samples]
+        elif layout == "per_muscle_coloc":
             samples = self._iter_per_muscle_coloc()
         elif layout == "per_muscle_parallel":
             samples = self._iter_per_muscle_parallel()
@@ -278,6 +337,15 @@ class STMUSNDAAdapter(BaseAdapter):
             # Short muscle token for source_meta
             short = label_raw.split("_")[0].upper() if label_raw != "muscle" else "UNK"
 
+            meta: dict = {
+                "muscle":    short,
+                "label_raw": label_raw,
+                "layout":    layout,
+                "doi":       self.DOI,
+            }
+            if layout == "per_muscle_cohort" and cohort_samples:
+                meta["cohort"] = cohort_samples[i][4]
+
             yield self._make_entry(
                 str(img_path),
                 split,
@@ -288,10 +356,5 @@ class STMUSNDAAdapter(BaseAdapter):
                 ssl_stream    = "image",
                 is_promptable = has_mask,
                 probe_type    = "linear",
-                source_meta   = {
-                    "muscle":    short,
-                    "label_raw": label_raw,
-                    "layout":    layout,
-                    "doi":       self.DOI,
-                },
+                source_meta   = meta,
             )

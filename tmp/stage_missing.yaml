@@ -1,5 +1,5 @@
 datasets:
-  LUS-data: "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/data"
+  LUS-data: "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/COVIDx-US/data"
   DDTI: "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/DDTI"
   TN5000: "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/TN5000"
   MuSeg: "/capstor/store/cscs/swissai/a127/ultrasound/raw/thyroid/MuSeg"

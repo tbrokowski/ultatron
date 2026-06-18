@@ -29,11 +29,15 @@ NPY dict schema:
   Load with: np.load(path, allow_pickle=True).item()
 
 Image modality note:
-  ~1555 files are genuine RGB (channels are not identical).
-  ~33 files are 8-bit grayscale stored as single-channel PNGs.
-  The adapter detects this cheaply via the PNG header (PIL lazy open) and
-  stores is_grayscale=True in source_meta.  Normalization to a consistent
-  shape (grayscale↔RGB) is the pipeline's responsibility.
+  1,507 files are RGB PNGs; 81 are 8-bit grayscale (mode L) across 10 patients.
+  Grayscale NPY dicts store image as (768, 1024) while RGB store (768, 1024, 3).
+  Images are always loaded from IMAGES/*.png (not the embedded NPY copy, which can
+  differ from the PNG).  The adapter probes PNG color mode via PIL and stores
+  is_grayscale in source_meta.  Grayscale→RGB conversion is the pipeline's job.
+
+Dataset stats (verified on capstor store, Mar 2026):
+  1,588 PNG/NPY pairs (100% aligned by stem), 169 patients, 3–17 images/patient.
+  All masks are binary uint8 (768, 1024) for artery, liver, stomach, vein.
 
 One Instance per structure is emitted, with mask_channel encoding the
 structure index (0=artery, 1=liver, 2=stomach, 3=vein).  All four instances
@@ -55,6 +59,9 @@ from data.schema.manifest import USManifestEntry
 
 _STEM_RE = re.compile(r"^P(\d+)_IMG\d+$")
 
+# Canonical NPY structure key order; mask_channel indexes into this tuple.
+MASK_STRUCTURE_KEYS: Tuple[str, ...] = ("artery", "liver", "stomach", "vein")
+
 # Fixed structure order; mask_channel is the index used by load_mask downstream.
 STRUCTURES: List[Tuple[str, str, int]] = [
     ("artery",  "fetal_abdominal_artery", 0),
@@ -62,6 +69,9 @@ STRUCTURES: List[Tuple[str, str, int]] = [
     ("stomach", "fetal_stomach",          2),
     ("vein",    "fetal_abdominal_vein",   3),
 ]
+
+IMAGE_HEIGHT = 768
+IMAGE_WIDTH  = 1024
 
 
 class FASSAdapter(BaseAdapter):
@@ -149,6 +159,8 @@ class FASSAdapter(BaseAdapter):
                 study_id      = patient_id,
                 series_id     = stem,
                 view_type     = "fetal_abdomen_bmode",
+                height        = IMAGE_HEIGHT,
+                width         = IMAGE_WIDTH,
                 has_mask      = has_mask,
                 task_type     = task_type,
                 ssl_stream    = "image",
@@ -157,7 +169,8 @@ class FASSAdapter(BaseAdapter):
                     "patient_id":   patient_id,
                     "stem":         stem,
                     "is_grayscale": is_gray,
-                    "structures":   [s[0] for s in STRUCTURES] if has_mask else [],
+                    "mask_format":  "npy_pickled_dict" if has_mask else None,
+                    "structures":   list(MASK_STRUCTURE_KEYS) if has_mask else [],
                 },
             )
 

@@ -29,36 +29,82 @@ Reference:
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict, Iterator, Optional, Tuple
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import Instance, USManifestEntry
 
+log = logging.getLogger(__name__)
+
 _ACTION_MAP = {"r": "rest", "v": "valsalva"}
 
 
-def _load_labels(xlsx_path: Path) -> Dict[Tuple[str, str], int]:
+def _normalize_action(raw: object) -> Optional[str]:
+    """Map xlsx/filename action codes to canonical rest | valsalva."""
+    action = str(raw).strip().lower() if raw is not None else ""
+    if action in ("r", "rest"):
+        return "rest"
+    if action in ("v", "valsalva"):
+        return "valsalva"
+    return action or None
+
+
+def _parse_pfo_level(raw: object) -> int:
+    """Parse PFO level; 'o' in the spreadsheet means no PFO (level 0)."""
+    if raw is None:
+        return -1
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    text = str(raw).strip().lower()
+    if text in ("o", "no", "none", ""):
+        return 0
+    try:
+        return int(float(text))
+    except ValueError:
+        return -1
+
+
+def _load_labels(root: Path) -> Dict[Tuple[str, str], int]:
     """
     Returns dict of (patient_idx_zfill3, action_full) -> pfo_level.
     e.g. ("001", "rest") -> 0
+
+    Accepts action codes from the xlsx as either short (r/v) or full
+    (rest/valsalva) so they align with volume filenames {idx}_{r|v}_image.nii.gz.
     """
+    xlsx_path = root / "echoCP_diagnosis_label.xlsx"
+    if not xlsx_path.exists():
+        return {}
+
     try:
         import openpyxl
-        wb  = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
-        ws  = wb.active
+        wb   = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
+        ws   = wb.active
         rows = list(ws.iter_rows(values_only=True))
+        wb.close()
     except ImportError:
+        log.warning(
+            "EchoCP: openpyxl not installed — cannot read %s; "
+            "entries will be ssl_only",
+            xlsx_path,
+        )
+        return {}
+    except Exception as exc:
+        log.warning("EchoCP: failed to read %s: %s", xlsx_path, exc)
         return {}
 
     labels: Dict[Tuple[str, str], int] = {}
     for row in rows[1:]:   # skip header
         if row[0] is None:
             continue
-        idx    = str(int(row[0])).zfill(3)
-        action = str(row[1]).strip().lower() if row[1] else ""
-        level  = int(row[2]) if row[2] is not None else -1
-        labels[(idx, action)] = level
+        idx         = str(int(row[0])).zfill(3)
+        action_full = _normalize_action(row[1])
+        if action_full is None:
+            continue
+        level = _parse_pfo_level(row[2])
+        labels[(idx, action_full)] = level
     return labels
 
 
@@ -91,8 +137,7 @@ class EchoCPAdapter(BaseAdapter):
                 "  unzip EchoCP_combined.zip"
             )
 
-        xlsx_path = self.root / "echoCP_diagnosis_label.xlsx"
-        labels    = _load_labels(xlsx_path) if xlsx_path.exists() else {}
+        labels = _load_labels(self.root)
 
         image_files = sorted(data_dir.glob("*_image.nii.gz"))
         n           = len(image_files)

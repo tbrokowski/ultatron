@@ -13,7 +13,7 @@ finetune:
   max_epochs:   50
   batch_size:   16
   num_workers:  4
-  head_type:    linear     # regression uses clip_cls token
+  head_type:  mlp      # VideoRegressionHead with frame attention for image FMs
   patience:     50
   monitor:      val_mae
   monitor_mode: min

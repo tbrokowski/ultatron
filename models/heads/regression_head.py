@@ -24,11 +24,13 @@ pixel-to-mm conversion stored in the manifest entry metadata.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterator, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from models.heads.temporal_pool import TemporalAttentionPool
 
 
 class RegressionHead(nn.Module):
@@ -76,6 +78,156 @@ class RegressionHead(nn.Module):
     def __repr__(self):
         return (f"RegressionHead(D={self.net[1].in_features}, "
                 f"range=[{self.output_min}, {self.output_max}])")
+
+
+class VideoRegressionHead(nn.Module):
+    """
+    Video regression head for EchoNet-style EF and related cardiac measurements.
+
+    Follows the EchoNet-Dynamic protocol (Ouyang et al.): a full cine clip is
+    reduced to a scalar (or vector) target.  With frozen backbones we adapt the
+    original CNN+LSTM design as:
+
+      video_native=True  : deep MLP on ``clip_cls`` (backbone already fused T)
+      video_native=False : trainable TemporalAttentionPool over per-frame CLS
+                           embeddings, then deep MLP (LSTM → attention analogue)
+
+    Parameters
+    ----------
+    embed_dim : int
+        Backbone embedding dimension.
+    hidden_dim : int
+        MLP hidden width (512 matches OpenUS LVEF head and EchoNet follow-ups).
+    n_layers : int
+        Number of MLP hidden blocks (default 3).
+    dropout : float
+    n_outputs : int
+        1 for EF (%), >1 for multi-target wall thickness, etc.
+    video_native : bool
+        True when ``encode_video`` already returns a temporally fused ``clip_cls``.
+    output_min, output_max : float or None
+        Inference clamp for scalar outputs (n_outputs == 1 only).
+    """
+
+    def __init__(
+        self,
+        embed_dim:    int   = 1024,
+        hidden_dim:   int   = 512,
+        n_layers:     int   = 3,
+        dropout:      float = 0.2,
+        n_outputs:    int   = 1,
+        video_native: bool  = True,
+        output_min:   Optional[float] = 10.0,
+        output_max:   Optional[float] = 85.0,
+    ):
+        super().__init__()
+        self.embed_dim    = embed_dim
+        self.n_outputs    = n_outputs
+        self.video_native = video_native
+        self.output_min   = output_min
+        self.output_max   = output_max
+
+        self.frame_pool: Optional[TemporalAttentionPool] = None
+        if not video_native:
+            self.frame_pool = TemporalAttentionPool(embed_dim, dropout=dropout)
+
+        layers: list[nn.Module] = [nn.LayerNorm(embed_dim)]
+        in_dim = embed_dim
+        for _ in range(max(n_layers - 1, 0)):
+            layers += [
+                nn.Linear(in_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ]
+            in_dim = hidden_dim
+        self.out_proj = nn.Linear(in_dim, n_outputs)
+        if n_outputs == 1 and output_min is not None and output_max is not None:
+            nn.init.constant_(self.out_proj.bias, (output_min + output_max) / 2.0)
+        self.mlp = nn.Sequential(*layers)
+
+    def _pool(self, clip_cls: Optional[Tensor], frame_tokens: Optional[Tensor]) -> Tensor:
+        if self.video_native:
+            if clip_cls is None:
+                raise ValueError("video_native=True requires clip_cls")
+            return clip_cls
+        if frame_tokens is None:
+            raise ValueError("video_native=False requires frame_tokens (B, T, D)")
+        assert self.frame_pool is not None
+        return self.frame_pool(frame_tokens)
+
+    def forward(
+        self,
+        clip_cls:      Optional[Tensor] = None,
+        frame_tokens:  Optional[Tensor] = None,
+    ) -> Tensor:
+        x   = self._pool(clip_cls, frame_tokens)
+        x   = self.mlp(x)
+        out = self.out_proj(x)
+        if self.n_outputs == 1:
+            out = out.squeeze(-1)
+            if not self.training and (self.output_min is not None or self.output_max is not None):
+                out = torch.clamp(out, self.output_min, self.output_max)
+            return out
+        return out
+
+    def trainable_parameters(self) -> Iterator[nn.Parameter]:
+        yield from self.mlp.parameters()
+        yield from self.out_proj.parameters()
+        if self.frame_pool is not None:
+            yield from self.frame_pool.parameters()
+
+    def __repr__(self) -> str:
+        mode = "video_native" if self.video_native else "frame_attention"
+        return (
+            f"VideoRegressionHead(D={self.embed_dim}, hidden={self.out_proj.in_features}, "
+            f"n_out={self.n_outputs}, mode={mode})"
+        )
+
+
+def build_video_regression_head(
+    head_type:    str,
+    embed_dim:    int,
+    video_native: bool,
+    *,
+    n_outputs:    int   = 1,
+    hidden_dim:   int   = 512,
+    dropout:      float = 0.2,
+    output_min:   Optional[float] = 10.0,
+    output_max:   Optional[float] = 85.0,
+) -> nn.Module:
+    """
+    Factory for video regression heads.
+
+    head_type
+    ---------
+    ``linear`` : shallow RegressionHead (legacy baseline).
+    ``mlp``    : VideoRegressionHead with frame attention for image-only FMs.
+    """
+    if head_type == "linear":
+        if n_outputs == 1:
+            return RegressionHead(
+                embed_dim=embed_dim,
+                hidden_dim=256,
+                output_min=output_min,
+                output_max=output_max,
+            )
+        return nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, 256),
+            nn.GELU(),
+            nn.Linear(256, n_outputs),
+        )
+
+    return VideoRegressionHead(
+        embed_dim=embed_dim,
+        hidden_dim=hidden_dim,
+        n_layers=3,
+        dropout=dropout,
+        n_outputs=n_outputs,
+        video_native=video_native,
+        output_min=output_min if n_outputs == 1 else None,
+        output_max=output_max if n_outputs == 1 else None,
+    )
 
 
 class MeasurementHead(nn.Module):

@@ -274,9 +274,10 @@ def _make_vjepa2_factory(variant_key: str):
     ) -> VJEPA2VideoBackbone:
         import copy
         from transformers import AutoModel
+        from ..hf_loading import load_pretrained
         log.info(f"Loading {variant_key} ({hf_id}) ...")
-        hf_model = AutoModel.from_pretrained(
-            hf_id, torch_dtype=dtype, cache_dir=hf_cache_dir
+        hf_model = load_pretrained(
+            AutoModel, hf_id, torch_dtype=dtype, hf_cache_dir=hf_cache_dir,
         )
         backbone = VJEPA2VideoBackbone(hf_model, variant_key=variant_key)
         log.info(f"  {backbone}")

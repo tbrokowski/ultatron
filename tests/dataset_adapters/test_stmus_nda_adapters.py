@@ -33,6 +33,30 @@ def stmus_nda_root(tmp_path_factory):
     return root
 
 
+@pytest.fixture(scope="module")
+def stmus_nda_root_cohort(tmp_path_factory):
+    """
+    Synthetic STMUS-NDA layout (Variant E — per-muscle cohort dirs):
+      BB/Healthy/Images/anon_001.png + BB/Healthy/Masks/anon_001.png
+      BB/Pathological/Images/anon_002.png + BB/Pathological/Masks/anon_002.png
+      TA/Healthy/Images/anon_003.png + TA/Healthy/Masks/anon_003.png
+    """
+    root = tmp_path_factory.mktemp("STMUS_NDA_cohort")
+    layout = [
+        ("BB", "Healthy", "anon_001"),
+        ("BB", "Pathological", "anon_002"),
+        ("TA", "Healthy", "anon_003"),
+    ]
+    for muscle, cohort, stem in layout:
+        img_dir = root / muscle / cohort / "Images"
+        msk_dir = root / muscle / cohort / "Masks"
+        img_dir.mkdir(parents=True)
+        msk_dir.mkdir(parents=True)
+        (img_dir / f"{stem}.png").write_bytes(b"\x89PNG")
+        (msk_dir / f"{stem}.png").write_bytes(b"\x89PNG")
+    return root
+
+
 class TestSTMUSNDAAdapter:
 
     def test_import(self):
@@ -99,6 +123,15 @@ class TestSTMUSNDAAdapter:
             assert "muscle"    in e.source_meta
             assert "doi"       in e.source_meta
             assert e.source_meta["doi"] == "https://doi.org/10.17632/3jykz7wz8d.1"
+
+    def test_iter_entries_cohort_layout(self, stmus_nda_root_cohort):
+        from data.adapters.muscle.stmus_nda import STMUSNDAAdapter
+        entries = list(STMUSNDAAdapter(root=stmus_nda_root_cohort).iter_entries())
+        assert len(entries) == 3
+        cohorts = {e.source_meta["cohort"] for e in entries}
+        assert cohorts == {"healthy", "pathological"}
+        assert all(e.source_meta["layout"] == "per_muscle_cohort" for e in entries)
+        assert all(e.has_mask for e in entries)
 
     def test_build_manifest_for_dataset(self, stmus_nda_root, tmp_path):
         from data.schema.manifest import ManifestWriter, load_manifest

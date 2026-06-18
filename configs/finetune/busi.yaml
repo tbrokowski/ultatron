@@ -1,46 +1,62 @@
 # configs/finetune/busi.yaml
 # ============================================================
-# Finetune hyperparameters for BUSI.
-# Loaded by finetune.experiments.busi.BUSIFinetune
-# Usage: python scripts/finetune.py --checkpoint ... --config configs/experiments/run1.yaml
+# BUSI — frozen backbone + task head only (comparison / finetune sweep)
+#
+# Target: ~0.84 dice_tumor_mean on USFM 70/15/15 split (tumour images).
+# Backbone weights stay frozen; only DPT/UPerNet head is trained.
+#
+# For full USFM paper replication (end-to-end UPerNet @ 512px, ~84% DSC):
+#   bash scripts/run_busi_finetune.sh
+#
+# Prepare split manifest once:
+#   python scripts/prepare_busi_usfm_split.py
 # ============================================================
 
 dataset_root: "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
 
-# Model backbone (which checkpoint to load from)
 model:
   image_backbone: dinov3_l
   video_backbone: vjepa2_l
-  frozen_teacher: null       # not needed for finetune; saves memory
+  frozen_teacher: null
   dtype: bfloat16
 
 finetune:
-  # ── Optimiser ───────────────────────────────────────────────────────────────
-  lr:           3.0e-5      # was 1e-4; lower LR for smoother convergence + cosine schedule
+  # ── Optimiser (head only) ───────────────────────────────────────────────────
+  lr:           3.0e-4      # higher LR is standard for frozen-feature probing
   weight_decay: 0.01
-  max_epochs:   150         # was 50; cosine schedule fills the budget
-  batch_size:   16
+  max_epochs:   300
+  batch_size:   8
   num_workers:  4
 
-  # ── Head architecture ────────────────────────────────────────────────────────
-  # "linear" = LinearSegHead (1 linear layer on patch tokens)
-  # "dpt"    = DPTSegHead (conv neck + bilinear upsample; better for dense pred)
-  # "mlp"    = MLPClsHead (2-layer MLP on CLS token, for classification tasks)
-  head_type:  dpt
-  # Note: two heads — seg + cls. See BUSIFinetune.setup()
-  # The second head (LinearClsHead) uses default params.
+  # ── Head ────────────────────────────────────────────────────────────────────
+  head_type:    upernet      # upernet (student F1–F4) | dpt (enhanced single-scale)
+  freeze_backbone: true      # required for this config
+
+  # ── BUSI protocol (USFM breast segmentation) ────────────────────────────────
+  seg_only:            true   # tumour seg head only — no cls multitask
+  tumor_only_train:    false  # include normal images as negatives (93 extra train samples)
+  eval_tumor_only:     true   # primary metric: dice_tumor_mean (benign+malignant only)
+  split_manifest:      dataset_exploration_outputs/busi_usfm/split_manifest.json
+  seg_loss_weight:      1.0
+  cls_loss_weight:      0.0
+  seg_only_epochs:      0
+  bg_seg_loss_weight:   0.25   # low weight on normal-image background loss
+  boundary_loss_weight: 0.5    # boundary ring BCE (dilation-erosion of GT mask)
+  refine_up:            true   # SubPixelRefinement: stride-4→stride-2 learned upsample
+  seg_use_adapters:     true
+  seg_use_aspp:         true
+  seg_use_attention_gates: true
 
   # ── Early stopping ───────────────────────────────────────────────────────────
-  patience:      100          # was 10; allow longer plateau before giving up
-  monitor:       val_dice      # metric key in compute_val_metrics() output
-  monitor_mode:  max          # "max" for dice/auc, "min" for loss/mae
-
-  # ── Backbone ─────────────────────────────────────────────────────────────────
-  freeze_backbone: true        # keep backbone frozen; only head is trained
+  patience:      80
+  monitor:       dice_tumor_mean
+  monitor_mode:  max
 
   # ── Resolution ───────────────────────────────────────────────────────────────
-  output_size: 224             # head output is upsampled to this before loss
+  input_size:        500        # match BUSI native resolution (~500×500px images)
+  output_size:       500        # ignored by UPerNet (student); used by DPT upsample
+  native_resolution: false      # opt-in pretrain-style crops (requires input_size=0)
+  native_max_px:     512        # only used when native_resolution=true and input_size=0
 
-  # ── Logging / checkpointing ──────────────────────────────────────────────────
-  log_every:       5           # log every N epochs
-  checkpoint_best: true        # save best_head.pt when monitor improves
+  log_every:       5
+  checkpoint_best: true

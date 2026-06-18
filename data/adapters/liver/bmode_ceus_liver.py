@@ -1,5 +1,9 @@
 """
 data/adapters/liver/bmode_ceus_liver.py  - B-mode CEUS liver DICOM adapter
+
+Each series is stored as one DICOM file per frame.  Rows/Columns can change
+within a series (dynamic zoom / field-of-view).  ``_load_clip`` center-pads
+frames to a common canvas before Video SSL stacking.
 """
 from __future__ import annotations
 
@@ -37,5 +41,9 @@ class BModeCEUSLiverAdapter(BaseAdapter):
                 task_type="ssl_only",
                 ssl_stream="video",
                 is_promptable=False,
-                source_meta={"series_uid": series_dir.name, "n_frames": len(frames)},
+                source_meta={
+                    "series_uid": series_dir.name,
+                    "n_frames": len(frames),
+                    "variable_frame_geometry": True,
+                },
             )

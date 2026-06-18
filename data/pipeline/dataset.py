@@ -7,11 +7,13 @@ This file contains the dataset classes for the Ultatron foundation model.
 from __future__ import annotations
 
 import io
+import contextlib
 import logging
 import os
 import random
 import re
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,9 +23,23 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from data.schema.manifest import USManifestEntry, load_manifest
+from data.pipeline.alp_interface import ALPReader, NullALPReader
 from data.pipeline.transforms import (
     ImageSSLTransform, ImageSSLTransformConfig,
     VideoSSLTransform, VideoSSLTransformConfig,
+)
+
+# Exceptions caught by SSL dataset __getitem__ retry loops (resample on bad files).
+_UNREADABLE_SAMPLE_ERRORS = (
+    FileNotFoundError,
+    OSError,
+    RuntimeError,
+    ValueError,
+    AttributeError,
+    TypeError,
+    KeyError,
+    zipfile.BadZipFile,
+    zlib.error,
 )
 
 
@@ -150,6 +166,10 @@ def _read_archive_bytes(path: str) -> tuple[Optional[bytes], str]:
         resolved = _resolve_zip_member(zf, member)
         try:
             return zf.read(resolved), resolved
+        except zlib.error as exc:
+            raise RuntimeError(
+                f"Corrupt zip member {archive}::{resolved}: {exc}"
+            ) from exc
         except RuntimeError as exc:
             if "password" in str(exc).lower() or "encrypted" in str(exc).lower():
                 fallback = _extracted_archive_fallback(archive, member)
@@ -293,16 +313,54 @@ def _read_mhd_array(path: str) -> np.ndarray:
     return arr
 
 
-def _read_nrrd_array(path: str) -> np.ndarray:
-    """Read an NRRD (.nrrd) file and return the raw voxel array.
+def _read_sitk_array(path: str) -> np.ndarray:
+    """Read a medical volume via SimpleITK (.nrrd, .mnc, etc.).
 
     Returns shape (nz, ny, nx) for 3-D or (ny, nx) for 2-D (SimpleITK axis order).
     """
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Volume not found: {path}")
+
     import SimpleITK as sitk
-    return sitk.GetArrayFromImage(sitk.ReadImage(path))
+
+    @contextlib.contextmanager
+    def _suppress_stderr():
+        """Keep ITK C-level open failures off stderr; Python raises RuntimeError."""
+        stderr_fd = os.dup(2)
+        try:
+            with open(os.devnull, "w") as devnull:
+                os.dup2(devnull.fileno(), 2)
+            yield
+        finally:
+            os.dup2(stderr_fd, 2)
+            os.close(stderr_fd)
+
+    with _suppress_stderr():
+        try:
+            return sitk.GetArrayFromImage(sitk.ReadImage(path))
+        except RuntimeError as exc:
+            raise RuntimeError(f"Cannot read volume {path}: {exc}") from exc
+
+
+def _read_nrrd_array(path: str) -> np.ndarray:
+    """Read an NRRD (.nrrd) file and return the raw voxel array."""
+    return _read_sitk_array(path)
+
+
+def _read_minc_array(path: str) -> np.ndarray:
+    """Read a MINC (.mnc) file and return the raw voxel array."""
+    return _read_sitk_array(path)
 
 
 # ── Image / video loading ─────────────────────────────────────────────────────
+
+def _patch_dicom_decode_metadata(ds) -> None:
+    """Fill tags pydicom requires for pixel decode but some clinical files omit."""
+    samples = int(getattr(ds, "SamplesPerPixel", 1) or 1)
+    if samples > 1 and "PlanarConfiguration" not in ds:
+        # DICOM default: interleaved RGB (R1G1B1R2G2B2…).
+        ds.PlanarConfiguration = 0
+
 
 def _read_dicom_dataset(path: str):
     try:
@@ -317,6 +375,7 @@ def _read_dicom_dataset(path: str):
         ds.file_meta = FileMetaDataset()
     if "TransferSyntaxUID" not in ds.file_meta:
         ds.file_meta.TransferSyntaxUID = ImplicitVRLittleEndian
+    _patch_dicom_decode_metadata(ds)
     return ds
 
 
@@ -395,13 +454,23 @@ def _split_dicom_pixel_array(arr: np.ndarray) -> List[np.ndarray]:
     raise ValueError(f"Unsupported DICOM pixel array shape: {arr.shape}")
 
 
+def _dicom_has_pixel_data(ds) -> bool:
+    """Return True when the dataset carries decodable pixel data."""
+    return any(tag in ds for tag in ("PixelData", "FloatPixelData", "DoubleFloatPixelData"))
+
+
 def _dicom_frames(path: str, max_frames: Optional[int] = None) -> List[np.ndarray]:
     """
     Load DICOM cine/volume as RGB uint8 frames with correct color space and
     clip-level normalization.
     """
     ds = _read_dicom_dataset(path)
-    raw = _rescale_dicom_pixels(np.asarray(ds.pixel_array), ds)
+    if not _dicom_has_pixel_data(ds):
+        raise ValueError(f"DICOM has no pixel data: {path}")
+    try:
+        raw = _rescale_dicom_pixels(np.asarray(ds.pixel_array), ds)
+    except Exception as exc:
+        raise ValueError(f"Cannot decode DICOM pixels: {path}: {exc}") from exc
     raw_frames = _split_dicom_pixel_array(raw)
     rgb_frames = [_dicom_photometric_to_rgb(f, ds) for f in raw_frames]
     frames = _normalize_dicom_frames_to_uint8(rgb_frames)
@@ -410,6 +479,50 @@ def _dicom_frames(path: str, max_frames: Optional[int] = None) -> List[np.ndarra
         step = max(1, len(frames) // max_frames)
         frames = frames[::step][:max_frames]
     return frames
+
+
+def _frame_spatial_shape(frame: np.ndarray) -> Tuple[int, int]:
+    """Return (H, W) for a 2D greyscale or H×W×C frame."""
+    if frame.ndim == 2:
+        return int(frame.shape[0]), int(frame.shape[1])
+    if frame.ndim == 3:
+        return int(frame.shape[0]), int(frame.shape[1])
+    raise ValueError(f"Expected 2D or H×W×C frame, got shape {frame.shape}")
+
+
+def _align_variable_size_frames(frames: List[np.ndarray]) -> List[np.ndarray]:
+    """
+    Center-pad frames to a common canvas when spatial sizes differ within a clip.
+
+    CEUS cines stored as one DICOM per frame often change Rows/Columns mid-series
+    (e.g. 720×960 → 720×1280).  Video SSL requires uniform H×W before stacking.
+    """
+    if len(frames) <= 1:
+        return frames
+
+    shapes = [_frame_spatial_shape(f) for f in frames]
+    if len(set(shapes)) == 1:
+        return frames
+
+    max_h = max(h for h, _ in shapes)
+    max_w = max(w for _, w in shapes)
+    aligned: List[np.ndarray] = []
+    for frame in frames:
+        h, w = _frame_spatial_shape(frame)
+        if h == max_h and w == max_w:
+            aligned.append(frame)
+            continue
+        channels = 1 if frame.ndim == 2 else frame.shape[2]
+        if channels == 1:
+            canvas = np.zeros((max_h, max_w), dtype=frame.dtype)
+            top, left = (max_h - h) // 2, (max_w - w) // 2
+            canvas[top : top + h, left : left + w] = frame
+        else:
+            canvas = np.zeros((max_h, max_w, channels), dtype=frame.dtype)
+            top, left = (max_h - h) // 2, (max_w - w) // 2
+            canvas[top : top + h, left : left + w, :channels] = frame[..., :channels]
+        aligned.append(canvas)
+    return aligned
 
 
 def load_image(path: str, frame_idx: int = 0) -> np.ndarray:
@@ -484,11 +597,24 @@ def load_image(path: str, frame_idx: int = 0) -> np.ndarray:
         img = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
         return img
 
+    if ext in (".mnc",):
+        arr = _select_volume_slice(_read_minc_array(disk_path), frame_idx=frame_idx)
+        arr = arr.astype(np.float32)
+        img = ((arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255).astype(np.uint8)
+        return img
+
     if ext in (".h5", ".hdf5"):
         frames = _read_h5_frames(disk_path, max_frames=None)
         if not frames:
             raise ValueError(f"No frames decoded from HDF5: {disk_path}")
         return frames[min(frame_idx, len(frames) - 1)]
+
+    if ext in (".avi", ".mp4", ".mov", ".mkv", ".gif", ".webm"):
+        frames = load_video_frames(disk_path, max_frames=None)
+        if not frames:
+            raise ValueError(f"No frames decoded from video: {disk_path}")
+        idx = len(frames) // 2 if frame_idx < 0 else min(frame_idx, len(frames) - 1)
+        return frames[idx]
 
     raise ValueError(f"Unsupported image format: {ext}")
 
@@ -545,7 +671,19 @@ def load_video_frames(path: str, max_frames: Optional[int] = None) -> List[np.nd
             indices = list(range(0, depth, step))[:max_frames]
         return [_frame_to_rgb_uint8(_select_volume_slice(arr, frame_idx=i)) for i in indices]
 
-    if ext in (".avi", ".mp4", ".mov", ".mkv", ".gif"):
+    if ext in (".mnc",):
+        arr = _read_minc_array(path)
+        if arr.ndim <= 2:
+            return [_frame_to_rgb_uint8(arr)]
+        depth = arr.shape[0]
+        if max_frames is None or max_frames >= depth:
+            indices = list(range(depth))
+        else:
+            step = max(1, depth // max_frames)
+            indices = list(range(0, depth, step))[:max_frames]
+        return [_frame_to_rgb_uint8(_select_volume_slice(arr, frame_idx=i)) for i in indices]
+
+    if ext in (".avi", ".mp4", ".mov", ".mkv", ".gif", ".webm"):
         try:
             from decord import VideoReader, cpu
             vr      = VideoReader(path, ctx=cpu(0))
@@ -588,6 +726,9 @@ _PICKLED_MASK_PATH_MARKERS = (
     "ARRAY_FORMAT",
 )
 
+# FASS NPY dict structure key order (must match adapter MASK_STRUCTURE_KEYS).
+_FASS_STRUCTURE_KEYS = ("artery", "liver", "stomach", "vein")
+
 
 def _load_numpy_mask(path: str):
     try:
@@ -602,7 +743,7 @@ def _load_numpy_mask(path: str):
         return np.load(path, allow_pickle=True)
 
 
-_VOLUME_SLICE_EXTS = (".nii.gz", ".nii", ".mhd", ".mha", ".nrrd")
+_VOLUME_SLICE_EXTS = (".nii.gz", ".nii", ".mhd", ".mha", ".nrrd", ".mnc")
 
 
 def _select_volume_slice(arr: np.ndarray, frame_idx: int = 0) -> np.ndarray:
@@ -680,8 +821,14 @@ def load_mask(path: str, frame_idx: int = 0, mask_channel: Optional[int] = None)
         if isinstance(loaded, dict):
             if "structures" in loaded:
                 structures = loaded["structures"]
-                keys = sorted(structures.keys())
-                key = keys[mask_channel] if mask_channel is not None and mask_channel < len(keys) else keys[0]
+                keys = tuple(sorted(structures.keys()))
+                if mask_channel is not None and mask_channel < len(keys):
+                    if keys == tuple(sorted(_FASS_STRUCTURE_KEYS)):
+                        key = _FASS_STRUCTURE_KEYS[mask_channel]
+                    else:
+                        key = keys[mask_channel]
+                else:
+                    key = keys[0]
                 arr = np.asarray(structures[key])
                 selected_structure = True
             elif "mask" in loaded:
@@ -736,6 +883,9 @@ def load_mask(path: str, frame_idx: int = 0, mask_channel: Optional[int] = None)
     mask = np.array(Image.open(src).convert("L"), dtype=np.uint8)
     if mask_channel is not None:
         return (mask == mask_channel).astype(np.uint8)
+    # Preserve low-cardinality integer class maps (e.g. LUSS PHANTOM {0..5})
+    if mask.max() <= 20:
+        return mask.astype(np.uint8)
     return (mask > 127).astype(np.uint8)
 
 
@@ -773,6 +923,10 @@ class USFoundationDataset(Dataset):
             arr = _read_nrrd_array(path)
             if arr.ndim == 3:
                 return random.randint(0, arr.shape[0] - 1)
+        elif ext in (".mnc",):
+            arr = _read_minc_array(path)
+            if arr.ndim == 3:
+                return random.randint(0, arr.shape[0] - 1)
         elif ext == ".dcm":
             frames = _dicom_frames(path, max_frames=None)
             if frames:
@@ -789,12 +943,13 @@ class USFoundationDataset(Dataset):
         paths = [self._remap_path(p) for p in entry.image_paths]
         if len(paths) == 1:
             ext = image_path_extension(paths[0])
-            if ext in (".avi", ".mp4", ".mov", ".mkv", ".gif", ".dcm", ".h5", ".hdf5"):
+            if ext in (".avi", ".mp4", ".mov", ".mkv", ".gif", ".webm", ".dcm", ".h5", ".hdf5"):
                 return load_video_frames(paths[0], max_frames)
             if ext in _VOLUME_SLICE_EXTS:
                 arr = (
                     _read_nifti_array(paths[0]) if ext in (".nii.gz", ".nii")
                     else _read_mhd_array(paths[0]) if ext in (".mhd", ".mha")
+                    else _read_minc_array(paths[0]) if ext in (".mnc",)
                     else _read_nrrd_array(paths[0])
                 )
                 if arr.ndim <= 2:
@@ -815,6 +970,7 @@ class USFoundationDataset(Dataset):
                     indices = indices[::step][:max_frames]
                 return [load_image(paths[0], frame_idx=i) for i in indices]
         frames = [load_image(p) for p in paths]
+        frames = _align_variable_size_frames(frames)
         if max_frames and len(frames) > max_frames:
             step   = len(frames) // max_frames
             frames = frames[::step][:max_frames]
@@ -827,6 +983,30 @@ class USFoundationDataset(Dataset):
         return torch.from_numpy(
             load_mask(mp, frame_idx=frame_idx, mask_channel=getattr(inst, "mask_channel", None))
         ).float().unsqueeze(0)
+
+    def _labeled_frame_indices(self, entry: USManifestEntry) -> List[int]:
+        """Return manifest frame indices with expert labels, if any."""
+        meta = entry.source_meta or {}
+        raw = meta.get("labeled_frame_indices") or entry.frame_indices or []
+        indices: List[int] = []
+        for v in raw:
+            try:
+                indices.append(int(v))
+            except (TypeError, ValueError):
+                continue
+        return indices
+
+    def _pick_video_frame_index(
+        self,
+        entry: USManifestEntry,
+        n_frames: int,
+    ) -> int:
+        """Sample a frame index, preferring labelled cardiac phases when known."""
+        labeled = self._labeled_frame_indices(entry)
+        valid = [i for i in labeled if 0 <= i < n_frames]
+        if valid:
+            return int(valid[torch.randint(len(valid), (1,)).item()])
+        return int(torch.randint(n_frames, (1,)).item())
 
     def __len__(self):  return len(self.entries)
     def __getitem__(self, idx): raise NotImplementedError
@@ -861,10 +1041,16 @@ class ImageSSLDataset(USFoundationDataset):
         cfg: ImageSSLTransformConfig = ImageSSLTransformConfig(),
         root_remap: Optional[Dict] = None,
         alpha: float = 1.0,
+        mask_ratio: Optional[float] = None,
+        mask_guidance_threshold: Optional[float] = None,
+        alp_reader: Optional[ALPReader] = None,
     ):
         super().__init__(entries, root_remap)
         self.transform = ImageSSLTransform(cfg)
-        self.alpha     = alpha
+        self.transform.alp_reader = alp_reader or NullALPReader()
+        self.alpha = alpha
+        self.mask_ratio = mask_ratio
+        self.mask_guidance_threshold = mask_guidance_threshold
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         # 32 retries: resilient to partially-staged datasets where a meaningful
@@ -872,10 +1058,10 @@ class ImageSSLDataset(USFoundationDataset):
         for _attempt in range(32):
             try:
                 return self._load_image_item(idx)
-            except (FileNotFoundError, OSError) as exc:
+            except _UNREADABLE_SAMPLE_ERRORS as exc:
                 if _attempt == 0:
                     logging.warning(
-                        "ImageSSLDataset: missing file at idx=%d: %s — resampling.", idx, exc
+                        "ImageSSLDataset: unreadable file at idx=%d: %s — resampling.", idx, exc
                     )
                 idx = random.randrange(len(self))
         raise RuntimeError("ImageSSLDataset: too many consecutive missing-file errors.")
@@ -887,12 +1073,12 @@ class ImageSSLDataset(USFoundationDataset):
         if e.modality_type in ("video", "pseudo_video", "volume"):
             if len(e.image_paths) == 1 and \
                     Path(self._remap_path(e.image_paths[0])).suffix.lower() \
-                    in (".avi", ".mp4", ".mov", ".mkv", ".gif"):
+                    in (".avi", ".mp4", ".mov", ".mkv", ".gif", ".webm"):
                 # For Phase 3 alignment, we need frame indices to be compatible
                 # with the video stream's temporal sampling indices. Avoid
                 # subsampling here; sample from the full decoded frame list.
                 frames = self._load_clip(e, max_frames=None)
-                source_frame_idx = torch.randint(len(frames), (1,)).item()
+                source_frame_idx = self._pick_video_frame_index(e, len(frames))
                 img    = frames[source_frame_idx]
             else:
                 source_frame_idx = torch.randint(max(1, len(e.image_paths)), (1,)).item()
@@ -900,7 +1086,13 @@ class ImageSSLDataset(USFoundationDataset):
         else:
             img = self._load_frame(e, 0)
 
-        views = self.transform(img, alpha=self.alpha)
+        views = self.transform(
+            img,
+            alpha=self.alpha,
+            mask_ratio_override=self.mask_ratio,
+            sample_id=e.sample_id,
+            guidance_threshold=self.mask_guidance_threshold,
+        )
 
         seg_mask, cls_label = None, -1
         _meta_frame_idx = (e.source_meta or {}).get("frame_idx", 0) or 0
@@ -962,17 +1154,24 @@ class VideoSSLDataset(USFoundationDataset):
         for _attempt in range(32):
             try:
                 return self._load_video_item(idx)
-            except (FileNotFoundError, OSError) as exc:
+            except _UNREADABLE_SAMPLE_ERRORS as exc:
                 if _attempt == 0:
                     logging.warning(
-                        "VideoSSLDataset: missing file at idx=%d: %s — resampling.", idx, exc
+                        "VideoSSLDataset: unreadable file at idx=%d: %s — resampling.", idx, exc
                     )
                 idx = random.randrange(len(self))
         raise RuntimeError("VideoSSLDataset: too many consecutive missing-file errors.")
 
+    @staticmethod
+    def _clip_load_max_frames(vid_cfg: "VideoSSLTransformConfig") -> int:
+        """Cap disk reads to what temporal sampling can use (not the whole cine)."""
+        stride = max(1, int(vid_cfg.temporal_stride))
+        min_needed = (vid_cfg.n_frames - 1) * stride + 1
+        return max(min_needed, vid_cfg.max_n_frames)
+
     def _load_video_item(self, idx: int) -> Dict[str, Any]:
         e      = self.entries[idx]
-        frames = self._load_clip(e)
+        frames = self._load_clip(e, max_frames=self._clip_load_max_frames(self.transform.cfg))
         views  = self.transform(frames, mask_ratio=self.mask_ratio)
 
         return {
@@ -1021,21 +1220,27 @@ class PairedSSLDataset(USFoundationDataset):
         root_remap: Optional[Dict] = None,
         img_alpha: float = 1.0,
         vid_mask_ratio: Optional[float] = None,
+        img_mask_ratio: Optional[float] = None,
+        img_mask_guidance_threshold: Optional[float] = None,
+        alp_reader: Optional[ALPReader] = None,
     ):
         super().__init__(entries, root_remap)
-        self.img_transform  = ImageSSLTransform(img_cfg)
-        self.vid_transform  = VideoSSLTransform(vid_cfg, patch_size)
-        self.img_alpha      = img_alpha
+        self.img_transform = ImageSSLTransform(img_cfg)
+        self.img_transform.alp_reader = alp_reader or NullALPReader()
+        self.vid_transform = VideoSSLTransform(vid_cfg, patch_size)
+        self.img_alpha = img_alpha
         self.vid_mask_ratio = vid_mask_ratio
+        self.img_mask_ratio = img_mask_ratio
+        self.img_mask_guidance_threshold = img_mask_guidance_threshold
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         for _attempt in range(32):
             try:
                 return self._load_paired_item(idx)
-            except (FileNotFoundError, OSError) as exc:
+            except _UNREADABLE_SAMPLE_ERRORS as exc:
                 if _attempt == 0:
                     logging.warning(
-                        "PairedSSLDataset: missing file at idx=%d: %s — resampling.", idx, exc
+                        "PairedSSLDataset: unreadable file at idx=%d: %s — resampling.", idx, exc
                     )
                 idx = random.randrange(len(self))
         raise RuntimeError("PairedSSLDataset: too many consecutive missing-file errors.")
@@ -1043,8 +1248,10 @@ class PairedSSLDataset(USFoundationDataset):
     def _load_paired_item(self, idx: int) -> Dict[str, Any]:
         e = self.entries[idx]
 
-        # Load the full clip once for both modalities.
-        frames = self._load_clip(e, max_frames=None)
+        # Load enough frames for temporal sampling — not the entire cine loop.
+        frames = self._load_clip(
+            e, max_frames=VideoSSLDataset._clip_load_max_frames(self.vid_transform.cfg),
+        )
 
         # ── Video view ────────────────────────────────────────────────────────
         vid_views = self.vid_transform(frames, mask_ratio=self.vid_mask_ratio)
@@ -1056,7 +1263,13 @@ class PairedSSLDataset(USFoundationDataset):
         t = int(torch.randint(T, (1,)).item())
         source_frame_idx = sampled_indices[t]
         img = frames[source_frame_idx]
-        img_views = self.img_transform(img, alpha=self.img_alpha)
+        img_views = self.img_transform(
+            img,
+            alpha=self.img_alpha,
+            mask_ratio_override=self.img_mask_ratio,
+            sample_id=e.sample_id,
+            guidance_threshold=self.img_mask_guidance_threshold,
+        )
 
         return {
             "image": {

@@ -67,6 +67,35 @@ def dice_score(
     return float(2.0 * intersection / (union_sum + eps))
 
 
+def dice_per_class(
+    pred_labels: np.ndarray,
+    target_labels: np.ndarray,
+    num_classes: int = 4,
+    foreground_classes: tuple[int, ...] = (1, 2, 3),
+) -> dict[int, float]:
+    """Per-class Dice for integer label maps (background = 0)."""
+    pred = pred_labels.astype(np.int64)
+    tgt = target_labels.astype(np.int64)
+    if pred.ndim == 3:
+        merged = {c: [] for c in foreground_classes}
+        for i in range(pred.shape[0]):
+            row = dice_per_class(pred[i], tgt[i], num_classes, foreground_classes)
+            for c, v in row.items():
+                merged[c].append(v)
+        return {c: float(np.mean(vs)) for c, vs in merged.items() if vs}
+
+    out: dict[int, float] = {}
+    for c in foreground_classes:
+        if c >= num_classes:
+            continue
+        p_c = pred == c
+        t_c = tgt == c
+        inter = (p_c & t_c).sum()
+        union = p_c.sum() + t_c.sum()
+        out[c] = 1.0 if union == 0 else float(2.0 * inter / (union + 1e-6))
+    return out
+
+
 def iou_score(
     pred: np.ndarray,
     target: np.ndarray,
@@ -90,6 +119,72 @@ def iou_score(
     if union == 0:
         return 1.0
     return float(inter / (union + eps))
+
+
+def pixel_precision(
+    pred: np.ndarray,
+    target: np.ndarray,
+    threshold: float = 0.5,
+    eps: float = 1e-6,
+) -> float:
+    """Pixel-level precision: TP / (TP + FP)."""
+    if pred.dtype != bool:
+        pred = pred >= threshold
+    if target.dtype != bool:
+        target = target >= threshold
+
+    if pred.ndim == 3:
+        scores = [pixel_precision(pred[i], target[i], eps=eps) for i in range(pred.shape[0])]
+        return float(np.mean(scores))
+
+    tp = (pred & target).sum()
+    fp = (pred & ~target).sum()
+    denom = tp + fp
+    if denom == 0:
+        return 1.0
+    return float(tp / (denom + eps))
+
+
+def pixel_recall(
+    pred: np.ndarray,
+    target: np.ndarray,
+    threshold: float = 0.5,
+    eps: float = 1e-6,
+) -> float:
+    """Pixel-level recall: TP / (TP + FN)."""
+    if pred.dtype != bool:
+        pred = pred >= threshold
+    if target.dtype != bool:
+        target = target >= threshold
+
+    if pred.ndim == 3:
+        scores = [pixel_recall(pred[i], target[i], eps=eps) for i in range(pred.shape[0])]
+        return float(np.mean(scores))
+
+    tp = (pred & target).sum()
+    fn = (~pred & target).sum()
+    denom = tp + fn
+    if denom == 0:
+        return 1.0
+    return float(tp / (denom + eps))
+
+
+def pixel_accuracy(
+    pred: np.ndarray,
+    target: np.ndarray,
+    threshold: float = 0.5,
+) -> float:
+    """Pixel-level accuracy: fraction of correctly classified pixels."""
+    if pred.dtype != bool:
+        pred = pred >= threshold
+    if target.dtype != bool:
+        target = target >= threshold
+
+    if pred.ndim == 3:
+        scores = [pixel_accuracy(pred[i], target[i]) for i in range(pred.shape[0])]
+        return float(np.mean(scores))
+
+    return float((pred == target).sum() / pred.size)
 
 
 def hausdorff_95(

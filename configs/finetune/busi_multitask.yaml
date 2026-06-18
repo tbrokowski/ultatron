@@ -1,0 +1,56 @@
+# configs/finetune/busi_multitask.yaml
+# ============================================================
+# BUSI — frozen backbone + dual task heads (seg + cls)
+#
+# Trains two separate heads on frozen encoder features:
+#   - DPT/UPerNet segmentation head (tumour mask)
+#   - Linear cls head on CLS token (benign / malignant / normal)
+#
+# Uses all three classes in training (normal images included for cls).
+# Same USFM 70/15/15 split as busi.yaml.
+# ============================================================
+
+dataset_root: "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
+
+model:
+  image_backbone: dinov3_l
+  video_backbone: vjepa2_l
+  frozen_teacher: null
+  dtype: bfloat16
+
+finetune:
+  lr:           3.0e-4
+  weight_decay: 0.01
+  max_epochs:   300
+  batch_size:   8
+  num_workers:  4
+
+  head_type:    upernet
+  freeze_backbone: true
+
+  # ── Multitask (seg + cls) ───────────────────────────────────────────────────
+  seg_only:            false
+  tumor_only_train:    false   # all 3 classes for classification
+  eval_tumor_only:     true    # seg metrics still tumour-focused
+  split_manifest:      dataset_exploration_outputs/busi_usfm/split_manifest.json
+  seg_loss_weight:      1.0
+  cls_loss_weight:      1.0
+  seg_only_epochs:      0
+  bg_seg_loss_weight:   0.5    # background seg on normal images
+  boundary_loss_weight: 0.5    # boundary ring BCE (dilation-erosion of GT mask)
+  refine_up: true
+  seg_use_adapters: true
+  seg_use_aspp: true
+  seg_use_attention_gates: true
+
+  patience:      80
+  monitor:       dice_tumor_mean
+  monitor_mode:  max
+
+  input_size:        500
+  output_size:       500
+  native_resolution: false
+  native_max_px:     512
+
+  log_every:       5
+  checkpoint_best: true

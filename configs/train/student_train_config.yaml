@@ -1,0 +1,83 @@
+# configs/train/student_train_config.yaml
+# =========================================
+# Training schedule for the single-student Hiera pretraining pipeline.
+# This is additive — it does not modify the existing train_config.yaml.
+
+student_train:
+
+  # ── Stage fractions (fraction of total training steps) ───────────
+  stage1_frac: 0.15   # image semantic warm-start
+  stage2_frac: 0.20   # video temporal warm-start
+  stage3_frac: 0.55   # cross-view coupling (paired + image + video)
+  stage4_frac: 0.10   # supervised head fine-tuning
+
+  # ── Per-stage batch mix ratios ────────────────────────────────────
+  # All fractions in each stage must sum to 1.0
+  stage_mixes:
+    - image_frac: 0.90   video_frac: 0.10   paired_frac: 0.00   # stage 1
+    - image_frac: 0.40   video_frac: 0.60   paired_frac: 0.00   # stage 2
+    - image_frac: 0.50   video_frac: 0.30   paired_frac: 0.20   # stage 3
+    - image_frac: 0.50   video_frac: 0.50   paired_frac: 0.00   # stage 4
+
+  # ── Batch sizes ───────────────────────────────────────────────────
+  image_batch_size:   64
+  video_batch_size:   16
+  paired_batch_size:  8
+
+  # ── Optimiser ─────────────────────────────────────────────────────
+  optimizer:      adamw
+  lr:             1.0e-4
+  lr_min:         1.0e-6
+  weight_decay:   0.05
+  beta1:          0.9
+  beta2:          0.95
+  grad_clip:      1.0
+  warmup_steps:   10000
+  scheduler:      cosine    # cosine decay after warmup
+
+  # ── Augmentations ─────────────────────────────────────────────────
+  temporal_dropout_p:  0.10   # probability of collapsing T>1 clip to T=1
+  pseudo_clip_p:       0.05   # probability of turning a still image into pseudo-clip
+  pseudo_clip_T:       4      # number of frames in pseudo-clips
+
+  # ── Loss weights ─────────────────────────────────────────────────
+  # Stages 1 + 2
+  # lam_patch / lam_masked partition valid F1 tokens (disjoint, iBOT-style):
+  #   lam_patch  = visible (non-freq-masked) tokens
+  #   lam_masked = freq-masked tokens
+  lam_global:    1.0
+  lam_patch:     1.0
+  lam_masked:    1.0
+  lam_proto:     0.5
+  lam_ema_max:   0.15
+  lam_ema_floor: 0.0
+  lam_ema_warmup_steps: 10000
+  lam_tube:      1.0
+  lam_temp:      0.5
+
+  # Stage 3 paired-batch additional losses
+  # lam_fused is warmed up during stage 3:
+  #   curriculum_stage=1: × 0.1   curriculum_stage=2: × 0.5   curriculum_stage=3: × 1.0
+  lam_fused:     0.5     # effective weight after full ramp-up
+  lam_preserve:  0.1     # anchor z_fused to z_vid (prevent DINO overwrite)
+  lam_fc:        0.5     # frame-alone vs frame-in-clip consistency
+
+  # Stage 4 supervised (only active when matching heads are passed to stage4_step)
+  lam_seg:       1.0
+  lam_seg_dice:  1.0
+  lam_domain:    1.0
+  lam_view:      1.0
+  lam_quality:   0.5
+  lam_concept:   1.0
+  lam_temporal_concept: 1.0
+
+  # ── Stage 3 curriculum sub-stages ────────────────────────────────
+  # curriculum_stage transitions within stage 3 (lam_fused ramp only):
+  #   early (0–33%):  lam_fused × 0.1
+  #   mid   (33–67%): lam_fused × 0.5
+  #   late  (67–100%): lam_fused × 1.0
+  stage3_curriculum_boundaries: [0.33, 0.67]
+
+  # ── Mixed precision ───────────────────────────────────────────────
+  use_amp:        true
+  amp_dtype:      bfloat16

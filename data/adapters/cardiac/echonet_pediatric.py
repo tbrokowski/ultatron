@@ -9,6 +9,11 @@ EchoNet-Pediatric: 7,643 echocardiogram videos from Lucile Packard
   Format:  .avi videos + FileList.csv + VolumeTracings.csv
   Split:   numeric column 0-9 (0-6 = train, 7 = val, 8-9 = test)
 
+VolumeTracings.csv columns: FileName, X, Y, Frame
+  Each video has expert LV tracings at end-systole and end-diastole.
+  Coordinate rows share a Frame value identifying the source video frame.
+  Some videos mark a missing phase with Frame = "No Systolic" or "No Diastolic".
+
 Directory layout:
   {root}/pediatric_echo_avi/pediatric_echo_avi/{A4C,PSAX}/
       Videos/          *.avi
@@ -18,8 +23,9 @@ Directory layout:
 from __future__ import annotations
 
 import csv
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterator, List
+from typing import Dict, Iterator, List, Optional
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry, Instance
@@ -33,11 +39,74 @@ _VIEW_TO_CANONICAL = {
     "PSAX": "PSAX",  # parasternal short-axis
 }
 
+_PHASE_MARKERS = frozenset({"No Systolic", "No Diastolic"})
+
+
+def _parse_volume_tracings(rows: List[dict]) -> dict:
+    """
+    Parse VolumeTracings rows for one video into frame-aligned metadata.
+
+    Returns ed_frame, es_frame, labeled_frame_indices, and per-frame
+    contour keypoints suitable for manifest source_meta and instances.
+    """
+    by_frame: Dict[int, List[List[float]]] = defaultdict(list)
+    markers: set[str] = set()
+
+    for row in rows:
+        frame_raw = str(row.get("Frame", "")).strip()
+        if frame_raw in _PHASE_MARKERS:
+            markers.add(frame_raw)
+            continue
+        try:
+            frame = int(frame_raw)
+        except (TypeError, ValueError):
+            continue
+        try:
+            x = float(row["X"])
+            y = float(row["Y"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        by_frame[frame].append([x, y])
+
+    valid_frames = sorted(by_frame.keys())
+    ed_frame: Optional[int] = None
+    es_frame: Optional[int] = None
+
+    if "No Systolic" in markers and len(valid_frames) == 1:
+        ed_frame = valid_frames[0]
+    elif "No Diastolic" in markers and len(valid_frames) == 1:
+        es_frame = valid_frames[0]
+    elif len(valid_frames) == 2:
+        f0, f1 = valid_frames
+        # More contour samples usually correspond to end-diastole (larger cavity).
+        if len(by_frame[f0]) >= len(by_frame[f1]):
+            ed_frame, es_frame = f0, f1
+        else:
+            ed_frame, es_frame = f1, f0
+
+    volume_tracings = {
+        str(fr): {"points": pts, "n_points": len(pts)}
+        for fr, pts in by_frame.items()
+    }
+
+    return {
+        "ed_frame":              ed_frame,
+        "es_frame":              es_frame,
+        "labeled_frame_indices": valid_frames,
+        "volume_tracings":       volume_tracings,
+        "has_tracings":          bool(valid_frames),
+        "phase_markers":         sorted(markers),
+    }
+
 
 class EchoNetPediatricAdapter(BaseAdapter):
     """
-    EchoNet-Pediatric adapter.  Yields one video entry per AVI file across
-    both A4C and PSAX view directories.
+    EchoNet-Pediatric adapter.  Yields video + frame-aligned image entries.
+
+    Per labelled video:
+      1 × video entry  — full cine clip with EF + tracing metadata
+      0–2 × image entries — ED / ES frames with contour keypoints
+                            (frame_idx in source_meta for dataloader alignment)
 
     Directory layout (two layers deep due to download structure):
         {root}/pediatric_echo_avi/pediatric_echo_avi/{A4C,PSAX}/
@@ -69,7 +138,6 @@ class EchoNetPediatricAdapter(BaseAdapter):
         filelist_path  = vroot / "FileList.csv"
         tracings_path  = vroot / "VolumeTracings.csv"
 
-        # Load LV tracings keyed by filename
         tracings: Dict[str, List[dict]] = {}
         if tracings_path.exists():
             with open(tracings_path) as f:
@@ -90,7 +158,6 @@ class EchoNetPediatricAdapter(BaseAdapter):
             if not vpath.exists():
                 continue
 
-            # Numeric split column (string "0"-"9")
             raw_split = row.get("Split", "0").strip()
             if self.split_override:
                 split = self.split_override
@@ -102,11 +169,29 @@ class EchoNetPediatricAdapter(BaseAdapter):
             sex    = row.get("Sex", "")
             weight = row.get("Weight", "")
             height = row.get("Height", "")
+            study_id = fname.replace(".avi", "")
 
-            instances = []
-            if fname in tracings:
+            tracing_meta = (
+                _parse_volume_tracings(tracings[fname])
+                if fname in tracings else {}
+            )
+            has_tracings = tracing_meta.get("has_tracings", False)
+
+            base_meta = {
+                "root":   str(self.root),
+                "doi":    self.DOI,
+                "view":   view,
+                "ef":     ef,
+                "age":    age,
+                "sex":    sex,
+                "weight": weight,
+                "height": height,
+            }
+
+            instances: List[Instance] = []
+            if has_tracings:
                 instances.append(Instance(
-                    instance_id    = f"{fname}_{view}",
+                    instance_id    = f"{study_id}_{view}_lv_tracing",
                     label_raw      = "LV_contour",
                     label_ontology = "lv_segmentation",
                     anatomy_family = "cardiac",
@@ -117,23 +202,52 @@ class EchoNetPediatricAdapter(BaseAdapter):
                 str(vpath), split,
                 modality           = "video",
                 instances          = instances,
-                study_id           = fname.replace(".avi", ""),
+                study_id           = study_id,
                 view_type          = _VIEW_TO_CANONICAL[view],
                 is_cine            = True,
                 has_temporal_order = True,
                 fps                = 25.0,
+                frame_indices      = tracing_meta.get("labeled_frame_indices") or None,
                 task_type          = "regression",
                 ssl_stream         = "both",
-                is_promptable      = bool(instances),
-                has_mask           = bool(instances),
-                source_meta        = {
-                    "root":   str(self.root),
-                    "doi":    self.DOI,
-                    "view":   view,
-                    "ef":     ef,
-                    "age":    age,
-                    "sex":    sex,
-                    "weight": weight,
-                    "height": height,
-                },
+                is_promptable      = has_tracings,
+                has_points         = has_tracings,
+                source_meta        = {**base_meta, **tracing_meta},
             )
+
+            # ED / ES single-frame entries for frame-aligned downstream tasks.
+            for phase, frame_idx in (
+                ("ED", tracing_meta.get("ed_frame")),
+                ("ES", tracing_meta.get("es_frame")),
+            ):
+                if frame_idx is None:
+                    continue
+                points = tracing_meta.get("volume_tracings", {}).get(str(frame_idx), {})
+                keypoints = points.get("points", [])
+                img_instances = [
+                    self._make_instance(
+                        instance_id    = f"{study_id}_{view}_{phase}",
+                        label_raw      = "LV_contour",
+                        label_ontology = "lv_segmentation",
+                        keypoints      = keypoints,
+                        is_promptable  = True,
+                    ),
+                ]
+                yield self._make_entry(
+                    str(vpath), split,
+                    modality      = "image",
+                    instances     = img_instances,
+                    study_id      = study_id,
+                    series_id     = f"{study_id}_{view}_{phase}",
+                    view_type     = _VIEW_TO_CANONICAL[view],
+                    task_type     = "measurement",
+                    ssl_stream    = "both",
+                    is_promptable = True,
+                    has_points    = bool(keypoints),
+                    source_meta   = {
+                        **base_meta,
+                        "phase":     phase,
+                        "frame_idx": frame_idx,
+                        "ef":        ef,
+                    },
+                )

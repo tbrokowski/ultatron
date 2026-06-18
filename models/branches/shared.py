@@ -12,11 +12,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _unwrap_module(module: nn.Module) -> nn.Module:
+    """Unwrap DDP / DataParallel so named_parameters() keys match the bare module."""
+    return module.module if hasattr(module, "module") else module
+
+
 def _iter_params(model: nn.Module):
     """
-    Yield trainable parameters for EMA.
-    Uses .parameters_for_ema() if available (our BaseModel subclasses can
-    exclude frozen adapter layers), otherwise falls back to .parameters().
+    Legacy iterator for dual-branch callers that still use parameters_for_ema().
+    The student Hiera pipeline does not use this — see ema_update().
     """
     if hasattr(model, "parameters_for_ema"):
         yield from model.parameters_for_ema()
@@ -24,15 +28,65 @@ def _iter_params(model: nn.Module):
         yield from model.parameters()
 
 
+def _match_named_dicts(
+    src: dict[str, torch.Tensor],
+    tgt: dict[str, torch.Tensor],
+    *,
+    kind: str,
+) -> None:
+    missing = set(src) - set(tgt)
+    extra = set(tgt) - set(src)
+    if missing:
+        raise KeyError(
+            f"EMA teacher missing {kind} ({len(missing)}): {sorted(missing)[:5]} …"
+        )
+    if extra:
+        raise KeyError(
+            f"EMA teacher has unexpected {kind} ({len(extra)}): {sorted(extra)[:5]} …"
+        )
+
+
 @torch.no_grad()
-def ema_update(student: nn.Module, teacher: nn.Module, momentum: float):
+def _ema_copy_buffers(student: nn.Module, teacher: nn.Module) -> None:
     """
-    In-place EMA: teacher_p ← momentum·teacher_p + (1−momentum)·student_p
-    Operates on .data directly — no gradient graph, no optimizer.
-    Only updates parameters (not buffers like BN running stats).
+    Copy student buffers to the EMA teacher by name (direct copy, no EMA decay).
+
+    HieraStudentBackbone has no wrapper-level buffers (sinusoidal pos enc is
+    computed on the fly; temporal_pos_enc is an nn.Embedding parameter). Loaded
+    SAM2/Hiera trunks may register buffers — those are synced here when present.
     """
-    for s_p, t_p in zip(_iter_params(student), _iter_params(teacher)):
+    s_bufs = dict(student.named_buffers())
+    t_bufs = dict(teacher.named_buffers())
+    if not s_bufs and not t_bufs:
+        return
+    _match_named_dicts(s_bufs, t_bufs, kind="buffers")
+    for name, s_b in s_bufs.items():
+        t_bufs[name].data.copy_(s_b.data)
+
+
+@torch.no_grad()
+def ema_update(student: nn.Module, teacher: nn.Module, momentum: float) -> None:
+    """
+    In-place EMA sync by parameter name:
+
+        teacher_p ← momentum · teacher_p + (1 − momentum) · student_p
+
+    Unwraps DDP wrappers, matches all named_parameters() strictly, then copies
+    buffers by name. Does not use parameters_for_ema() — gradient freezing and
+    EMA eligibility are independent concepts.
+    """
+    student = _unwrap_module(student)
+    teacher = _unwrap_module(teacher)
+
+    s_params = dict(student.named_parameters())
+    t_params = dict(teacher.named_parameters())
+    _match_named_dicts(s_params, t_params, kind="parameters")
+
+    for name, s_p in s_params.items():
+        t_p = t_params[name]
         t_p.data.mul_(momentum).add_(s_p.data, alpha=1.0 - momentum)
+
+    _ema_copy_buffers(student, teacher)
 
 
 class CrossBranchDistillation(nn.Module):

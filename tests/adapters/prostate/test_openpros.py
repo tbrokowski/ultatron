@@ -61,10 +61,11 @@ def test_openpros_adapter_yields_one_entry_per_sample(openpros_root):
         assert e.task_type == "regression"
         assert e.height == 401
         assert e.width == 161
-        assert len(e.image_paths) == 2
+        assert len(e.image_paths) == 1
         assert e.image_paths[0].endswith("_data.npy")
-        assert e.image_paths[1].endswith("_sos.npy")
+        assert e.source_meta["sos_path"].endswith("_sos.npy")
         assert e.source_meta["format"] == "openpros_numpy_waveform"
+        assert e.source_meta["frame_idx"] == e.source_meta["sample_idx"]
         assert 0 <= e.source_meta["sample_idx"] < N_SAMPLES
 
 

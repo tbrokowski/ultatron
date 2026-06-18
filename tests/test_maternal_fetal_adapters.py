@@ -204,6 +204,26 @@ def test_fass_split_override(fass_root: Path):
     assert all(e.split == "test" for e in entries)
 
 
+def test_fass_dimensions(fass_root: Path):
+    entries = list(FASSAdapter(fass_root).iter_entries())
+    for e in entries:
+        assert e.height == 768
+        assert e.width == 1024
+
+
+def test_fass_mask_loading(fass_root: Path):
+    from data.pipeline.dataset import load_mask
+
+    entries = {e.series_id: e for e in FASSAdapter(fass_root).iter_entries()}
+    e = entries["P01_IMG1"]
+    by_ch = {inst.mask_channel: inst for inst in e.instances}
+    for ch, name in enumerate(["artery", "liver", "stomach", "vein"]):
+        inst = by_ch[ch]
+        mask = load_mask(inst.mask_path, mask_channel=inst.mask_channel)
+        assert mask.shape == (4, 4)
+        assert mask.dtype.name == "uint8"
+
+
 def test_fass_grayscale_flag(tmp_path: Path):
     # Build a minimal dataset with one RGB and one grayscale PNG.
     inner = tmp_path / "Fetal Abdominal Structures Segmentation Dataset Using Ultrasonic Images"
@@ -797,13 +817,18 @@ def test_psfhs_split_override(psfhs_root: Path):
 
 def test_jnu_ifm_uses_csv_frame_list(jnu_ifm_root: Path):
     entries = list(JNUIFMAdapter(jnu_ifm_root).iter_entries())
-    assert len(entries) == 5
-    assert "20190830T115515_999" not in {e.series_id for e in entries}
+    image_entries = [e for e in entries if e.modality_type == "image"]
+    video_entries = [e for e in entries if e.modality_type == "pseudo_video"]
+
+    assert len(image_entries) == 5
+    assert len(video_entries) == 2
+    assert "20190830T115515_999" not in {e.series_id for e in image_entries}
 
 
 def test_jnu_ifm_schema(jnu_ifm_root: Path):
     entries = list(JNUIFMAdapter(jnu_ifm_root).iter_entries())
-    for e in entries:
+    image_entries = [e for e in entries if e.modality_type == "image"]
+    for e in image_entries:
         assert e.dataset_id == "JNU-IFM"
         assert e.anatomy_family == "intrapartum"
         assert e.modality_type == "image"
@@ -812,6 +837,32 @@ def test_jnu_ifm_schema(jnu_ifm_root: Path):
         assert e.task_type == "segmentation"
         assert e.ssl_stream == "image"
         assert e.curriculum_tier in (1, 2, 3)
+
+
+def test_jnu_ifm_emits_pseudo_video_per_session(jnu_ifm_root: Path):
+    entries = list(JNUIFMAdapter(jnu_ifm_root).iter_entries())
+    clip_entries = [e for e in entries if e.modality_type == "pseudo_video"]
+
+    assert len(clip_entries) == 2
+    by_video = {e.series_id: e for e in clip_entries}
+
+    clip_a = by_video["20190830T115515"]
+    assert clip_a.ssl_stream == "video"
+    assert clip_a.num_frames == 3
+    assert clip_a.is_cine is True
+    assert clip_a.has_temporal_order is True
+    assert clip_a.frame_indices == [169, 170, 171]
+    assert [Path(p).name for p in clip_a.image_paths] == [
+        "20190830T115515_169.png",
+        "20190830T115515_170.png",
+        "20190830T115515_171.png",
+    ]
+    assert clip_a.source_meta["video_source"] == "extracted_frames"
+    assert len(clip_a.source_meta["frame_labels"]) == 3
+
+    clip_b = by_video["20190918T123342"]
+    assert clip_b.num_frames == 2
+    assert clip_b.frame_indices == [10, 11]
 
 
 def test_jnu_ifm_video_level_splitting(jnu_ifm_root: Path):
@@ -825,7 +876,10 @@ def test_jnu_ifm_video_level_splitting(jnu_ifm_root: Path):
 
 
 def test_jnu_ifm_frame_label_mapping(jnu_ifm_root: Path):
-    entries = {e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()}
+    entries = {
+        e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()
+        if e.modality_type == "image"
+    }
 
     expected = {
         "20190830T115515_169": ("none", 0),
@@ -841,7 +895,10 @@ def test_jnu_ifm_frame_label_mapping(jnu_ifm_root: Path):
 
 
 def test_jnu_ifm_segmentation_instances(jnu_ifm_root: Path):
-    entries = {e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()}
+    entries = {
+        e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()
+        if e.modality_type == "image"
+    }
     e = entries["20190830T115515_171"]
 
     seg_instances = [
@@ -855,7 +912,10 @@ def test_jnu_ifm_segmentation_instances(jnu_ifm_root: Path):
 
 
 def test_jnu_ifm_promptability_tracks_frame_label(jnu_ifm_root: Path):
-    entries = {e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()}
+    entries = {
+        e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()
+        if e.modality_type == "image"
+    }
 
     none_entry = entries["20190830T115515_169"]
     only_sp_entry = entries["20190830T115515_170"]
@@ -876,7 +936,10 @@ def test_jnu_ifm_promptability_tracks_frame_label(jnu_ifm_root: Path):
 def test_jnu_ifm_remaps_raw_mask_values(jnu_ifm_root: Path):
     import numpy as np
 
-    entries = {e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()}
+    entries = {
+        e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()
+        if e.modality_type == "image"
+    }
     e = entries["20190830T115515_171"]
     mask_path = next(inst.mask_path for inst in e.instances if inst.mask_path)
     mapped = np.load(mask_path)
@@ -888,7 +951,10 @@ def test_jnu_ifm_remaps_raw_mask_values(jnu_ifm_root: Path):
 
 
 def test_jnu_ifm_source_meta(jnu_ifm_root: Path):
-    entries = {e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()}
+    entries = {
+        e.series_id: e for e in JNUIFMAdapter(jnu_ifm_root).iter_entries()
+        if e.modality_type == "image"
+    }
     e = entries["20190830T115515_170"]
 
     assert e.study_id == "20190830T115515"
@@ -904,7 +970,8 @@ def test_jnu_ifm_source_meta(jnu_ifm_root: Path):
 
 def test_jnu_ifm_resolve_us_data_direct(jnu_ifm_root: Path):
     entries = list(JNUIFMAdapter(jnu_ifm_root / "us_data").iter_entries())
-    assert len(entries) == 5
+    assert len([e for e in entries if e.modality_type == "image"]) == 5
+    assert len([e for e in entries if e.modality_type == "pseudo_video"]) == 2
 
 
 def test_jnu_ifm_split_override(jnu_ifm_root: Path):
@@ -1009,6 +1076,24 @@ def test_iugc2024_resolve_new_root_direct(iugc2024_root: Path):
 def test_iugc2024_split_override(iugc2024_root: Path):
     entries = list(IUGC2024Adapter(iugc2024_root, split_override="test").iter_entries())
     assert all(e.split == "test" for e in entries)
+
+
+def test_iugc2024_capstor_layout(iugc2024_capstor_root: Path):
+    adapter = IUGC2024Adapter(iugc2024_capstor_root)
+    assert adapter.root.name == "DatasetV3"
+    entries = {e.series_id: e for e in adapter.iter_entries()}
+
+    train = entries["capvid__capvid"]
+    assert train.source_meta["metadata_stem"] == "capvid"
+    assert train.has_mask is True
+    assert train.source_meta["mask_names"] == ["capvid_0_6.png"]
+
+    val = entries["valcap__valcap"]
+    assert val.source_meta["metadata_stem"] == "valcap"
+    assert val.source_meta["mask_names"] == ["valcap.png"]
+
+    test = entries["testcap"]
+    assert test.source_meta["mask_names"] == ["testcap_6.png"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1179,6 +1264,28 @@ def test_maternal_fetal_us_video_split_override(
         ).iter_entries()
     )
     assert all(e.split == "test" for e in entries)
+
+
+@pytest.mark.skipif(
+    not Path(
+        "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/"
+        "maternal-fetal-us-video-intrapartum/DatasetV3/train/videos"
+    ).exists(),
+    reason="maternal-fetal-us-video-intrapartum not mounted on capstor",
+)
+def test_maternal_fetal_us_video_real_capstor_data():
+    root = (
+        "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/"
+        "maternal-fetal-us-video-intrapartum"
+    )
+    entries = list(MaternalFetalUSVideoIntrapartumAdapter(root).iter_entries())
+
+    assert len(entries) > 700
+    assert {e.split for e in entries} == {"train", "val", "test"}
+    assert all(e.modality_type == "video" for e in entries)
+    assert all(e.ssl_stream == "both" for e in entries)
+    assert sum(1 for e in entries if e.has_mask) > 500
+    assert all(Path(e.image_paths[0]).exists() for e in entries[:20])
 
 
 # ══════════════════════════════════════════════════════════════════════════════

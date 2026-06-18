@@ -29,6 +29,7 @@ SonoDQS   : silver (single-centre, preclinical/injury model)
 """
 from __future__ import annotations
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -36,6 +37,8 @@ from typing import Iterator
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry
+
+log = logging.getLogger(__name__)
 
 _IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif"}
 
@@ -67,12 +70,17 @@ def _parse_stem(stem: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _parse_voc_xml(xml_path: Path) -> list[dict]:
-    """Parse Pascal VOC XML → list of {label, xmin, ymin, xmax, ymax}."""
-    boxes = []
+def _parse_voc_xml(xml_path: Path) -> tuple[list[dict], int, int]:
+    """Parse Pascal VOC XML → boxes and (width, height)."""
+    boxes: list[dict] = []
+    width = height = 0
     try:
         tree = ET.parse(xml_path)
         root = tree.getroot()
+        size = root.find("size")
+        if size is not None:
+            width = int(float(size.findtext("width", "0")))
+            height = int(float(size.findtext("height", "0")))
         for obj in root.findall("object"):
             name = obj.findtext("name", default="spinal_cord")
             bndbox = obj.find("bndbox")
@@ -84,9 +92,9 @@ def _parse_voc_xml(xml_path: Path) -> list[dict]:
                     "xmax":  float(bndbox.findtext("xmax", "0")),
                     "ymax":  float(bndbox.findtext("ymax", "0")),
                 })
-    except Exception:
-        pass
-    return boxes
+    except Exception as exc:
+        log.warning("Failed to parse VOC XML %s: %s", xml_path, exc)
+    return boxes, width, height
 
 
 class SpinalCordInjuryUSAdapter(BaseAdapter):
@@ -146,9 +154,12 @@ class SpinalCordInjuryUSAdapter(BaseAdapter):
 
             for img_path in sorted(f for f in split_dir.iterdir() if _is_image(f)):
                 xml_path = img_path.with_suffix(".xml")
-                boxes    = _parse_voc_xml(xml_path) if xml_path.exists() else []
+                boxes, width, height = (
+                    _parse_voc_xml(xml_path) if xml_path.exists() else ([], 0, 0)
+                )
 
                 subject_id, frame_idx = _parse_stem(img_path.stem)
+                has_box = len(boxes) > 0
 
                 instances = []
                 for b in boxes:
@@ -165,20 +176,22 @@ class SpinalCordInjuryUSAdapter(BaseAdapter):
                 yield self._make_entry(
                     str(img_path),
                     split,
-                    modality      = "image",
-                    instances     = instances,
-                    has_mask      = False,
-                    has_box       = len(boxes) > 0,
-                    task_type     = "detection",
-                    ssl_stream    = "image",
-                    is_promptable = len(boxes) > 0,
-                    probe_type    = "linear",
-                    source_meta   = {
-                        "sub_dataset":  "detection",
-                        "subject_id":   subject_id,
-                        "frame_idx":    frame_idx,
-                        "xml_path":     str(xml_path) if xml_path.exists() else None,
-                        "doi":          self.DOI,
+                    modality="image",
+                    instances=instances,
+                    has_mask=False,
+                    has_box=has_box,
+                    task_type="detection" if has_box else "ssl_only",
+                    ssl_stream="image",
+                    is_promptable=has_box,
+                    probe_type="linear",
+                    width=width,
+                    height=height,
+                    source_meta={
+                        "sub_dataset": "detection",
+                        "subject_id": subject_id,
+                        "frame_idx": frame_idx,
+                        "xml_path": str(xml_path) if xml_path.exists() else None,
+                        "doi": self.DOI,
                     },
                 )
 

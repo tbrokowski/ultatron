@@ -4,14 +4,21 @@ finetune/experiments/echonet.py  ·  EchoNet-Dynamic EF regression finetune
 
 Task:    Predict ejection fraction (%) from apical 4-chamber cine clips.
 Dataset: EchoNet-Dynamic — 10,030 labelled echocardiogram videos.
-Branch:  Video branch (V-JEPA2 teacher — not the image branch).
-Head:    RegressionHead on clip_cls token.
-Loss:    MSE (primary) + MAE penalty.
-Metric:  MAE (primary), RMSE, R², Pearson r.
+Branch:  Video — full cine loops (32 frames × 112×112).
 
-EchoNet is the only finetune that uses the video branch rather than the
-image branch.  The base class is designed for image; we override setup()
-and _train_epoch() to use vid_branch instead.
+This is a **video** task: EF depends on motion across the cardiac cycle.
+Encoder handling differs by backbone type:
+
+  video_native (Student, V-JEPA, Ultatron):
+      encode_video(clips) → temporally fused clip_cls → VideoRegressionHead
+
+  frame_based (ResNet, ViT, BioMed-CLIP, USFM, EchoCare, …):
+      per-frame encode_image → frame_tokens (B, T, D)
+      → trainable attention pool inside VideoRegressionHead → EF
+
+Head:    VideoRegressionHead (mlp) or RegressionHead (linear legacy).
+Loss:    MSE + 0.1 × MAE.
+Metric:  MAE (primary), RMSE, R², Pearson r.
 """
 from __future__ import annotations
 
@@ -26,7 +33,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from finetune.base import FinetuneExperiment, FinetuneConfig
-from models.heads import RegressionHead
+from finetune.video_regression import (
+    encode_clip_for_regression,
+    regression_head_forward,
+    regression_head_params,
+)
+from models.heads import build_video_regression_head
 from eval.metrics import mae, rmse, pearson_r, r2_score
 from eval.benchmarks.echonet import EchoNetBenchmark
 
@@ -101,8 +113,8 @@ class EchoNetFinetune(FinetuneExperiment):
     """
     EchoNet-Dynamic EF regression finetune.
 
-    Uses the video branch (vid_branch) not the image branch.
-    Overrides setup() and _train_epoch() accordingly.
+    Uses encoder-specific video encoding (native vs per-frame) and a
+    literature-aligned regression head.
     """
 
     EXPERIMENT_NAME = "echonet_ef_regression"
@@ -111,31 +123,31 @@ class EchoNetFinetune(FinetuneExperiment):
     BENCHMARK_CLS   = EchoNetBenchmark
 
     def build_head(self, embed_dim: int, cfg: FinetuneConfig) -> nn.Module:
-        """
-        Regression head on the video clip_cls token.
-        embed_dim is the video backbone's hidden size (e.g. 1024 for VJEPA2-L).
-        output_min/max clamp to physiologically valid EF range.
-        """
-        return RegressionHead(
-            embed_dim  = embed_dim,
-            hidden_dim = 256,
-            output_min = 10.0,   # physiologically: EF below 10% is non-viable
-            output_max = 85.0,   # physiologically: EF above 85% is extremely high
+        video_native = getattr(self, "_video_native", True)
+        return build_video_regression_head(
+            head_type    = cfg.head_type,
+            embed_dim    = embed_dim,
+            video_native = video_native,
+            hidden_dim   = 512,
+            dropout      = 0.2,
+            output_min   = 10.0,
+            output_max   = 85.0,
         )
 
     def setup(self, img_branch=None, device="cuda", vid_branch=None, encoder=None):
-        """Override to use video embed_dim for the regression head."""
+        """Wire encoder and build head on video_embed_dim."""
         from finetune.backbones.ultatron_encoder import UltatronBranchEncoder
         if encoder is not None:
             self.encoder    = encoder
             self.img_branch = encoder
-            self.vid_branch = encoder
+            self.vid_branch = None
         else:
             assert vid_branch is not None, "EchoNetFinetune requires vid_branch"
             self.encoder    = UltatronBranchEncoder(img_branch, vid_branch)
             self.img_branch = img_branch
             self.vid_branch = vid_branch
         self.device = device
+        self._video_native = self.encoder.is_video_native
 
         if self.cfg.freeze_backbone and vid_branch is not None:
             for p in vid_branch.parameters():
@@ -151,7 +163,8 @@ class EchoNetFinetune(FinetuneExperiment):
         except StopIteration:
             backbone_dtype = torch.bfloat16
         self.head = self.build_head(embed_dim, self.cfg).to(device=device, dtype=backbone_dtype)
-        log.info(f"[EchoNet] Regression head: {self.head} (dtype={backbone_dtype})")
+        mode = "video_native" if self._video_native else "frame_attention"
+        log.info(f"[EchoNet] Regression head: {self.head}  encoding={mode}  dtype={backbone_dtype}")
 
     def build_dataloader(self, split: str) -> DataLoader:
         split_map = {"train": "TRAIN", "val": "VAL", "test": "TEST"}
@@ -168,8 +181,14 @@ class EchoNetFinetune(FinetuneExperiment):
         mae_l  = (pred - target).abs().mean()
         return mse + 0.1 * mae_l
 
+    def _predict_batch(self, clips: torch.Tensor) -> torch.Tensor:
+        enc_out = encode_clip_for_regression(self.encoder, clips)
+        return regression_head_forward(self.head, enc_out)
+
+    def _head_params(self):
+        return regression_head_params(self.head)
+
     def _train_epoch(self, loader, optimiser, scaler) -> float:
-        """Override to use video encoder instead of image encoder."""
         self.head.train()
         self.encoder.eval()
         total_loss = 0.0
@@ -182,12 +201,11 @@ class EchoNetFinetune(FinetuneExperiment):
 
             with torch.autocast("cuda", dtype=torch.bfloat16,
                                  enabled=torch.cuda.is_available()):
-                vid_out = self.encoder.encode_video(batch["clip"])
-                pred = self.head(vid_out["clip_cls"])
+                pred = self._predict_batch(batch["clip"])
                 loss = self.compute_loss(batch, {}, pred)
 
             self._backward_step_with_scaler(
-                loss, optimiser, scaler, self.head.parameters()
+                loss, optimiser, scaler, self._head_params()
             )
             optimiser.zero_grad(set_to_none=True)
 
@@ -195,6 +213,71 @@ class EchoNetFinetune(FinetuneExperiment):
             n          += 1
 
         return total_loss / max(n, 1)
+
+    def run(self) -> dict:
+        """Train with head params that include frame attention when applicable."""
+        assert self.head is not None, "Call setup() before run()"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        train_loader = self.build_dataloader("train")
+        val_loader   = self.build_dataloader("val")
+
+        optimiser = torch.optim.AdamW(
+            self._head_params(),
+            lr=self.cfg.lr,
+            weight_decay=self.cfg.weight_decay,
+        )
+        use_amp_scaler = next(self.head.parameters()).dtype != torch.bfloat16
+        from torch.cuda.amp import GradScaler
+        scaler = GradScaler(enabled=torch.cuda.is_available() and use_amp_scaler)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimiser, T_max=self.cfg.max_epochs, eta_min=self.cfg.lr * 0.01,
+        )
+
+        log.info(f"[{self.EXPERIMENT_NAME}] Training for up to "
+                 f"{self.cfg.max_epochs} epochs on {self.DATASET_ID}")
+
+        best_metric = self._best_metric
+        patience_ctr = self._patience_ctr
+
+        for epoch in range(self.cfg.max_epochs):
+            train_loss = self._train_epoch(train_loader, optimiser, scaler)
+            val_metrics = self.compute_val_metrics(val_loader)
+            scheduler.step()
+
+            entry = {"epoch": epoch, "train_loss": round(train_loss, 4), **val_metrics}
+            self._train_log.append(entry)
+
+            if epoch % self.cfg.log_every == 0 or epoch == self.cfg.max_epochs - 1:
+                log.info(f"  Epoch {epoch:3d}  " + "  ".join(
+                    f"{k}={v}" for k, v in entry.items() if k != "epoch"
+                ))
+
+            monitor_val = val_metrics.get(self.cfg.monitor, val_metrics.get("val_loss"))
+            improved = (
+                monitor_val < best_metric if self.cfg.monitor_mode == "min"
+                else monitor_val > best_metric
+            )
+            if improved:
+                best_metric = monitor_val
+                self._best_metric = monitor_val
+                patience_ctr = 0
+                self._patience_ctr = 0
+                if self.cfg.checkpoint_best:
+                    self._save_head("best_head.pt")
+            else:
+                patience_ctr += 1
+                self._patience_ctr = patience_ctr
+                if patience_ctr >= self.cfg.patience:
+                    log.info(f"  Early stopping at epoch {epoch} (patience={self.cfg.patience})")
+                    break
+
+        best_path = self.output_dir / "best_head.pt"
+        if best_path.exists():
+            self.load_head(str(best_path))
+
+        self._save_log()
+        return {"train_log": self._train_log, "best_metric": self._best_metric}
 
     @torch.no_grad()
     def compute_val_metrics(self, val_loader: DataLoader) -> dict:
@@ -209,9 +292,8 @@ class EchoNetFinetune(FinetuneExperiment):
             batch = {k: v.to(self.device, non_blocking=True)
                      if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            vid_out = self.encoder.encode_video(batch["clip"])
-            pred    = self.head(vid_out["clip_cls"])
-            loss    = self.compute_loss(batch, {}, pred)
+            pred = self._predict_batch(batch["clip"])
+            loss = self.compute_loss(batch, {}, pred)
             total_loss += loss.item()
             n          += 1
             all_pred.extend(pred.cpu().float().numpy().tolist())
@@ -234,7 +316,7 @@ class EchoNetFinetune(FinetuneExperiment):
         self.head.eval()
         benchmark = EchoNetBenchmark(
             encoder=self.encoder,
-            vid_branch=self.vid_branch,   # legacy compat
+            vid_branch=None if self.encoder is not None else self.vid_branch,
             reg_head=self.head,
             device=self.device,
             batch_size=self.cfg.batch_size,
@@ -263,8 +345,7 @@ class EchoNetFinetune(FinetuneExperiment):
             for batch in test_loader:
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
-                vid_out = self.encoder.encode_video(batch["clip"])
-                pred    = self.head(vid_out["clip_cls"])
+                pred = self._predict_batch(batch["clip"])
                 all_pred.extend(pred.cpu().numpy().tolist())
                 all_true.extend(batch["target"].cpu().numpy().tolist())
 

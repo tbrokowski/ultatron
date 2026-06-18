@@ -44,6 +44,21 @@ def tus_rec_val_root(tmp_path_factory):
     return root
 
 
+@pytest.fixture(scope="module")
+def tus_rec_val_root_zenodo(tmp_path_factory):
+    """Zenodo validation layout with landmark/ (singular) dir."""
+    root = tmp_path_factory.mktemp("TUS_REC_Val_zenodo")
+    (root / "frames" / "050").mkdir(parents=True)
+    (root / "transfs" / "050").mkdir(parents=True)
+    (root / "landmark").mkdir()
+    scan = "LH_Par_C_DtP.h5"
+    (root / "frames" / "050" / scan).write_bytes(b"\x00" * 64)
+    (root / "transfs" / "050" / scan).write_bytes(b"\x00" * 64)
+    (root / "landmark" / "landmark_050.h5").write_bytes(b"\x00" * 64)
+    (root / "calib_matrix.csv").write_text("scaling,spatial\n0.15,identity\n")
+    return root
+
+
 class TestTUSRECValAdapter:
 
     def test_import(self):
@@ -116,6 +131,16 @@ class TestTUSRECValAdapter:
         from data.adapters.muscle.tus_rec_val import TUSRECValAdapter
         ids = [e.sample_id for e in TUSRECValAdapter(root=tus_rec_val_root).iter_entries()]
         assert len(ids) == len(set(ids))
+
+    def test_zenodo_landmark_dir(self, tus_rec_val_root_zenodo):
+        from data.adapters.muscle.tus_rec_val import TUSRECValAdapter
+        entries = list(TUSRECValAdapter(root=tus_rec_val_root_zenodo).iter_entries())
+        assert len(entries) == 1
+        e = entries[0]
+        assert e.source_meta["has_landmarks"] is True
+        assert e.source_meta["landmark_path"].endswith("landmark_050.h5")
+        assert e.source_meta["side"] == "left"
+        assert e.source_meta["motion"] == "Par_C_DtP"
 
     def test_build_manifest_for_dataset(self, tus_rec_val_root, tmp_path):
         from data.schema.manifest import ManifestWriter, load_manifest

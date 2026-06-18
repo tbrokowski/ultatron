@@ -15,10 +15,10 @@ The adapter is responsible for:
 
 Adding a new dataset
 --------------------
-1. Create oura/data/adapters/{dataset_name}.py
+1. Create data/adapters/{dataset_name}.py
 2. Subclass BaseAdapter, set DATASET_ID, ANATOMY_FAMILY, SONODQS
 3. Implement iter_entries()
-4. Register in oura/data/adapters/registry.py
+4. Register in data/adapters/__init__.py
 
 SonoDQS quality tiers
 ---------------------
@@ -34,7 +34,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Iterator, Optional, Tuple
 
-from data.schema.manifest import USManifestEntry, Instance, SONODQS_SCORE
+from data.schema.manifest import USManifestEntry, Instance, SONODQS_SCORE, normalize_anatomy
 
 
 class BaseAdapter(ABC):
@@ -116,7 +116,7 @@ class BaseAdapter(ABC):
         entry = USManifestEntry(
             sample_id=USManifestEntry.make_sample_id(self.DATASET_ID, id_source),
             dataset_id=self.DATASET_ID,
-            anatomy_family=self.ANATOMY_FAMILY,
+            anatomy_family=normalize_anatomy(self.ANATOMY_FAMILY),
             sonodqs=self.SONODQS,
             quality_score=SONODQS_SCORE.get(self.SONODQS.lower(), 1),
             split=split,
@@ -145,7 +145,7 @@ class BaseAdapter(ABC):
             instance_id=instance_id,
             label_raw=label_raw,
             label_ontology=label_ontology,
-            anatomy_family=self.ANATOMY_FAMILY,
+            anatomy_family=normalize_anatomy(self.ANATOMY_FAMILY),
             mask_path=mask_path,
             is_promptable=is_promptable,
             **kwargs,

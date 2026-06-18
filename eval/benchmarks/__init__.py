@@ -1,6 +1,6 @@
 """
-oura/eval/benchmarks/__init__.py
-=================================
+eval/benchmarks/__init__.py
+============================
 Per-dataset benchmark runners.  Each module runs a complete evaluation
 loop for one dataset and returns a standardised results dict.
 
@@ -13,18 +13,31 @@ Available benchmarks
   acouslic      ACOUSLIC-AI fetal standard plane detection
 
 All runners share the same interface:
-    from oura.eval.benchmarks.camus import CAMUSBenchmark
+    from eval.benchmarks.camus import CAMUSBenchmark
     results = CAMUSBenchmark(img_branch, seg_head, dm).run()
     # results: {"dice_mean": float, "dice_ed": float, "dice_es": float, ...}
-"""
-from .camus    import CAMUSBenchmark
-from .echonet  import EchoNetBenchmark
-from .busi     import BUSIBenchmark
-from .tn3k     import TN3KBenchmark
 
-__all__ = [
-    "CAMUSBenchmark",
-    "EchoNetBenchmark",
-    "BUSIBenchmark",
-    "TN3KBenchmark",
-]
+Imports are lazy so submodule imports (e.g. eval.benchmarks.busi) do not
+pull in unrelated benchmarks — avoids circular imports when DataLoader
+workers spawn on Linux (multiprocessing spawn re-imports from scratch).
+"""
+from __future__ import annotations
+
+_LAZY_EXPORTS = {
+    "CAMUSBenchmark":   (".camus",   "CAMUSBenchmark"),
+    "EchoNetBenchmark": (".echonet", "EchoNetBenchmark"),
+    "BUSIBenchmark":    (".busi",    "BUSIBenchmark"),
+    "TN3KBenchmark":    (".tn3k",    "TN3KBenchmark"),
+    "BUSBRABenchmark":  (".busbra",  "BUSBRABenchmark"),
+}
+
+__all__ = list(_LAZY_EXPORTS)
+
+
+def __getattr__(name: str):
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    mod_name, attr = _LAZY_EXPORTS[name]
+    mod = importlib.import_module(mod_name, __name__)
+    return getattr(mod, attr)

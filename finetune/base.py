@@ -7,7 +7,8 @@ Every dataset-specific finetune script inherits from FinetuneExperiment.
 Design rationale
 ----------------
 The generic heads in models/heads/ (LinearSegHead, DPTSegHead, etc.) are
-task-type abstractions
+task-type abstractions; dataset-specific experiments provide the glue that
+wires a head to a particular dataset, loss, and evaluation protocol.
 
 What is dataset-specific:
   - Which head class to instantiate, and with what parameters
@@ -91,14 +92,37 @@ class FinetuneConfig:
     freeze_backbone: bool = True
 
     # Head type — interpreted by each subclass
-    head_type:    str   = "linear"       # "linear" | "dpt" | "mlp" | "attentive_pool"
+    head_type:    str   = "dpt"        # "linear" | "dpt" | "upernet" (seg tasks)
 
     # Output resolution (upsample head output to this before loss)
     output_size:  int   = 224
+    input_size:   int   = 224          # fixed resize for all backbones (incl. student)
+    native_resolution: bool = False    # opt-in pretrain-style crops (requires input_size=0)
+    native_max_px: int = 512           # native crop cap when native_resolution=True
 
     # Logging
     log_every:    int   = 10
     checkpoint_best: bool = True
+
+    # Multi-task loss weights (BUSI seg + cls)
+    seg_loss_weight: float = 1.0
+    cls_loss_weight: float = 1.0
+    seg_only_epochs: int = 0          # train segmentation before enabling cls loss
+    bg_seg_loss_weight: float = 0.5   # weight for background-only seg on normal samples
+    boundary_loss_weight: float = 0.5 # weight for boundary BCE term (0 = disable)
+    refine_up: bool = False           # enable SubPixelRefinement (stride-4 → stride-2)
+    seg_use_adapters: bool = True     # SegAdapter modules in seg heads
+    seg_use_aspp: bool = True         # ASPP fusion in seg heads
+    seg_use_attention_gates: bool = True  # FPN attention gates (UPerNet only)
+    seg_only: bool = False            # BUSI: skip classification head entirely
+    tumor_only_train: bool = False    # BUSI: train on benign+malignant only
+    eval_tumor_only: bool = False     # BUSI: primary Dice on tumour images only
+    split_manifest: str = ""          # BUSI/BUS-BRA: path to split_manifest.json
+    cv_fold: int = 0                    # BUS-BRA/TN3K: OpenUS cross-validation fold index
+    lv_target: str = "lv_structures"  # CAMUS: binary mask definition (see camus_io)
+    camus_quality_filter: bool = False  # CAMUS: Good+Medium only (TMI Table III)
+    camus_variant: str = "lv_epi"       # lv_endo | lv_epi | la | multiclass
+    camus_training_mode: str = "binary"   # binary | multiclass
 
     @classmethod
     def from_dict(cls, d: dict) -> "FinetuneConfig":
@@ -138,10 +162,16 @@ class FinetuneExperiment(ABC):
         data_root:  str,
         output_dir: str,
         cfg:        FinetuneConfig,
+        checkpoint_dir: str | None = None,
     ):
         self.data_root  = Path(data_root)
         self.output_dir = Path(output_dir)
         self.cfg        = cfg
+        if checkpoint_dir is not None:
+            self.checkpoint_dir = Path(checkpoint_dir)
+        else:
+            from finetune.paths import mirror_checkpoint_dir
+            self.checkpoint_dir = mirror_checkpoint_dir(self.output_dir)
 
         # Set by setup()
         self.encoder     = None          # BackboneEncoder (preferred)
@@ -190,9 +220,12 @@ class FinetuneExperiment(ABC):
         """
         ...
 
-    def run_viz(self, results: dict, output_dir: Path) -> None:
-        """Optional: produce viz figures after training completes."""
-        pass
+    def run_viz(self, results: dict, output_dir: Path | None = None) -> None:
+        """Produce segmentation GT vs pred figures for segmentation tasks."""
+        if "segmentation" not in self.TASK:
+            return
+        from finetune.segmentation_viz import save_segmentation_figure
+        save_segmentation_figure(self)
 
     # ── Setup ─────────────────────────────────────────────────────────────────
 
@@ -216,9 +249,10 @@ class FinetuneExperiment(ABC):
 
         if encoder is not None:
             self.encoder    = encoder
-            # Expose as img_branch/vid_branch for subclasses that still reference them
+            # Expose as img_branch for subclasses that still reference it
             self.img_branch = encoder
-            self.vid_branch = encoder
+            # BackboneEncoder uses encode_video(); only legacy Ultatron VideoBranch needs vid_branch
+            self.vid_branch = None
         elif img_branch is not None:
             self.encoder    = UltatronBranchEncoder(img_branch, vid_branch)
             self.img_branch = img_branch
@@ -227,14 +261,17 @@ class FinetuneExperiment(ABC):
             raise ValueError("setup() requires either 'encoder' or 'img_branch'.")
 
         self.device = device
-        embed_dim   = self.encoder.embed_dim
+        if "segmentation" in self.TASK:
+            head_dim = getattr(self.encoder, "patch_embed_dim", self.encoder.embed_dim)
+        else:
+            head_dim = self.encoder.embed_dim
 
         if self.cfg.freeze_backbone and img_branch is not None:
             for p in img_branch.parameters():
                 p.requires_grad_(False)
             img_branch.eval()
 
-        # Infer backbone dtype for head precision matching
+        self._apply_backbone_freeze()
         try:
             backbone_dtype = next(
                 p for mod in self.encoder._nn_modules()
@@ -243,8 +280,27 @@ class FinetuneExperiment(ABC):
         except StopIteration:
             backbone_dtype = torch.bfloat16
 
-        self.head = self.build_head(embed_dim, self.cfg).to(device=device, dtype=backbone_dtype)
+        self.head = self.build_head(head_dim, self.cfg).to(device=device, dtype=backbone_dtype)
         log.info(f"[{self.EXPERIMENT_NAME}] Head: {self.head} (dtype={backbone_dtype})")
+        if self.cfg.freeze_backbone:
+            log.info(f"[{self.EXPERIMENT_NAME}] Backbone frozen — training task head(s) only")
+
+    def _apply_backbone_freeze(self) -> None:
+        """Freeze all encoder/backbone weights when freeze_backbone is set."""
+        if not self.cfg.freeze_backbone or self.encoder is None:
+            return
+        for mod in self.encoder._nn_modules():
+            mod.eval()
+            for p in mod.parameters():
+                p.requires_grad_(False)
+
+    def _iter_trainable_params(self):
+        """Parameters updated during finetune (heads + optional unfrozen encoder parts)."""
+        yield from self.head.parameters()
+        if hasattr(self, "head2") and self.head2 is not None:
+            yield from self.head2.parameters()
+        if not self.cfg.freeze_backbone and self.encoder is not None:
+            yield from self.encoder.trainable_parameters()
 
     # ── Training loop ─────────────────────────────────────────────────────────
 
@@ -255,13 +311,12 @@ class FinetuneExperiment(ABC):
         """
         assert self.head is not None, "Call setup() before run()"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         train_loader = self.build_dataloader("train")
         val_loader   = self.build_dataloader("val")
 
-        # Include any trainable encoder params (e.g. TemporalAttentionPool for image-only models)
-        encoder_trainable = list(self.encoder.trainable_parameters()) if self.encoder else []
-        all_params = list(self.head.parameters()) + encoder_trainable
+        all_params = list(self._iter_trainable_params())
         optimiser = torch.optim.AdamW(
             all_params,
             lr=self.cfg.lr,
@@ -275,6 +330,7 @@ class FinetuneExperiment(ABC):
                  f"{self.cfg.max_epochs} epochs on {self.DATASET_ID}")
 
         for epoch in range(self.cfg.max_epochs):
+            self._current_epoch = epoch
             epoch_loss = self._train_epoch(train_loader, optimiser, scaler)
             val_metrics = self.compute_val_metrics(val_loader)
             val_metrics["epoch"]      = epoch
@@ -308,7 +364,7 @@ class FinetuneExperiment(ABC):
 
         # Reload best head (uses overridable load_head so subclasses can restore
         # multiple heads from the same checkpoint file)
-        best_path = self.output_dir / "best_head.pt"
+        best_path = self._head_checkpoint_path("best_head.pt")
         if best_path.exists():
             self.load_head(str(best_path))
 
@@ -355,16 +411,21 @@ class FinetuneExperiment(ABC):
                                  enabled=torch.cuda.is_available()):
                 # encode_image() handles its own no_grad for frozen backbone;
                 # TemporalAttentionPool (if any) runs outside no_grad for gradients.
-                feats = self.encoder.encode_image(batch["image"])
-                head_out = self.head(
-                    feats["patch_tokens"],
-                    padding_mask=batch.get("padding_mask"),
-                ) if self._head_takes_patch_tokens() else self.head(feats["cls"])
+                pmask = batch.get("padding_mask")
+                if pmask is not None:
+                    feats = self.encoder.encode_image(batch["image"], padding_mask=pmask)
+                else:
+                    feats = self.encoder.encode_image(batch["image"])
+                if self._head_takes_patch_tokens():
+                    from models.heads.finetune_seg import forward_seg_head
+                    head_out = forward_seg_head(self.head, feats, padding_mask=pmask)
+                else:
+                    head_out = self.head(feats["cls"])
 
                 loss = self.compute_loss(batch, feats, head_out)
 
             self._backward_step_with_scaler(
-                loss, optimiser, scaler, self.head.parameters()
+                loss, optimiser, scaler, list(self._iter_trainable_params())
             )
             optimiser.zero_grad(set_to_none=True)
 
@@ -377,8 +438,10 @@ class FinetuneExperiment(ABC):
         """
         Returns True if head.forward() takes patch_tokens (segmentation heads),
         False if it takes cls token (classification/regression heads).
-        Inferred from head class name.
         """
+        from models.heads.finetune_seg import is_hierarchical_seg_head
+        if is_hierarchical_seg_head(self.head):
+            return True
         name = type(self.head).__name__.lower()
         return "seg" in name or "attentive" in name or "concept" in name
 
@@ -413,13 +476,19 @@ class FinetuneExperiment(ABC):
 
         results["experiment"] = self.EXPERIMENT_NAME
         self._save_results(results)
+        self.run_viz(results, self.output_dir)
         return results
 
     # ── Checkpoint helpers ────────────────────────────────────────────────────
 
+    def _head_checkpoint_path(self, name: str) -> Path:
+        return self.checkpoint_dir / name
+
     def _save_head(self, name: str = "best_head.pt"):
-        path = self.output_dir / name
+        path = self._head_checkpoint_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(self.head.state_dict(), path)
+        log.info(f"[{self.EXPERIMENT_NAME}] Checkpoint → {path}")
 
     def load_head(self, path: str):
         self.head.load_state_dict(
@@ -433,6 +502,9 @@ class FinetuneExperiment(ABC):
 
     def _save_results(self, results: dict):
         path = self.output_dir / "results.json"
+        results = dict(results)
+        results["results_dir"] = str(self.output_dir)
+        results["checkpoint_dir"] = str(self.checkpoint_dir)
         path.write_text(json.dumps(results, indent=2))
         log.info(f"[{self.EXPERIMENT_NAME}] Results → {path}")
 
@@ -454,8 +526,10 @@ class FinetuneExperiment(ABC):
                             help="Dataset root directory")
         parser.add_argument("--config",     required=True,
                             help="Path to finetune YAML config")
-        parser.add_argument("--output-dir", default="results/finetune",
-                            help="Where to write results and checkpoints")
+        parser.add_argument("--output-dir", default="dataset_exploration_outputs/finetune",
+                            help="Where to write metrics, logs, and visualizations")
+        parser.add_argument("--checkpoint-dir", default=None,
+                            help="Where to save task-head weights (default: Capstor Finetune/)")
         parser.add_argument("--device",     default="cuda")
         parser.add_argument("--eval-only",  action="store_true",
                             help="Skip training, load best_head.pt and evaluate only")
@@ -472,9 +546,10 @@ class FinetuneExperiment(ABC):
 
         cfg        = FinetuneConfig.from_dict(raw.get("finetune", raw))
         experiment = cls(
-            data_root  = args.data_root,
-            output_dir = args.output_dir,
-            cfg        = cfg,
+            data_root      = args.data_root,
+            output_dir     = args.output_dir,
+            cfg            = cfg,
+            checkpoint_dir = args.checkpoint_dir,
         )
 
         # Load backbone
@@ -490,13 +565,12 @@ class FinetuneExperiment(ABC):
         experiment.setup(img_branch, device=args.device)
 
         if args.eval_only:
-            best = Path(args.output_dir) / "best_head.pt"
+            best = experiment._head_checkpoint_path("best_head.pt")
             if best.exists():
                 experiment.load_head(str(best))
         else:
             experiment.run()
 
         results = experiment.evaluate("test")
-        experiment.run_viz(results, Path(args.output_dir))
 
-        print(json.dumps(results, indent=2))
+        log.info("Test results:\n%s", json.dumps(results, indent=2))

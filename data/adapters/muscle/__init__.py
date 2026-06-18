@@ -3,7 +3,7 @@ from .stmus_nda import STMUSNDAAdapter
 from .fallmud import FALLMUDAdapter
 from .luminous import LUMINOUSAdapter
 from .deep_mtj import DeepMTJAdapter
-from .knee_us_jocohS import KneeUSJoCoHSAdapter
+from .knee_us_jocohs import KneeUSJoCoHSAdapter
 from .tus_rec import TUSRECAdapter
 from .tus_rec_val import TUSRECValAdapter
 from .spinal_cord_injury_us import SpinalCordInjuryUSAdapter

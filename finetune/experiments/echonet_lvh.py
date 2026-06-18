@@ -26,9 +26,13 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-import torch.nn as nn
-
 from finetune.base import FinetuneExperiment, FinetuneConfig
+from finetune.video_regression import (
+    encode_clip_for_regression,
+    regression_head_forward,
+    regression_head_params,
+)
+from models.heads import build_video_regression_head
 from eval.metrics import mae
 
 log = logging.getLogger(__name__)
@@ -149,12 +153,15 @@ class EchoNetLVHFinetune(FinetuneExperiment):
     BENCHMARK_CLS   = None
 
     def build_head(self, embed_dim: int, cfg: FinetuneConfig):
-        """3-output regression head for IVSd, LVIDd, LVPWd from clip_cls."""
-        return nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, 256),
-            nn.GELU(),
-            nn.Linear(256, len(_TARGETS)),
+        return build_video_regression_head(
+            head_type    = cfg.head_type,
+            embed_dim    = embed_dim,
+            video_native = getattr(self, "_video_native", True),
+            n_outputs    = len(_TARGETS),
+            hidden_dim   = 512,
+            dropout      = 0.2,
+            output_min   = None,
+            output_max   = None,
         )
 
     def setup(self, img_branch=None, device="cuda", vid_branch=None, encoder=None):
@@ -169,6 +176,7 @@ class EchoNetLVHFinetune(FinetuneExperiment):
             self.img_branch = img_branch
             self.vid_branch = vid_branch
         self.device = device
+        self._video_native = self.encoder.is_video_native
         if self.cfg.freeze_backbone and vid_branch is not None:
             for p in vid_branch.parameters():
                 p.requires_grad_(False)
@@ -181,7 +189,8 @@ class EchoNetLVHFinetune(FinetuneExperiment):
         except StopIteration:
             backbone_dtype = torch.bfloat16
         self.head = self.build_head(embed_dim, self.cfg).to(device=device, dtype=backbone_dtype)
-        log.info(f"[EchoNetLVH] head={self.head}  dtype={backbone_dtype}  outputs={_TARGETS}")
+        mode = "video_native" if self._video_native else "frame_attention"
+        log.info(f"[EchoNetLVH] head={self.head}  encoding={mode}  outputs={_TARGETS}")
 
     def build_dataloader(self, split: str) -> DataLoader:
         ds = EchoNetLVHDataset(str(self.data_root), split)
@@ -194,6 +203,10 @@ class EchoNetLVHFinetune(FinetuneExperiment):
         pred   = head_output              # (B, 3)
         return F.mse_loss(pred, target) + 0.1 * (pred - target).abs().mean()
 
+    def _predict_batch(self, clips: torch.Tensor) -> torch.Tensor:
+        enc_out = encode_clip_for_regression(self.encoder, clips)
+        return regression_head_forward(self.head, enc_out)
+
     def _train_epoch(self, loader, optimiser, scaler) -> float:
         self.head.train(); self.encoder.eval()
         total_loss, n = 0.0, 0
@@ -203,11 +216,10 @@ class EchoNetLVHFinetune(FinetuneExperiment):
                      for k, v in batch.items()}
             with torch.autocast("cuda", dtype=torch.bfloat16,
                                  enabled=torch.cuda.is_available()):
-                vid_out = self.encoder.encode_video(batch["clip"])
-                pred = self.head(vid_out["clip_cls"])
+                pred = self._predict_batch(batch["clip"])
                 loss = self.compute_loss(batch, {}, pred)
             self._backward_step_with_scaler(
-                loss, optimiser, scaler, self.head.parameters()
+                loss, optimiser, scaler, regression_head_params(self.head)
             )
             optimiser.zero_grad(set_to_none=True)
             total_loss += loss.item(); n += 1
@@ -222,9 +234,8 @@ class EchoNetLVHFinetune(FinetuneExperiment):
             batch = {k: v.to(self.device, non_blocking=True)
                      if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            vid_out = self.encoder.encode_video(batch["clip"])
-            pred    = self.head(vid_out["clip_cls"])
-            loss    = self.compute_loss(batch, {}, pred)
+            pred = self._predict_batch(batch["clip"])
+            loss = self.compute_loss(batch, {}, pred)
             total_loss += loss.item(); n += 1
             all_pred.append(pred.cpu().float())
             all_true.append(batch["target"].cpu().float())
@@ -238,7 +249,7 @@ class EchoNetLVHFinetune(FinetuneExperiment):
         return metrics
 
     def run_viz(self, results: dict, output_dir: Path) -> None:
-        pass   # scatter per measurement — can be added later
+        raise NotImplementedError("Visualisation not yet implemented for EchoNet-LVH.")
 
 
 if __name__ == "__main__":

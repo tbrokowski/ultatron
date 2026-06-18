@@ -1,0 +1,48 @@
+# configs/finetune/lus_video.yaml
+# ============================================================
+# Finetune hyperparameters for LUS video/image-level multilabel
+# classification (per-clip / per-image site-level findings).
+# Tasks: A-line, B-line, confluent B-line, pleural effusion,
+#        large consolidation, small consolidation, pneumothorax
+# Datasets: Benin-LUS + RSA-LUS (pooled, patient-level split)
+# Branch: video branch (clip_cls token from frozen V-JEPA2)
+# ============================================================
+
+dataset_root_benin: "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
+dataset_root_rsa:   "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
+
+# Model backbone (shared with lus_patient.yaml)
+model:
+  image_backbone: dinov3_l
+  video_backbone: vjepa2_l
+  frozen_teacher: null
+  dtype: bfloat16
+
+finetune:
+  # ── Optimiser ──────────────────────────────────────────────────────────────
+  lr:           1.0e-4
+  weight_decay: 0.01
+  max_epochs:   30
+  batch_size:   8
+  num_workers:  4
+
+  # ── Head architecture ──────────────────────────────────────────────────────
+  # 7 independent binary MLP heads (one per finding)
+  head_type:  mlp
+
+  # ── Early stopping ─────────────────────────────────────────────────────────
+  patience:      20
+  monitor:       val_auc_macro   # macro AUC across 7 findings
+  monitor_mode:  max
+
+  # ── Backbone ───────────────────────────────────────────────────────────────
+  freeze_backbone: true
+
+  # ── Video ──────────────────────────────────────────────────────────────────
+  n_frames:   8     # frames sampled per clip (videos) / tiled per image
+  img_size:   224   # spatial resize for all frames
+  encode_bs:  16    # sub-batch size for video clip encoding
+
+  # ── Logging / checkpointing ────────────────────────────────────────────────
+  log_every:       5
+  checkpoint_best: true

@@ -1,0 +1,205 @@
+# Representative backbone comparison — StudentPretrainPilot + ImageNet baselines + US FMs
+#
+# Segmentation head protocol (frozen backbone, trainable head only):
+#   head_type=upernet  → UPerNetDecoder on student F1–F4 (SegAdapters + ASPP + gates)
+#   head_type=dpt      → EnhancedDPTSegHead on patch_tokens (F4 for student)
+#   See configs/finetune/SEG_HEAD_COMPARISON.md for full matrix.
+#
+# Usage:
+#   python scripts/finetune/run_all.py
+#     → default 9 backbones: student_stage1, student_stage2, student_stage3 (if available),
+#       resnet50, vit_b_16, dinov3_l, biomedclip, usfm, echocare
+#   python scripts/finetune/run_all.py --all-backbones
+#     → full list below (student stages 2/3/latest, vjepa2_l, openus, …)
+#   python scripts/finetune/run_all.py --backbones resnet50 vit_b_16 dinov3_b
+#
+# Per experiment (1 GPU, all backbones):
+#   python scripts/finetune/busi.py
+#   python scripts/finetune/camus.py
+#   python scripts/finetune/benin_lus.py
+#
+# 5 experiments × N backbones × up to 100 epochs (early stopping). Missing student
+# stage checkpoints are skipped automatically until pretrain reaches that stage.
+
+train_config: configs/student/student_pretrain.yaml
+
+output_dir: dataset_exploration_outputs/finetune
+device: cuda
+eval_only: false
+# Parallel layout (default): 1 GPU per experiment; each worker runs ALL backbones.
+# With 5 experiments on a 4-GPU node, 4 run at once and the 5th starts when a GPU frees.
+parallel_experiments: true
+parallel_strategy: per_experiment   # per_experiment | per_backbone (legacy)
+num_gpus: 4                        # GH200 node max; override via --gpus on submit
+
+smoke_overrides:
+  max_epochs: 100
+  batch_size: 8
+  patience: 20
+  num_workers: 2
+  boundary_loss_weight: 0.5
+  refine_up: true
+  seg_use_adapters: true
+  seg_use_aspp: true
+  seg_use_attention_gates: true
+
+# Per-experiment overrides merged on top of smoke_overrides (comparison sweep only).
+experiment_smoke_overrides:
+  busi:
+    max_epochs: 300
+    patience: 80
+    monitor: dice_tumor_mean
+    freeze_backbone: true
+    seg_only: true
+    tumor_only_train: true
+    eval_tumor_only: true
+    split_manifest: dataset_exploration_outputs/busi_usfm/split_manifest.json
+    head_type: upernet
+    lr: 3.0e-4
+    batch_size: 8
+    cls_loss_weight: 0.0
+    bg_seg_loss_weight: 0.0
+    input_size: 500
+    output_size: 500
+    native_resolution: false
+    native_max_px: 512
+  busi_multitask:
+    max_epochs: 300
+    patience: 80
+    monitor: dice_tumor_mean
+    freeze_backbone: true
+    seg_only: false
+    tumor_only_train: false
+    eval_tumor_only: true
+    split_manifest: dataset_exploration_outputs/busi_usfm/split_manifest.json
+    head_type: upernet
+    lr: 3.0e-4
+    batch_size: 8
+    cls_loss_weight: 1.0
+    bg_seg_loss_weight: 0.5
+    input_size: 500
+    output_size: 500
+    native_resolution: false
+    native_max_px: 512
+  camus:
+    camus_variant: lv_epi
+    camus_training_mode: binary
+    lv_target: lv_structures
+    camus_quality_filter: false
+    input_size: 256
+    native_resolution: false
+    native_max_px: 512
+    batch_size: 8
+    monitor: val_dice
+    monitor_mode: max
+    head_type: dpt
+
+camus_variants:
+  - variant: lv_endo
+    camus_training_mode: binary
+    lv_target: lv_cavity
+    monitor: val_dice
+    monitor_mode: max
+  - variant: lv_epi
+    camus_training_mode: binary
+    lv_target: lv_structures
+    monitor: val_dice
+    monitor_mode: max
+  - variant: la
+    camus_training_mode: binary
+    lv_target: lv_la
+    monitor: val_dice
+    monitor_mode: max
+  - variant: multiclass
+    camus_training_mode: multiclass
+    monitor: val_dice
+    monitor_mode: max
+
+backbones:
+  # ── Student pipeline checkpoints (StudentPretrainPilot) ──────────────────────
+  - key: student_stage1
+    type: student
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_10000.pt
+    use_ema: true
+
+  - key: student_stage2
+    type: student
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrainPilot/stage2_end.pt
+    use_ema: true
+
+  - key: student_stage3
+    type: student
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrainPilot/stage3_end.pt
+    use_ema: true
+
+  - key: student_latest
+    type: student
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrainPilot/latest.pt
+    use_ema: true
+
+  # ── General image / video baselines ─────────────────────────────────────────
+  - key: resnet50
+    type: standard
+    variant: resnet50
+
+  - key: vit_b_16
+    type: standard
+    variant: vit_b_16
+
+  - key: dinov3_l
+    type: dinov3
+    variant: dinov3_l
+
+  - key: dinov3_b
+    type: dinov3
+    variant: dinov3_b
+
+  - key: vjepa2_l
+    type: vjepa
+    variant: vjepa2_l
+
+  - key: biomedclip
+    type: biomedclip
+
+  # ── Ultrasound foundation models (Capstor Ablations/) ───────────────────────
+  - key: usfm
+    type: usfm
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Ablations/USFM_latest.pth
+    embed_dim: 768
+
+  - key: echocare
+    type: echocare
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Ablations/echocare_encoder.pth
+    embed_dim: 2048
+    is_video: false
+
+  - key: openus
+    type: openus
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Ablations/openus_cpt0150.pth
+    vmamba_checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Ablations/vssm_small_0229_ckpt_epoch_222.pth
+    embed_dim: 768
+
+experiments:
+  - busi
+  - busi_multitask
+  - echonet
+  - camus
+  - lus
+  - lus_video
+
+head_types:
+  default: [dpt]
+  busi: [upernet, dpt]           # student: multi-scale + F4-only ablation
+  busi_multitask: [upernet, dpt]
+  camus: [dpt, upernet]           # upernet auto-skipped for non-hierarchical backbones
+  echonet: [mlp]
+  lus: [mil]
+  lus_video: [mlp]
+
+dataset_roots:
+  busi:       "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
+  busi_multitask: "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
+  camus:      "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CAMUS"
+  echonet:    "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/EchoNet-Dynamic"
+  benin:      "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
+  rsa:        "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"

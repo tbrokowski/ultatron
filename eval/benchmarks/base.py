@@ -138,8 +138,12 @@ class BaseBenchmark(ABC):
                 self.img_branch.teacher.eval()
             else:
                 self.img_branch.eval()
-        if getattr(self, "vid_branch", None) is not None:
-            self.vid_branch.teacher.eval()
+        # Legacy vid_branch path only — new-style runs use encoder.encode_video()
+        if getattr(self, "vid_branch", None) is not None and self.encoder is None:
+            if hasattr(self.vid_branch, "teacher"):
+                self.vid_branch.teacher.eval()
+            else:
+                self.vid_branch.eval()
         if self.head is not None:
             self.head.eval()
 
@@ -183,9 +187,16 @@ class BaseBenchmark(ABC):
     # ── Shared backbone inference ─────────────────────────────────────────────
 
     @torch.no_grad()
+    def _predict_seg_logits(self, feats: dict, padding_mask=None) -> torch.Tensor:
+        from models.heads.finetune_seg import forward_seg_head
+        return forward_seg_head(self.head, feats, padding_mask=padding_mask)
+
+    @torch.no_grad()
     def _extract_features(self, images: torch.Tensor, padding_mask=None) -> dict:
         """Run image encoder and return {cls, patch_tokens}."""
         if self.encoder is not None:
+            if padding_mask is not None:
+                return self.encoder.encode_image(images, padding_mask=padding_mask)
             return self.encoder.encode_image(images)
         # Legacy path: raw ImageBranch
         return self.img_branch.forward_teacher(images, padding_mask=padding_mask)

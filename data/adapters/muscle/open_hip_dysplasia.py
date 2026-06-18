@@ -17,7 +17,7 @@ from data.schema.manifest import USManifestEntry, Instance
 
 class OpenHipDysplasiaAdapter(BaseAdapter):
     DATASET_ID     = "open-hip-dysplasia"
-    ANATOMY_FAMILY = "musculoskeletal"
+    ANATOMY_FAMILY = "joint"
     SONODQS        = "silver"
     DOI            = ""
 
@@ -27,15 +27,22 @@ class OpenHipDysplasiaAdapter(BaseAdapter):
 
     @staticmethod
     def _find_base(root: Path) -> Path:
-        for name in ("radoss-org-open-hip-dysplasia-8433611",):
-            p = root / name
+        candidates = [
+            root / "radoss-org-open-hip-dysplasia-8433611",
+            root / "radoss-org" / "radoss-org-open-hip-dysplasia-8433611",
+        ]
+        for p in candidates:
             if p.is_dir():
                 return p
         if (root / "radiopedia_ultrasound_2d").is_dir():
             return root
-        for sub in root.iterdir() if root.is_dir() else []:
-            if (sub / "radiopedia_ultrasound_2d").is_dir():
-                return sub
+        if root.is_dir():
+            for sub in root.iterdir():
+                if (sub / "radiopedia_ultrasound_2d").is_dir():
+                    return sub
+                nested = sub / "radoss-org-open-hip-dysplasia-8433611"
+                if nested.is_dir():
+                    return nested
         return root
 
     def iter_entries(self) -> Iterator[USManifestEntry]:

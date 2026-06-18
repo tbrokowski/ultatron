@@ -4,42 +4,36 @@ models/losses/proto_loss.py  ·  Prototype consistency loss
 
 SwAV-style asymmetric prototype loss (Caron et al. 2020).
 
-Design
-------
-The original symmetric cross-entropy had two problems:
-  1. No collapse prevention — both sides could map to identical prototypes.
-  2. Operated in misaligned backbone spaces (D=1024 native, not align_dim).
+Mathematical framework
+----------------------
+Given features f (L2-normalised, D-dim) and prototypes C (K × D, L2-normalised):
 
-New design:
-  1. Image teacher assigns prototypes via Sinkhorn-Knopp normalisation
-     (balanced assignment — prototypes are used roughly equally).
-  2. Video student predicts the assignment via softmax (sharp but unconstrained).
-  3. Loss is one-directional: -Σ sinkhorn_target * log(student_pred).
+  raw cosine similarities:  s = f · C^T   ∈ [-1, 1]^{B × K}
 
-This is semantically cleaner: the stable image teacher sets the target
-label; the video student learns to predict which semantic prototype
-describes the content, grounded in the image's spatial semantics.
+Teacher target (balanced assignment):
+  Q = Sinkhorn-Knopp( exp(s / ε_sinkhorn) )       ε = 0.05  (sharp)
 
-Both modalities are projected to align_dim via cross_distill.proj_img/vid
-BEFORE being passed here, so all proto logic operates in the shared space.
+Student prediction:
+  p = softmax( s / τ_prediction )                  τ = 0.1   (softer)
+
+Loss:
+  L = -Σ_b Σ_k  Q[b,k] · log p[b,k]   (cross-entropy, averaged over batch)
+
+Key invariant: ε < τ  (teacher assigns sharper than student predicts).
+The two temperatures are intentionally INDEPENDENT — sinkhorn() receives
+logits already divided by ε_sinkhorn; it does NOT apply any further scaling.
 
 Distributed training
 --------------------
 Sinkhorn-Knopp requires a global view of the batch to produce a balanced
-assignment (each of the K prototypes used equally across ALL samples, not
-just those on one GPU).  swav_proto_loss_from_tokens therefore all-gathers
-the image logits from all ranks before running Sinkhorn, then slices out
-this rank's local target rows.  The video student logits are NOT gathered —
-gradients flow through the local vid_logits only, which is correct under DDP.
+assignment (each of the K prototypes used roughly equally across ALL samples).
+swav_proto_loss_from_tokens therefore all-gathers the teacher logits from all
+ranks before running Sinkhorn, then slices out this rank's local target rows.
+Video student logits are NOT gathered — gradients flow through local vid only.
 
-Functions
----------
-proto_assign            Soft prototype assignment (B, K) from (B, N, D) tokens.
-sinkhorn                Iterative Sinkhorn-Knopp equalisation.
-swav_proto_loss         Asymmetric SwAV: teacher assigns → student predicts.
-proto_consistency_loss  (legacy) Symmetric cross-entropy, kept for backward compat.
-proto_loss_from_tokens  (legacy) Symmetric wrapper called from old code paths.
-swav_proto_loss_from_tokens  Convenience wrapper for phase3_step (distributed-aware).
+Requirement: B_global ≥ K.  When this is not satisfied (e.g. video micro-batch
+B=1 × 32 ranks = 32 < K=256) Sinkhorn cannot balance and the function returns
+0.0 rather than producing a degenerate loss.
 """
 from __future__ import annotations
 
@@ -63,157 +57,305 @@ def _all_gather_nograd(t: Tensor) -> Tensor:
 
 
 def proto_assign(
-    tokens: Tensor,       # (B, N, D)  patch tokens or tube tokens
-    prototypes: Tensor,   # (K, D)     L2-normalised prototype vectors
+    tokens: Tensor,       # (B, N, D) or (B, D)
+    prototypes: Tensor,   # (K, D)
     temperature: float = 0.1,
 ) -> Tensor:
     """
-    Soft prototype assignment via cosine similarity.
+    Soft prototype assignment via cosine similarity, scaled by temperature.
 
-    Parameters
-    ----------
-    tokens     : (B, N, D) or (B, D)  tokens to assign (mean-pooled if 3-D)
-    prototypes : (K, D)     prototype matrix — L2-normalised before dot product
-    temperature: float      softmax sharpness; lower = harder assignment
-
-    Returns
-    -------
-    logits : (B, K) float32  raw (un-softmaxed) assignment scores
+    Returns (B, K) raw logits = cos_sim / temperature.
+    Call this for the STUDENT (softmax) path only.
+    The teacher (Sinkhorn) path computes raw cosine sims independently at its
+    own temperature (sinkhorn_eps) inside swav_proto_loss_from_tokens.
     """
     if tokens.dim() == 3:
         feat = F.normalize(tokens.float().mean(1), dim=-1)   # (B, D)
     else:
         feat = F.normalize(tokens.float(), dim=-1)           # (B, D)
-    proto  = F.normalize(prototypes.float(), dim=-1)          # (K, D)
-    logits = feat @ proto.T                                   # (B, K)
-    return logits / temperature
+    proto = F.normalize(prototypes.float(), dim=-1)          # (K, D)
+    return (feat @ proto.T) / temperature                    # (B, K)
 
 
 def sinkhorn(
-    logits: Tensor,    # (B, K)  raw assignment scores
+    logits: Tensor,    # (B, K)  — already scaled by 1/sinkhorn_eps
     n_iters: int = 3,
-    eps: float = 0.05,
 ) -> Tensor:
     """
     Sinkhorn-Knopp normalisation for balanced prototype assignment.
 
-    Converts raw logit scores to a doubly-stochastic assignment matrix
-    where each prototype is used roughly equally across the batch and
-    each sample sums to 1 over prototypes.
+    Input: logits that have ALREADY been divided by sinkhorn_eps (e.g. 0.05).
+    This function applies NO additional temperature scaling.
 
-    Following SwAV (Caron et al. 2020) — applied to the teacher side
-    to produce a balanced, stable target distribution.
+    Returns Q: (B, K) approximately doubly-stochastic assignment where
+      Σ_k Q[b,k] = 1/B  for all b   (rows: sample weight uniform)
+      Σ_b Q[b,k] = 1/K  for all k   (cols: prototype utilisation balanced)
 
-    Parameters
-    ----------
-    logits : (B, K)  raw assignment scores (before softmax)
-    n_iters: int     number of Sinkhorn iterations (3 is sufficient)
-    eps    : float   sharpness of the exponential (lower = sharper)
-
-    Returns
-    -------
-    Q : (B, K) float32  doubly-normalised assignment (rows and cols sum to 1/B, 1/K)
+    The max-shift before exp is an invariant transformation that prevents
+    float overflow without changing the Sinkhorn output.
     """
-    Q = torch.exp(logits.float() / eps)   # (B, K)
-    Q = Q / Q.sum()                       # global normalisation
+    x = logits.float()
+    x = x - x.max()            # shift for numerical stability (exp(x - max) ∈ (0, 1])
+    Q = torch.exp(x)           # (B, K)
+    Q = Q / Q.sum()            # global normalisation: Σ_{b,k} Q[b,k] = 1
 
     B, K = Q.shape
     for _ in range(n_iters):
-        Q = Q / (Q.sum(dim=0, keepdim=True) * K)    # normalise columns (K prototypes equally)
-        Q = Q / (Q.sum(dim=1, keepdim=True) * B)    # normalise rows (B samples)
+        # Column normalisation: each prototype used with equal total weight 1/K
+        Q = Q / (Q.sum(dim=0, keepdim=True) * K)
+        # Row normalisation: each sample contributes equal total weight 1/B
+        Q = Q / (Q.sum(dim=1, keepdim=True) * B)
     return Q
 
 
-def swav_proto_loss(
-    img_logits: Tensor,    # (B, K)  image teacher raw assignment scores
-    vid_logits: Tensor,    # (B, K)  video student raw assignment scores
-    temperature: float = 0.1,
-    n_sinkhorn_iters: int = 3,
-    eps: float = 1e-8,
-) -> Tensor:
-    """
-    Asymmetric SwAV prototype loss.
-
-    target     = sinkhorn(img_logits)         — balanced, stable image assignment
-    prediction = softmax(vid_logits / temp)   — video student prediction
-
-    L = -Σ_b Σ_k  target[b,k] * log(prediction[b,k])
-
-    The image teacher side uses Sinkhorn (stop-gradient enforced by caller via
-    torch.no_grad on teacher forward pass). The video student side uses a standard
-    softmax so gradients flow back through the video branch.
-
-    Operates on min(B_img, B_vid) samples.
-    """
-    B = min(img_logits.shape[0], vid_logits.shape[0])
-    if B == 0:
-        return img_logits.new_tensor(0.0)
-
-    img_l = img_logits[:B]
-    vid_l = vid_logits[:B]
-
-    with torch.no_grad():
-        target = sinkhorn(img_l, n_sinkhorn_iters)    # (B, K) balanced distribution
-
-    prediction = F.softmax(vid_l, dim=-1)              # (B, K) student prediction
-
-    loss = -(target * (prediction + eps).log()).sum(dim=-1).mean()
-    return loss
-
-
 def swav_proto_loss_from_tokens(
-    img_tokens: Tensor,    # (B_img, N, D) or (B_img, D) — projected to align_dim
-    vid_tokens: Tensor,    # (B_vid, M, D) or (B_vid, D) — projected to align_dim
-    prototypes: Tensor,    # (K, D)
-    temperature: float = 0.1,
+    img_tokens: Tensor,            # (B, N, D) or (B, D) — teacher tokens, already stopgrad
+    vid_tokens: Tensor,            # (B, M, D) or (B, D) — student tokens
+    prototypes: Tensor,            # (K, D)
+    temperature: float = 0.1,     # τ: student softmax temperature
+    sinkhorn_eps: float = 0.05,   # ε: teacher Sinkhorn temperature (< τ → sharper target)
+    n_sinkhorn_iters: int = 3,
 ) -> Tensor:
     """
-    Distributed-aware SwAV wrapper for phase3_step.
-    Tokens are already projected to align_dim by cross_distill.proj_img/vid.
+    Distributed-aware asymmetric SwAV prototype loss.
 
-    Sinkhorn strategy (distributed):
-        - All-gather image logits across ranks before Sinkhorn so the balanced
-          assignment uses the full global batch (required for K prototypes to be
-          used equally when B_local << K).
-        - Slice this rank's local rows from the global Sinkhorn target.
-        - Video logits are NOT gathered — gradients flow through local vid only.
+    Teacher target  = Sinkhorn( exp(cos_sim / sinkhorn_eps) )   [stop-gradient]
+    Student predict = softmax(  cos_sim / temperature       )   [gradient flows]
+    L = -Σ Q * log(p) averaged over the batch.
 
-    Single-GPU / non-distributed: identical to the original per-rank behaviour.
+    Temperature invariant:  sinkhorn_eps < temperature
+      (teacher targets are sharper than student predictions, following SwAV §3.2)
+
+    Returns 0.0 when B_global < K (insufficient batch for balanced assignment).
     """
-    img_logits_local = proto_assign(img_tokens, prototypes, temperature)   # (B_local, K)
-    vid_logits_local = proto_assign(vid_tokens, prototypes, temperature)   # (B_local, K)
+    # ── Compute L2-normalised features ──────────────────────────────────────
+    def _pool_and_norm(t: Tensor) -> Tensor:
+        v = t.float()
+        if v.dim() == 3:
+            v = v.mean(1)
+        return F.normalize(v, dim=-1)
 
+    feat_img = _pool_and_norm(img_tokens)   # (B_local, D)
+    feat_vid = _pool_and_norm(vid_tokens)   # (B_local, D)
+    proto    = F.normalize(prototypes.float(), dim=-1)   # (K, D)
+
+    cos_img = feat_img @ proto.T   # (B_local, K)  raw cosine sims ∈ [-1, 1]
+    cos_vid = feat_vid @ proto.T   # (B_local, K)
+
+    # Teacher logits use sinkhorn_eps (sharper); student uses temperature (softer)
+    img_logits_local = cos_img / sinkhorn_eps   # (B_local, K)  for Sinkhorn
+    vid_logits_local = cos_vid / temperature    # (B_local, K)  for softmax
+
+    # ── Compute Sinkhorn target globally across all ranks ────────────────────
     if _is_dist() and dist.get_world_size() > 1:
-        # Gather image logits from all ranks for a globally balanced Sinkhorn
         img_logits_global = _all_gather_nograd(img_logits_local)   # (B_global, K)
-
+        B_global, K = img_logits_global.shape
+        if B_global < K:
+            # Can't balance K prototypes with fewer than K samples — skip loss
+            return img_tokens.new_tensor(0.0)
         with torch.no_grad():
-            target_global = sinkhorn(img_logits_global)            # (B_global, K)
-
-        # Extract this rank's slice of the global target
-        rank     = dist.get_rank()
-        B_local  = img_logits_local.shape[0]
-        start    = rank * B_local
-        target   = target_global[start : start + B_local]         # (B_local, K)
+            target_global = sinkhorn(img_logits_global, n_sinkhorn_iters)   # (B_global, K)
+        B_local = img_logits_local.shape[0]
+        rank    = dist.get_rank()
+        start   = rank * B_local
+        target  = target_global[start : start + B_local]   # (B_local, K)
     else:
+        B_local, K = img_logits_local.shape
+        if B_local < K:
+            return img_tokens.new_tensor(0.0)
         with torch.no_grad():
-            target = sinkhorn(img_logits_local)                    # (B_local, K)
+            target = sinkhorn(img_logits_local, n_sinkhorn_iters)   # (B_local, K)
 
     B = min(target.shape[0], vid_logits_local.shape[0])
     if B == 0:
         return img_tokens.new_tensor(0.0)
 
-    prediction = F.softmax(vid_logits_local[:B], dim=-1)           # (B_local, K)
-    eps        = 1e-8
-    loss = -(target[:B] * (prediction + eps).log()).sum(dim=-1).mean()
+    # Cross-entropy: -Σ_k Q[b,k] * log p[b,k], averaged over b.
+    # Use log_softmax for numerical stability (avoids log(softmax + eps) approximation).
+    log_p = F.log_softmax(vid_logits_local[:B], dim=-1)   # (B, K)
+    loss  = -(target[:B] * log_p).sum(dim=-1).mean()
     return loss
 
 
-# ── Legacy symmetric functions (kept for backward compatibility) ───────────────
+class ProtoQueue:
+    """
+    FIFO teacher-logit queue for small-batch Sinkhorn.
+
+    Motivation
+    ----------
+    Sinkhorn-Knopp requires B_global ≥ K to produce a balanced assignment.
+    For video micro-batches (e.g. B_local=1 × 32 ranks = 32 < K=256) the
+    global batch is too small.  Since V-JEPA is a FROZEN teacher its logit
+    vectors for any clip are deterministic — there is no EMA drift — making
+    a FIFO queue of past teacher logits much more stable than the MoCo queue.
+
+    Usage
+    -----
+    queue = ProtoQueue(K=256, queue_size=512, device=device)
+
+    # Inside the training step, AFTER computing teacher logits:
+    loss = swav_proto_loss_with_queue(
+        teacher_logits_local,   # (B_local, K)  already divided by sinkhorn_eps
+        student_logits_local,   # (B_local, K)  already divided by temperature
+        queue,
+    )
+    queue.enqueue(teacher_logits_local.detach())
+
+    Notes
+    -----
+    - Queue is per-rank.  Before Sinkhorn we all-gather both the current
+      logits AND the queue across ranks to restore global coverage.
+    - `queue_size` should be ≥ K and a multiple of `B_local` for tidy math,
+      but any value ≥ K works.
+    - When the queue is not yet full (early training), the filled portion is
+      used.  We only run Sinkhorn once there are ≥ K entries total.
+    """
+
+    def __init__(self, K: int, queue_size: int = 512, device=None) -> None:
+        self.K          = K
+        self.queue_size = queue_size
+        dev = device if device is not None else torch.device("cpu")
+        # Buffer stores up to queue_size logit rows; pointer wraps around.
+        self._buf = torch.zeros(queue_size, K, device=dev)
+        self._ptr = 0
+        self._filled = 0   # how many valid rows are in the buffer
+
+    @property
+    def device(self):
+        return self._buf.device
+
+    def enqueue(self, logits: Tensor) -> None:
+        """Add (B, K) rows to the queue, evicting the oldest when full."""
+        logits = logits.detach().float().to(self._buf.device)
+        B = logits.shape[0]
+        if B >= self.queue_size:
+            # Rare: batch larger than queue — just keep the latest entries
+            self._buf[:] = logits[-self.queue_size:]
+            self._ptr = 0
+            self._filled = self.queue_size
+            return
+        end = self._ptr + B
+        if end <= self.queue_size:
+            self._buf[self._ptr:end] = logits
+        else:
+            split = self.queue_size - self._ptr
+            self._buf[self._ptr:] = logits[:split]
+            self._buf[:B - split] = logits[split:]
+        self._ptr = end % self.queue_size
+        self._filled = min(self._filled + B, self.queue_size)
+
+    def get(self) -> Tensor:
+        """Return the filled portion of the queue as a (N_filled, K) tensor."""
+        if self._filled < self.queue_size:
+            # Buffer not yet full — return only the valid rows
+            if self._ptr <= self._filled:
+                return self._buf[:self._filled]
+            # Wrapped: valid rows are [ptr-filled:ptr] modulo queue_size
+            # (shouldn't happen before full, but be safe)
+        return self._buf.clone()
+
+    def __len__(self) -> int:
+        return self._filled
+
+
+def swav_proto_loss_with_queue(
+    teacher_logits_local: Tensor,   # (B_local, K)  already divided by sinkhorn_eps
+    student_logits_local: Tensor,   # (B_local, K)  already divided by temperature
+    queue: "ProtoQueue",
+    n_sinkhorn_iters: int = 3,
+) -> Tensor:
+    """
+    SwAV loss with a teacher-logit queue for small-batch video.
+
+    Prepends queue entries to the current teacher logits, runs Sinkhorn on
+    the augmented batch, then slices only the CURRENT step's rows as targets
+    for the student.  Queue entries have no corresponding student predictions
+    and are discarded after Sinkhorn.
+
+    All-gathers across ranks (current logits only, not the full queue) so
+    the global view is queue_per_rank × n_ranks + B_global_current.
+
+    Call ``queue.enqueue(teacher_logits_local.detach())`` AFTER this function.
+    """
+    K = teacher_logits_local.shape[1]
+
+    # Gather current teacher logits across ranks (no grad)
+    if _is_dist() and dist.get_world_size() > 1:
+        cur_global = _all_gather_nograd(teacher_logits_local)    # (B_global_cur, K)
+    else:
+        cur_global = teacher_logits_local.detach()
+
+    # Prepend queue entries (local per-rank, already stable frozen-teacher logits)
+    q_entries = queue.get()   # (N_q, K) — may be empty early in training
+    if len(q_entries) > 0:
+        augmented = torch.cat([q_entries.to(cur_global.device), cur_global], dim=0)
+    else:
+        augmented = cur_global
+
+    B_aug = augmented.shape[0]
+    if B_aug < K:
+        # Queue not yet warm enough; skip this step
+        return teacher_logits_local.new_tensor(0.0)
+
+    with torch.no_grad():
+        target_aug = sinkhorn(augmented, n_sinkhorn_iters)   # (B_aug, K)
+
+    # Target rows for the CURRENT batch are the LAST B_global_cur entries
+    B_global_cur = cur_global.shape[0]
+    target_global_cur = target_aug[-B_global_cur:]           # (B_global_cur, K)
+
+    # Slice this rank's local rows
+    if _is_dist() and dist.get_world_size() > 1:
+        B_local = teacher_logits_local.shape[0]
+        rank    = dist.get_rank()
+        start   = rank * B_local
+        target  = target_global_cur[start : start + B_local]   # (B_local, K)
+    else:
+        target = target_global_cur
+
+    B = min(target.shape[0], student_logits_local.shape[0])
+    if B == 0:
+        return teacher_logits_local.new_tensor(0.0)
+
+    log_p = F.log_softmax(student_logits_local[:B], dim=-1)
+    return -(target[:B] * log_p).sum(dim=-1).mean()
+
+
+def swav_proto_loss(
+    img_logits: Tensor,    # (B, K)  image teacher raw cosine-sim scores (NOT pre-scaled)
+    vid_logits: Tensor,    # (B, K)  video student raw cosine-sim scores (NOT pre-scaled)
+    temperature: float = 0.1,
+    sinkhorn_eps: float = 0.05,
+    n_sinkhorn_iters: int = 3,
+) -> Tensor:
+    """
+    Standalone asymmetric SwAV loss from pre-computed raw cosine similarities.
+
+    img_logits and vid_logits must be RAW cosine similarities (not yet divided
+    by any temperature). This function applies sinkhorn_eps and temperature
+    internally.
+
+    Prefer swav_proto_loss_from_tokens for the main training path.
+    """
+    B = min(img_logits.shape[0], vid_logits.shape[0])
+    if B == 0 or B < img_logits.shape[1]:
+        return img_logits.new_tensor(0.0)
+
+    img_l = (img_logits[:B] / sinkhorn_eps)
+    vid_l = (vid_logits[:B] / temperature)
+
+    with torch.no_grad():
+        target = sinkhorn(img_l, n_sinkhorn_iters)
+
+    log_p = F.log_softmax(vid_l, dim=-1)
+    return -(target * log_p).sum(dim=-1).mean()
+
+
+# ── Legacy symmetric functions (kept for backward compatibility) ──────────────
 
 def proto_consistency_loss(
-    p_img: Tensor,   # (B_img, K)  image prototype distribution
-    p_vid: Tensor,   # (B_vid, K)  video prototype distribution
+    p_img: Tensor,   # (B, K)  image prototype distribution (softmax output)
+    p_vid: Tensor,   # (B, K)  video prototype distribution (softmax output)
     eps: float = 1e-8,
 ) -> Tensor:
     """
@@ -224,18 +366,16 @@ def proto_consistency_loss(
     B = min(p_img.shape[0], p_vid.shape[0])
     if B == 0:
         return p_img.new_tensor(0.0)
-
     p_i = p_img[:B]
     p_v = p_vid[:B]
-
     loss_iv = -(p_i * (p_v + eps).log()).sum(-1).mean()
     loss_vi = -(p_v * (p_i + eps).log()).sum(-1).mean()
     return (loss_iv + loss_vi) / 2.0
 
 
 def proto_loss_from_tokens(
-    img_tokens: Tensor,    # (B_img, N, D)
-    vid_tokens: Tensor,    # (B_vid, M, D)
+    img_tokens: Tensor,    # (B, N, D)
+    vid_tokens: Tensor,    # (B, M, D)
     prototypes: Tensor,    # (K, D)
     temperature: float = 0.1,
 ) -> Tensor:

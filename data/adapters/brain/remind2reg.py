@@ -2,17 +2,20 @@
 data/adapters/remind2reg.py  ·  ReMIND2Reg post-resection brain US adapter
 =============================================================================
 
-ReMIND2Reg packages paired post-resection iUS and pre-operative MRI volumes.
-The adapter keeps only the `_0000` iUS channel for pretraining and ignores the
-MRI channels.
+ReMIND2Reg packages paired post-resection iUS (_0000) and pre-operative MRI
+(_0001 ceT1, _0002 T2) volumes for a registration challenge.  There are no
+segmentation labels in this release.  The adapter emits only the iUS channel
+for SSL pretraining and records paired MRI paths in ``source_meta`` when
+present on disk.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Iterator, List
+from typing import Dict, Iterator, List, Optional
 
 from data.adapters.base import BaseAdapter
+from data.adapters.brain._volume_utils import nifti_depth
 from data.schema.manifest import USManifestEntry
 
 
@@ -21,6 +24,11 @@ class ReMIND2RegAdapter(BaseAdapter):
     ANATOMY_FAMILY = "brain"
     SONODQS = "gold"
     DOI = "https://doi.org/10.1101/2023.09.14.23295596"
+
+    _MRI_CHANNELS = {
+        "0001": "cet1_preoperative",
+        "0002": "t2_preoperative",
+    }
 
     def __init__(self, root, split_override=None):
         super().__init__(self._resolve_dataset_root(root), split_override=split_override)
@@ -58,6 +66,8 @@ class ReMIND2RegAdapter(BaseAdapter):
         for us_path in us_paths:
             case_id = self._case_id(us_path)
             stem = us_path.name.replace(".nii.gz", "")
+            num_frames = nifti_depth(us_path)
+            paired_mri = self._paired_mri_paths(case_id)
             yield self._make_entry(
                 str(us_path),
                 split=split_map.get(case_id, "train"),
@@ -65,15 +75,27 @@ class ReMIND2RegAdapter(BaseAdapter):
                 study_id=case_id,
                 series_id=stem,
                 is_3d=True,
+                is_cine=True,
+                has_temporal_order=True,
+                num_frames=num_frames,
                 view_type="post_resection_ius",
                 task_type="ssl_only",
-                ssl_stream="image",
+                ssl_stream="both",
                 is_promptable=False,
                 source_meta={
                     "case_id": case_id,
                     "channel": "us_post_resection",
+                    "num_z_slices": num_frames,
+                    **paired_mri,
                 },
             )
+
+    def _paired_mri_paths(self, case_id: str) -> Dict[str, Optional[str]]:
+        out: Dict[str, Optional[str]] = {}
+        for suffix, label in self._MRI_CHANNELS.items():
+            path = self.root / "imagesTr" / f"{case_id}_{suffix}.nii.gz"
+            out[f"mri_{label}_path"] = str(path) if path.exists() else None
+        return out
 
     def _group_split_map(self, group_ids) -> Dict[str, str]:
         groups = sorted(set(group_ids))

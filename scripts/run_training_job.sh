@@ -56,6 +56,7 @@ done
 
 # ── Environment ───────────────────────────────────────────────────────────────
 set -euo pipefail
+ulimit -c 0
 
 PROJECT_DIR="/capstor/store/cscs/swissai/a127/ultrasound/code/ultatron"
 SCRATCH_DIR="/capstor/scratch/cscs/${USER}/ultrasound"
@@ -216,6 +217,7 @@ srun \
     --output="${LOG_DIR}/rank_%t.log" \
     --error="${LOG_DIR}/rank_%t.err" \
     bash -c "
+        ulimit -c 0
         torchrun \
             --nnodes=${SLURM_NNODES} \
             --nproc_per_node=4 \

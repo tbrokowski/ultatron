@@ -17,12 +17,12 @@ Usage:
     python scripts/build_manifest.py \
         --config configs/run1/data_run1.yaml \
         --prefer-scratch \
-        --out dataset_exploration_outputs/run1/run1_train_v2.jsonl
+        --out dataset_exploration_outputs/run1/run1_train_v3.jsonl
 
     # Filter an existing manifest to remove entries with missing files:
     python scripts/build_manifest.py \
-        --filter-missing dataset_exploration_outputs/run1/run1_train_v2.jsonl \
-        --out dataset_exploration_outputs/run1/run1_train_v2_filtered.jsonl
+        --filter-missing dataset_exploration_outputs/run1/run1_train_v3.jsonl \
+        --out dataset_exploration_outputs/run1/run1_train_v3_filtered.jsonl
 
 This script:
   1. Reads dataset root paths from config

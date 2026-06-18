@@ -22,5 +22,8 @@ def test_resect_adapter_emits_only_us_resection_stages(resect_root: Path):
         assert entry.dataset_id == "RESECT"
         assert entry.anatomy_family == "brain"
         assert entry.modality_type == "volume"
+        assert entry.is_cine is True
+        assert entry.has_temporal_order is True
         assert entry.task_type == "ssl_only"
-
+        assert entry.ssl_stream == "both"
+        assert entry.instances == []

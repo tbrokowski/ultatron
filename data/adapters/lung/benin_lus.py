@@ -7,7 +7,8 @@ Dataset layout (Store):
     /capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos/
       cleaned/
         videos/                 # {PatientID}_{Site}_{Depth}_{Count}.mp4
-        processed_files.csv     # Patient ID, Site, Depth, Count, New File Name, ...
+        images/                 # {PatientID}_{Site}_{Depth}_{Count}.png (still frames)
+        processed_files.csv     # Patient ID, Site, Depth, Count, New File Name, type, ...
         labels_multidiagnosis.csv
 
 labels_multidiagnosis.csv is patient-level:
@@ -18,11 +19,11 @@ We treat:
   * TB Label, Pneumonia, Covid  → patient-level labels
   * {SITE}_{finding}            → video-level multilabel for that site
 
-This adapter emits one USManifestEntry per video clip, with:
+This adapter emits one USManifestEntry per media file (video OR image), with:
   * dataset_id      = "Benin-LUS"
   * anatomy_family  = "lung"
-  * modality_type   = "video"
-  * ssl_stream      = "video"
+  * modality_type   = "video" (for .mp4 clips) | "image" (for still frames)
+  * ssl_stream      = "both" (video) | "image" (still frame)
   * task_type       = "multilabel_cls"
   * study_id        = patient_id  (enables PatientLevelDataset grouping)
   * source_meta:
@@ -36,16 +37,15 @@ This adapter emits one USManifestEntry per video clip, with:
                                            # small_consolidation, pneumothorax
         }
 
-Video-level instances are added for bookkeeping (one per positive finding),
+Per-finding instances are added for bookkeeping (one per positive finding),
 but classification heads primarily consume source_meta["video_labels"].
 """
 
 from __future__ import annotations
 
 import csv
-from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterator, List, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry, Instance
@@ -71,6 +71,50 @@ _SUFFIX_TO_INDEX: Dict[str, int] = {
     "small Consolidations or Nodules": 5,
     "Pattern A' (pneumothorax)": 6,
 }
+
+
+def row_media_type(row: dict) -> str:
+    """Return normalized media type from processed_files.csv (Type or type column)."""
+    raw = row.get("Type") or row.get("type") or "video"
+    return str(raw).strip().lower()
+
+
+def resolve_lus_media(
+    row: dict,
+    videos_root: Path,
+    images_root: Path,
+) -> Optional[Tuple[Path, str, str, bool, Dict[str, object]]]:
+    """
+    Resolve a processed_files.csv row to an on-disk media file.
+
+    Returns (path, modality, ssl_stream, is_cine, extra_source_meta) or None
+    when no file can be resolved. Image rows whose PNG is missing fall back to
+    a sibling MP4 with the same stem (Benin store often has videos only).
+    """
+    new_name = (row.get("New File Name") or "").strip()
+    if not new_name:
+        return None
+
+    row_type = row_media_type(row)
+    extra_meta: Dict[str, object] = {}
+
+    if row_type == "video":
+        media_path = videos_root / new_name
+        if not media_path.exists():
+            return None
+        return media_path, "video", "both", True, extra_meta
+
+    media_path = images_root / new_name
+    if media_path.exists():
+        return media_path, "image", "image", False, extra_meta
+
+    video_fallback = videos_root / f"{Path(new_name).stem}.mp4"
+    if video_fallback.exists():
+        extra_meta["image_from_video"] = True
+        extra_meta["still_image_name"] = new_name
+        return video_fallback, "image", "image", False, extra_meta
+
+    return None
 
 
 class BeninLUSAdapter(BaseAdapter):
@@ -102,10 +146,10 @@ class BeninLUSAdapter(BaseAdapter):
         if not labels_path.exists():
             raise FileNotFoundError(f"Benin-LUS labels_multidiagnosis.csv not found at {labels_path}")
 
-        # Load processed_files rows
+        # Load processed_files rows — both video and image rows
         with processed_path.open() as f:
             reader = csv.DictReader(f)
-            self._processed_rows = [row for row in reader if row.get("type", "").lower() == "video"]
+            self._processed_rows = list(reader)
 
         # Load labels by patient (record_id)
         with labels_path.open() as f:
@@ -156,6 +200,7 @@ class BeninLUSAdapter(BaseAdapter):
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
         videos_root = self.cleaned_root / "videos"
+        images_root = self.cleaned_root / "images"
 
         for row in self._processed_rows:
             patient_id = row.get("Patient ID")
@@ -167,9 +212,10 @@ class BeninLUSAdapter(BaseAdapter):
             if not new_name:
                 continue
 
-            vpath = videos_root / new_name
-            if not vpath.exists():
+            resolved = resolve_lus_media(row, videos_root, images_root)
+            if resolved is None:
                 continue
+            media_path, modality, ssl_stream, is_cine, media_meta = resolved
 
             split = self._patient_splits.get(patient_id, "train")
 
@@ -225,24 +271,23 @@ class BeninLUSAdapter(BaseAdapter):
                 "site": site,
                 "depth": depth,
             }
+            source_meta.update(media_meta)
             if patient_labels is not None:
                 source_meta["patient_labels"] = patient_labels
             if video_labels:
                 source_meta["video_labels"] = video_labels
 
             yield self._make_entry(
-                str(vpath),
+                str(media_path),
                 split=split,
-                modality="video",
+                modality=modality,
                 instances=instances,
                 study_id=patient_id,
                 view_type=site,
-                is_cine=True,
-                has_temporal_order=True,
+                is_cine=is_cine,
+                has_temporal_order=(modality == "video"),
                 task_type=task_type,
-                # Include Benin videos in BOTH streams so Phase 3 can sample
-                # frames (image stream) paired with clips (video stream).
-                ssl_stream="both",
+                ssl_stream=ssl_stream,
                 is_promptable=False,
                 source_meta=source_meta,
             )

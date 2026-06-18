@@ -1,5 +1,5 @@
 """
-oura/eval/benchmarks/tn3k.py  ·  TN3K thyroid nodule segmentation benchmark
+eval/benchmarks/tn3k.py  ·  TN3K thyroid nodule segmentation benchmark
 =============================================================================
 
 TN3K: 3,493 thyroid ultrasound images with nodule segmentation masks.
@@ -73,7 +73,7 @@ class TN3KBenchmark(BaseBenchmark):
 
     def predict(self, batch: dict) -> dict:
         feats  = self._extract_features(batch["image"])
-        logits = self.head(feats["patch_tokens"])
+        logits = self._predict_seg_logits(feats)
         pred   = F.interpolate(logits, size=(224, 224),
                                mode="bilinear", align_corners=False)
         return {"pred": torch.sigmoid(pred)}

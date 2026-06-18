@@ -117,6 +117,15 @@ def build_camus(root: Path, n=4):
                 pfx = f"patient{i:04d}_{v}_{p}"
                 _save_mhd(_gray(), d / f"{pfx}.mhd")
                 _save_mhd(_mask(), d / f"{pfx}_gt.mhd")
+            # Half-sequence cine (T × H × W) + per-frame masks
+            seq = np.stack([_gray() for _ in range(6)], axis=0)
+            mseq = np.stack([_mask() for _ in range(6)], axis=0)
+            _save_mhd(seq, d / f"patient{i:04d}_{v}_half_sequence.mhd")
+            _save_mhd(mseq, d / f"patient{i:04d}_{v}_half_sequence_gt.mhd")
+            (d / f"Info_{v}.cfg").write_text(
+                "ED: 1\nES: 5\nNbFrame: 6\nSex: F\nAge: 50\n"
+                "ImageQuality: Good\nEF: 55\nFrameRate: 30.0\n"
+            )
 
 def build_busi(root: Path, n=4):
     for cls in ("normal", "benign", "malignant"):
@@ -148,14 +157,35 @@ def build_tn3k(root: Path, n_trainval=6, n_test=2):
             _save_png(_mask(), root / f"{prefix}-mask" / f"{stem}.jpg")
 
 def build_covidx(root: Path, n=4):
-    (root / "data").mkdir(parents=True, exist_ok=True)
-    for split in ("train", "val", "test"):
-        lines = []
-        for i in range(n):
-            fname = f"{split}_{i:04d}.gif"
-            (root / "data" / fname).write_bytes(b"\x00" * 64)
-            lines.append(f"{fname} {i % 3}")
-        (root / f"{split}.txt").write_text("\n".join(lines))
+    """Minimal COVIDx-US tree matching COVIDxUSAdapter layout."""
+    master = root / "COVID-US-master"
+    utils = master / "utils"
+    vid_root = root / "data" / "video" / "original"
+    img_root = root / "data" / "image" / "original"
+    mask_root = root / "data" / "mask"
+    utils.mkdir(parents=True, exist_ok=True)
+    vid_root.mkdir(parents=True, exist_ok=True)
+    img_root.mkdir(parents=True, exist_ok=True)
+    mask_root.mkdir(parents=True, exist_ok=True)
+
+    classes = ("COVID", "Pneumonia", "Normal")
+    meta_lines = ["id,filename,filetype,folder,source,url,probe,class"]
+    for i in range(n):
+        uid = f"{i + 1}_test_{classes[i % 3].lower()}"
+        title = (
+            "Coalescing B lines.mp4" if i % 3 == 0 else
+            "Normal Lung A lines.mp4" if i % 3 == 2 else
+            "Consolidation.mp4"
+        )
+        meta_lines.append(
+            f"{uid},{title},mp4,data/tmp/test,Test,,Convex,{classes[i % 3]}"
+        )
+        (vid_root / f"{uid}.mp4").write_bytes(b"\x00" * 64)
+        frame_stem = f"{uid}_test_{classes[i % 3].lower()}_convex_frame0"
+        _save_png(_gray(), img_root / f"{frame_stem}.jpg")
+        _save_png(_mask(), mask_root / f"{frame_stem}_mask.jpg")
+
+    (utils / "video_metadata.csv").write_text("\n".join(meta_lines))
 
 def build_fetal_planes(root: Path, n=12):
     (root / "Images").mkdir(parents=True, exist_ok=True)
@@ -536,6 +566,92 @@ def build_iugc2024(root: Path):
         w.writerow({"filename": "test_10_80.avi", "frame_count": "81",
                     "pos_index": "ALL", "neg_index": "NONE"})
 
+def build_iugc2024_capstor(root: Path):
+    """
+    Synthetic capstor IUGC-2024 ``DatasetV3/`` layout with zip-style split
+    wrappers, ``__`` video filename suffixes, and swapped val/test mask naming.
+    """
+    dataset = root / "DatasetV3"
+
+    train = dataset / "train-20251119T060603Z-1-001" / "train"
+    (train / "videos").mkdir(parents=True, exist_ok=True)
+    (train / "seg" / "capvid" / "mask").mkdir(parents=True, exist_ok=True)
+    (train / "cls").mkdir(parents=True, exist_ok=True)
+    (train / "videos" / "capvid__capvid.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), train / "seg" / "capvid" / "mask" / "capvid_0_6.png")
+    (train / "train_info.csv").write_bytes(
+        b"filename,pos,frame_count,labeled_frame_count,labeled_frame_index\r\n"
+        b"capvid.avi,TRUE,80,1,0\r\n"
+    )
+    (train / "seg" / "seg_info.csv").write_bytes(
+        b"filename,frame_count,labeled_frame_count,labeled_index\r\n"
+        b"capvid.avi,80,1,0\r\n"
+    )
+    with open(train / "cls" / "class_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "capvid.avi", "frame_count": "80",
+                    "pos_index": "0", "neg_index": "NONE"})
+    (train / "seg" / "landmark.json").write_text(json.dumps({
+        "capvid_0_6.png": {
+            "ps_points": [["10", "20"], ["11", "21"]],
+            "hsd_point": ["12", "22"],
+            "aop_tangency": ["13", "23"],
+            "hsd": 50.0,
+            "aop": 110.0,
+        }
+    }))
+
+    val = dataset / "val-20251119T054616Z-1-001" / "val"
+    (val / "videos").mkdir(parents=True, exist_ok=True)
+    (val / "seg").mkdir(parents=True, exist_ok=True)
+    (val / "cls").mkdir(parents=True, exist_ok=True)
+    (val / "videos" / "valcap__valcap.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), val / "seg" / "valcap.png")
+    with open(val / "val_info.csv", "w", newline="") as f:
+        fields = ["filename", "SP_count", "NSP_count", "frame_count", "labeled_frame_count",
+                  "labeled_frame_index", "SP_index", "NSP_index"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({"filename": "valcap.avi", "SP_count": "1", "NSP_count": "0",
+                    "frame_count": "20", "labeled_frame_count": "1",
+                    "labeled_frame_index": "6", "SP_index": "[6]", "NSP_index": "[0]"})
+    with open(val / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "valcap.avi", "frame_count": "20",
+                    "labeled_frame_count": "1", "labeled_frame_index": "6"})
+    with open(val / "cls" / "cls_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "valcap.avi", "frame_count": "20",
+                    "pos_index": "[6]", "neg_index": "[0]"})
+
+    test = dataset / "test-20251119T054614Z-1-001" / "test"
+    (test / "videos").mkdir(parents=True, exist_ok=True)
+    (test / "seg").mkdir(parents=True, exist_ok=True)
+    (test / "cls").mkdir(parents=True, exist_ok=True)
+    (test / "videos" / "testcap.avi").write_bytes(b"\x00" * 64)
+    _save_png(_mask(8, 8), test / "seg" / "testcap_6.png")
+    with open(test / "test_info.csv", "w", newline="") as f:
+        fields = ["filename", "SP_count", "NSP_count", "frame_count", "labeled_frame_count",
+                  "labeled_frame_index", "SP_index", "NSP_index"]
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({"filename": "testcap.avi", "SP_count": "1", "NSP_count": "0",
+                    "frame_count": "20", "labeled_frame_count": "1",
+                    "labeled_frame_index": "6", "SP_index": "[6]", "NSP_index": "[0]"})
+    with open(test / "seg" / "seg_info.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "labeled_frame_count", "labeled_frame_index"])
+        w.writeheader()
+        w.writerow({"filename": "testcap.avi", "frame_count": "20",
+                    "labeled_frame_count": "1", "labeled_frame_index": "6"})
+    with open(test / "cls" / "cls_label.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["filename", "frame_count", "pos_index", "neg_index"])
+        w.writeheader()
+        w.writerow({"filename": "testcap.avi", "frame_count": "20",
+                    "pos_index": "[6]", "neg_index": "[0]"})
+
 def build_maternal_fetal_us_video_intrapartum(root: Path):
     """
     Synthetic Maternal-Fetal US Video Intrapartum `DatasetV3/` layout.
@@ -796,8 +912,16 @@ def build_common_carotid(root: Path):
 
 def build_brain_3d_us_neuroimages(root: Path):
     root.mkdir(parents=True, exist_ok=True)
+    header = (
+        "NRRD0003\n"
+        "type: unsigned char\n"
+        "dimension: 3\n"
+        "sizes: 120 96 80\n"
+        "encoding: raw\n"
+        "\n"
+    ).encode("latin-1")
     for name in ("CaseA_preop.nrrd", "CaseA_postop.nrrd", "CaseB_resection.nrrd"):
-        _touch(root / name)
+        (root / name).write_bytes(header + b"\x00" * 8)
 
 def build_bite(root: Path):
     study_specs = {
@@ -843,6 +967,69 @@ def build_stu_hospital(root: Path):
     _save_png(_mask(), hospital / "mask_001.png")
     _save_png(_gray(), hospital / "Test_Image_002.png")
     _save_png(_mask(), hospital / "mask_002.png")
+
+def build_fast_u_net(root: Path):
+    """Synthetic Fast-U-Net layout: AC train/val + test_data pairs."""
+    ac = root / "Dataset" / "AC"
+    img_dir = ac / "resized_data" / "image"
+    mask_dir = ac / "resized_data" / "mask"
+    img_dir.mkdir(parents=True)
+    mask_dir.mkdir(parents=True)
+    for stem in ("0001", "0002"):
+        _save_png(_gray(), img_dir / f"{stem}.png")
+        _save_png(_mask(), mask_dir / f"{stem}.png")
+    (ac / "train.txt").write_text(
+        "resized_data/image/0001.png resized_data/mask/0001.png\n"
+        "resized_data/image/0002.png resized_data/mask/0002.png\n"
+    )
+    (ac / "val.txt").write_text(
+        "resized_data/image/0001.png resized_data/mask/0001.png\n"
+    )
+    test_img = root / "test_data" / "image"
+    test_mask = root / "test_data" / "mask"
+    test_img.mkdir(parents=True)
+    test_mask.mkdir(parents=True)
+    _save_jpg(_gray(), test_img / "1001.jpg")
+    _save_jpg(_mask(), test_mask / "1001.jpg")
+
+def build_usanotai(root: Path):
+    """Synthetic USAnotAI-master organ classification layout."""
+    for split, names in (
+        ("train", ("bladder-0000.png", "liver-0001.png")),
+        ("test",  ("bladder-0051.png", "liver-0052.png")),
+    ):
+        d = root / split
+        d.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            _save_png(_gray(), d / name)
+
+def build_lung_database(root: Path):
+    """Synthetic Lung Database with extracted frame sequences per lung zone."""
+    pt1 = root / "Pt01"
+    img_dir = pt1 / "images"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    frames = [
+        "image_001_Pt01_z01_frame_000000.jpg",
+        "image_002_Pt01_z01_frame_000001.jpg",
+        "image_003_Pt01_z02_frame_000000.jpg",
+        "image_004_Pt01_z02_frame_000001.jpg",
+        "image_005_Pt01_z02_frame_000002.jpg",
+    ]
+    for name in frames:
+        _save_jpg(_gray(), img_dir / name)
+
+    pt_short = root / "pt02"
+    pt_short.mkdir(parents=True, exist_ok=True)
+    for idx in range(2):
+        _save_jpg(_gray(), pt_short / f"pt02_z01_frame_{idx:06d}.jpg")
+
+    ed = root / "ED1"
+    batch = ed / "processed_10_images_batch"
+    batch_img = batch / "images"
+    batch_img.mkdir(parents=True, exist_ok=True)
+    for idx in range(3):
+        _save_jpg(_gray(), batch_img / f"image_{idx + 1:03d}_ED01_z03_frame_{idx:06d}.jpg")
+
 
 def build_annotated_heterogeneous_us_db(root: Path):
     filtered = root / "Filtered Data"
@@ -933,7 +1120,6 @@ def build_echonet_dynamic(root: Path, n=4):
 
 def build_echonet_pediatric(root: Path, n=4):
     """Synthetic EchoNet-Pediatric with A4C and PSAX view subdirectories."""
-    import hashlib
     base = root / "pediatric_echo_avi" / "pediatric_echo_avi"
     for view_idx, view in enumerate(("A4C", "PSAX")):
         vdir = base / view
@@ -949,7 +1135,28 @@ def build_echonet_pediatric(root: Path, n=4):
                 "Age": str(i + 1), "Weight": "15.0", "Height": "90.0",
                 "Split": split_val,
             })
-            tracing_rows.append({"FileName": fname, "X": "58", "Y": "58", "Frame": str(i + 1)})
+            ed_frame, es_frame = 10 + i, 20 + i
+            if i == n - 1:
+                # Diastole-only tracing (missing systolic phase).
+                for p in range(12):
+                    tracing_rows.append({
+                        "FileName": fname,
+                        "X": str(40 + p),
+                        "Y": str(53),
+                        "Frame": str(ed_frame),
+                    })
+                tracing_rows.append({
+                    "FileName": fname, "X": "0", "Y": "0", "Frame": "No Systolic",
+                })
+            else:
+                for frame, n_pts in ((ed_frame, 12), (es_frame, 8)):
+                    for p in range(n_pts):
+                        tracing_rows.append({
+                            "FileName": fname,
+                            "X": str(40 + p),
+                            "Y": str(50 + frame % 5),
+                            "Frame": str(frame),
+                        })
         with open(vdir / "FileList.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["FileName","EF","Sex","Age","Weight","Height","Split"])
             w.writeheader(); w.writerows(rows)
@@ -989,11 +1196,17 @@ def build_unity(root: Path, n=6):
         img_dir = root / "png-cache" / prefix / bucket1 / bucket2
         img_dir.mkdir(parents=True, exist_ok=True)
         _save_png(_gray(), img_dir / fname)
-        entry = {"labels": {
-            "mv-ant-hinge": {"type": "point", "x": "100.0", "y": "200.0"},
-            "mv-post-hinge": {"type": "point", "x": "150.0", "y": "210.0"},
-            "lv-apex-endo":  {"type": "off",   "x": "",      "y": ""},
-        }}
+        if i == n - 1:
+            entry = {"labels": {
+                "mv-ant-hinge":  {"type": "off", "x": "", "y": ""},
+                "mv-post-hinge": {"type": "off", "x": "", "y": ""},
+            }}
+        else:
+            entry = {"labels": {
+                "mv-ant-hinge": {"type": "point", "x": "100.0", "y": "200.0"},
+                "mv-post-hinge": {"type": "point", "x": "150.0", "y": "210.0"},
+                "lv-apex-endo":  {"type": "off",   "x": "",      "y": ""},
+            }}
         labels_all[fname] = entry
         if i < n - 2:
             train_set[fname] = entry
@@ -1007,6 +1220,41 @@ def build_unity(root: Path, n=6):
         ("labels-tune.json",  tune_set),
     ):
         (labels_dir / name).write_text(__import__("json").dumps(data))
+
+
+def build_mimic_echoqa(root: Path, n: int = 3):
+    """Synthetic MIMIC-EchoQA with stub MP4s and MIMICEchoQA.json."""
+    qa_dir = root / "MIMICEchoQA"
+    records = []
+    for i in range(n):
+        study_id = f"s9000{i:04d}"
+        image_id = f"9000{i:04d}_000{i}"
+        subject  = f"p1{i:07d}"
+        prefix   = f"p{subject[1:3]}"
+        video_rel = (
+            f"mimic-iv-echo/0.1/files/{prefix}/{subject}/{study_id}/{image_id}.mp4"
+        )
+        mp4_path = qa_dir / "0.1" / "files" / prefix / subject / study_id / f"{image_id}.mp4"
+        mp4_path.parent.mkdir(parents=True, exist_ok=True)
+        mp4_path.write_bytes(b"\x00" * 64)
+        records.append({
+            "messages_id":    f"msg-{i:04d}",
+            "videos":         [video_rel],
+            "question":       f"What is the severity of finding {i}?",
+            "answer":         ["Normal", "Mild", "Moderate"][i % 3],
+            "correct_option": ["A", "B", "C"][i % 3],
+            "option_A":       "Normal",
+            "option_B":       "Mild",
+            "option_C":       "Moderate",
+            "option_D":       "Severe",
+            "study":          study_id,
+            "image":          image_id,
+            "structure":      "Left Ventricle",
+            "report":         f"synthetic report {i}",
+            "view":           ["A4C", "PLAX", "A3C"][i % 3],
+            "split":          ["train", "val", "test"][i % 3],
+        })
+    (qa_dir / "MIMICEchoQA.json").write_text(json.dumps(records))
 
 
 def build_mimic_lvvol_a4c(root: Path, n=4):
@@ -1101,6 +1349,10 @@ def iugc2024_root(data_root):
     r = data_root / "IUGC2024"; build_iugc2024(r); return r
 
 @pytest.fixture(scope="session")
+def iugc2024_capstor_root(data_root):
+    r = data_root / "IUGC2024-capstor"; build_iugc2024_capstor(r); return r
+
+@pytest.fixture(scope="session")
 def maternal_fetal_us_video_intrapartum_root(data_root):
     r = data_root / "maternal-fetal-us-video-intrapartum"
     build_maternal_fetal_us_video_intrapartum(r)
@@ -1165,6 +1417,18 @@ def stu_hospital_root(data_root):
     r = data_root / "STU-Hospital-master"; build_stu_hospital(r); return r
 
 @pytest.fixture(scope="session")
+def fast_u_net_root(data_root):
+    r = data_root / "Fast-U-Net-main"; build_fast_u_net(r); return r
+
+@pytest.fixture(scope="session")
+def usanotai_root(data_root):
+    r = data_root / "USAnotAI-master"; build_usanotai(r); return r
+
+@pytest.fixture(scope="session")
+def lung_database_root(data_root):
+    r = data_root / "Lung-Database"; build_lung_database(r); return r
+
+@pytest.fixture(scope="session")
 def annotated_heterogeneous_us_db_root(data_root):
     r = data_root / "annotated_heterogeneous_us_db"; build_annotated_heterogeneous_us_db(r); return r
 
@@ -1187,6 +1451,11 @@ def ted_root(data_root):
 @pytest.fixture(scope="session")
 def unity_root(data_root):
     r = data_root / "Unity"; build_unity(r); return r
+
+@pytest.fixture(scope="session")
+def mimic_echoqa_root(data_root):
+    r = data_root / "MIMIC-IV-EchoQA"; build_mimic_echoqa(r); return r
+
 
 @pytest.fixture(scope="session")
 def mimic_lvvol_a4c_root(data_root):

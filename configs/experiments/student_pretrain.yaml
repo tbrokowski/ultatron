@@ -1,0 +1,42 @@
+# configs/experiments/student_pretrain.yaml
+# ==========================================
+# Student Hiera pretrain experiment metadata.
+#
+# Runnable config (flat YAML for student_training_smoke.py):
+#   configs/student/student_pretrain.yaml
+#
+# Submit:
+#   bash scripts/submit_student_pretrain.sh          # 32 GPU (8 nodes × 4)
+#   bash scripts/submit_student_pretrain.sh --nodes 4  # 16 GPU
+#
+# Env overrides: US_STUDENT_LR, US_STUDENT_STEPS, US_STUDENT_WARMUP, US_STUDENT_CKPT_DIR
+
+experiment:
+  name: student_pretrain_hiera_large
+  description: >
+    Single shared Hiera-L student encoder pretraining.
+    100k steps (30k/20k/40k/10k stages), 32 GH200 GPUs,
+    DINO+V-JEPA distillation + cross-view fusion.
+  tags:
+    - student
+    - hiera
+    - ssl
+    - pretraining
+
+config: configs/student/student_pretrain.yaml
+
+compute:
+  total_gpus: 32
+  gpus_per_node: 4
+  nodes: 8
+  precision: bf16
+
+paths:
+  checkpoint_dir: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain
+  manifest: dataset_exploration_outputs/run1/run1_train_v3.jsonl
+
+training:
+  total_steps: 100000
+  stage_fracs: [0.30, 0.20, 0.40, 0.10]   # 30k / 20k / 40k / 10k
+  lr: 1.0e-4
+  warmup_steps: 10000

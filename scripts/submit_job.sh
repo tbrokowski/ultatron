@@ -131,7 +131,7 @@ run1)
     CPUS=64       # 16 per GPU × 4 GPUs per node
     LOG_DIR="${LOG_ROOT}/run1"
     CKPT_DIR="${CKPT_ROOT}/run1"
-    MANIFEST_REPO="${REPO_DIR}/dataset_exploration_outputs/run1/run1_train_v2.jsonl"
+    MANIFEST_REPO="${REPO_DIR}/dataset_exploration_outputs/run1/run1_train_v3.jsonl"
     # Auto-resume from latest.pt if no explicit --resume given
     if [[ -z "$RESUME_ARG" && -f "${CKPT_DIR}/latest.pt" ]]; then
         RESUME_ARG="--resume ${CKPT_DIR}/latest.pt"
@@ -159,6 +159,7 @@ smoke)
 cat > "${INNERSCRIPT}" << INNER_EOF
 #!/bin/bash
 set -euo pipefail
+ulimit -c 0
 cd ${REPO_DIR}
 export PYTHONPATH="${REPO_DIR}:\${PYTHONPATH:-}"
 
@@ -186,7 +187,7 @@ export US_BUSI_ROOT=${BUSI_ROOT}
 export US_BENIN_ROOT=${BENIN_ROOT}
 export US_RSA_ROOT=${RSA_ROOT}
 
-pip install --quiet pydicom
+bash "${REPO_DIR}/scripts/ensure_deps.sh"
 
 echo "Running: python3 -m tests.dataset_adapters.training_smoke"
 echo "Dataset roots:"
@@ -217,10 +218,11 @@ INNER_EOF
 # ─────────────────────────────────────────────────── Minimal run ──────────────
 minimalrun)
 mkdir -p "${CKPT_DIR}"
-MANIFEST_ALL="${REPO_DIR}/dataset_exploration_outputs/run1/run1_train_v2.jsonl"
+MANIFEST_ALL="${REPO_DIR}/dataset_exploration_outputs/run1/run1_train_v3.jsonl"
 cat > "${INNERSCRIPT}" << INNER_EOF
 #!/bin/bash
 set -euo pipefail
+ulimit -c 0
 cd ${REPO_DIR}
 export PYTHONPATH="${REPO_DIR}:\${PYTHONPATH:-}"
 
@@ -302,6 +304,7 @@ mkdir -p "${CKPT_DIR}"
 cat > "${INNERSCRIPT}" << INNER_EOF
 #!/bin/bash
 set -euo pipefail
+ulimit -c 0
 cd ${REPO_DIR}
 export PYTHONPATH="${REPO_DIR}:\${PYTHONPATH:-}"
 
@@ -410,6 +413,7 @@ mkdir -p "${LOG_DIR}"
 cat > "${INNERSCRIPT}" << 'INNER_EOF'
 #!/bin/bash
 set -euo pipefail
+ulimit -c 0
 REPO_DIR="/users/tbrokowski/Ultatron"
 cd "${REPO_DIR}"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"

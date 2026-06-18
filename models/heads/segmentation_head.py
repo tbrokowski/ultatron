@@ -39,6 +39,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .hierarchical_seg import ASPPFusion, SegAdapter, SubPixelRefinement
+
 
 class LinearSegHead(nn.Module):
     """
@@ -196,6 +198,122 @@ class DPTSegHead(nn.Module):
                 f"output_size={self.output_size})")
 
 
+class EnhancedDPTSegHead(nn.Module):
+    """
+    Enhanced single-scale DPT head for frozen ViT / FM backbones (and student F4).
+
+    Parallels the UPerNetDecoder enhancements on the patch-token path:
+      - SegAdapter on tokens (zero-init residual)
+      - Conv neck with residual block
+      - ASPP context module on the spatial feature map
+      - Optional SubPixelRefinement (stride → 2× finer logits)
+
+  For the student encoder, ``patch_tokens`` is F4 (stride-32); for ViT backbones
+  it is the final patch grid (typically stride-16).
+    """
+
+    def __init__(
+        self,
+        embed_dim: int = 1024,
+        n_classes: int = 1,
+        patch_size: int = 16,
+        neck_channels: int = 256,
+        output_size: Optional[int] = None,
+        use_adapters: bool = True,
+        use_aspp: bool = True,
+        use_refine_up: bool = False,
+    ):
+        super().__init__()
+        self.embed_dim     = embed_dim
+        self.n_classes     = n_classes
+        self.patch_size    = patch_size
+        self.output_size   = output_size
+        self.use_adapters  = use_adapters
+        self.use_aspp      = use_aspp
+        self.use_refine_up = use_refine_up
+
+        if use_adapters:
+            self.adapter = SegAdapter(embed_dim)
+
+        self.proj = nn.Sequential(
+            nn.Linear(embed_dim, neck_channels),
+            nn.GELU(),
+        )
+
+        def _conv_block(c: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Conv2d(c, c, 3, padding=1, bias=False),
+                nn.BatchNorm2d(c),
+                nn.GELU(),
+                nn.Conv2d(c, c, 3, padding=1, bias=False),
+                nn.BatchNorm2d(c),
+            )
+
+        self.neck = _conv_block(neck_channels)
+        self.aspp = ASPPFusion(neck_channels, neck_channels) if use_aspp else None
+        self.head = nn.Conv2d(neck_channels, n_classes, 1)
+        if use_refine_up:
+            self.refine_head = SubPixelRefinement(neck_channels, n_classes)
+
+    def forward(
+        self,
+        patch_tokens: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        B, N, D = patch_tokens.shape
+        ph = pw = int(N ** 0.5)
+
+        tokens = self.adapter(patch_tokens) if self.use_adapters else patch_tokens
+        feat = self.proj(tokens)
+        feat = feat.reshape(B, ph, pw, -1).permute(0, 3, 1, 2).contiguous()
+        feat = feat + self.neck(feat)
+        if self.aspp is not None:
+            feat = self.aspp(feat)
+
+        if self.output_size is not None:
+            feat = F.interpolate(
+                feat,
+                size=(self.output_size, self.output_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+            if padding_mask is not None:
+                pm = F.interpolate(
+                    padding_mask.unsqueeze(1).float(),
+                    size=(self.output_size, self.output_size),
+                    mode="nearest",
+                )
+                feat = feat * pm
+
+        coarse = self.head(feat)
+
+        if self.use_refine_up:
+            logits = self.refine_head(feat, coarse)
+            out_h, out_w = logits.shape[-2:]
+            if padding_mask is not None:
+                pm = F.interpolate(
+                    padding_mask.unsqueeze(1).float(),
+                    size=(out_h, out_w),
+                    mode="nearest",
+                ).squeeze(1).bool()
+                logits = logits * pm.unsqueeze(1).float()
+            return logits
+
+        if padding_mask is not None and self.output_size is None:
+            coarse = coarse * padding_mask.unsqueeze(1).float()
+        return coarse
+
+    def __repr__(self) -> str:
+        flags = (
+            f"adapters={self.use_adapters}, aspp={self.use_aspp}, "
+            f"refine_up={self.use_refine_up}"
+        )
+        return (
+            f"EnhancedDPTSegHead(embed_dim={self.embed_dim}, "
+            f"n_classes={self.n_classes}, output_size={self.output_size}, {flags})"
+        )
+
+
 def build_seg_head(
     embed_dim: int,
     n_classes: int,
@@ -208,11 +326,13 @@ def build_seg_head(
 
     Parameters
     ----------
-    head_type : "linear" or "dpt"
+    head_type : "linear", "dpt" (legacy single-scale), or "dpt_enhanced"
     """
     if head_type == "linear":
         return LinearSegHead(embed_dim, n_classes, patch_size)
-    elif head_type == "dpt":
+    if head_type in ("dpt", "dpt_enhanced"):
+        use_enhanced = head_type == "dpt_enhanced" or kwargs.pop("enhanced", True)
+        if use_enhanced:
+            return EnhancedDPTSegHead(embed_dim, n_classes, patch_size, **kwargs)
         return DPTSegHead(embed_dim, n_classes, patch_size, **kwargs)
-    else:
-        raise ValueError(f"Unknown head_type: {head_type!r}. Choose 'linear' or 'dpt'.")
+    raise ValueError(f"Unknown head_type: {head_type!r}. Choose 'linear' or 'dpt'.")

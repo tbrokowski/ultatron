@@ -1,0 +1,36 @@
+# configs/finetune/fetal_planes_db.yaml
+# FETAL_PLANES_DB — 6-class fetal plane classification (frozen backbone + cls head)
+#
+# Official test split from dataset metadata; val carved from train patients (10%).
+# OpenUS linear-probe style: 224×224, AdamW lr=1e-3, 100 epochs.
+#
+# Usage:
+#   python -m finetune.experiments.fetal_planes_db \
+#     --checkpoint /path/to/stage1_end.pt \
+#     --data-root  /capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FETAL-PLANES-DB \
+#     --config     configs/finetune/fetal_planes_db.yaml \
+#     --output-dir dataset_exploration_outputs/finetune/fetal_planes_db
+
+dataset_root: "/capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/FETAL-PLANES-DB"
+
+model:
+  image_backbone: dinov3_l
+  video_backbone: vjepa2_l
+  frozen_teacher: null
+  dtype: bfloat16
+
+finetune:
+  lr:           1.0e-3
+  weight_decay: 0.0
+  max_epochs:   100
+  batch_size:   16
+  num_workers:  4
+  head_type:    linear
+  patience:     20
+  monitor:      val_acc
+  monitor_mode: max
+  freeze_backbone: true
+  input_size:   224
+  output_size:  224
+  log_every:    5
+  checkpoint_best: true

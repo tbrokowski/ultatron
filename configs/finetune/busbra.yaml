@@ -1,0 +1,56 @@
+# configs/finetune/busbra.yaml
+# ============================================================
+# BUS-BRA breast lesion segmentation
+#
+# Split: OpenUS fold-0 (1200 train / 299 val / 376 test)
+# Head:  same UPerNet recipe as BUSI (frozen backbone + trainable head)
+# Prepare split manifest once:
+#   python scripts/prepare_busbra_openus_split.py
+#
+# Usage:
+#   python -m finetune.experiments.busbra --config configs/finetune/busbra.yaml ...
+# ============================================================
+
+dataset_root: "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSBRA"
+
+model:
+  image_backbone: dinov3_l
+  video_backbone: vjepa2_l
+  frozen_teacher: null
+  dtype: bfloat16
+
+finetune:
+  # ── Optimiser (BUSI-style head-only probing) ────────────────────────────────
+  lr:           3.0e-4
+  weight_decay: 0.01
+  max_epochs:   300
+  batch_size:   8
+  num_workers:  4
+
+  # ── Head (student: upernet; ViT/FMs: dpt via comparison sweep) ──────────────
+  head_type:         upernet
+  freeze_backbone:   true
+
+  # ── BUS-BRA / OpenUS split ──────────────────────────────────────────────────
+  cv_fold:           0
+  split_manifest:    dataset_exploration_outputs/busbra_openus/split_manifest.json
+
+  # ── Early stopping ───────────────────────────────────────────────────────────
+  patience:      80
+  monitor:       val_dice
+  monitor_mode:  max
+
+  # ── Resolution (native-friendly; BUS-BRA images ~274–455 px tall) ─────────────
+  input_size:    500
+  output_size:   500
+
+  # ── Enhanced UPerNet head (matches configs/finetune/busi.yaml) ───────────────
+  boundary_loss_weight:    0.5
+  refine_up:               true
+  seg_use_adapters:        true
+  seg_use_aspp:            true
+  seg_use_attention_gates: true
+
+  # ── Logging / checkpointing ──────────────────────────────────────────────────
+  log_every:       5
+  checkpoint_best: true

@@ -29,6 +29,14 @@ finetune:
   head_type:  dpt
 
 
+  # ── CAMUS protocol (Leclerc et al., IEEE TMI 2019) ─────────────────────────
+  # Patient split: folds 1–8 train (IDs 1–400), fold 9 val (401–450), fold 10 test (451–500).
+  # Training variant: lv_endo | lv_epi | la | multiclass (paired metrics only).
+  camus_variant: lv_epi
+  camus_training_mode: binary
+  lv_target: lv_structures
+  camus_quality_filter: false   # set true for TMI Table III (Good + Medium only)
+
   # ── Early stopping ───────────────────────────────────────────────────────────
   patience:      50
   monitor:       val_dice      # metric key in compute_val_metrics() output
@@ -39,7 +47,15 @@ finetune:
 
   # ── Resolution ───────────────────────────────────────────────────────────────
   output_size: 224             # head output is upsampled to this before loss
+  input_size: 256              # fixed resize for all backbones (CAMUS native ~549×389)
+  native_max_px: 512           # only used when native_resolution=true and input_size=0
 
   # ── Logging / checkpointing ──────────────────────────────────────────────────
   log_every:       5           # log every N epochs
   checkpoint_best: true        # save best_head.pt when monitor improves
+
+  boundary_loss_weight: 0.5
+  refine_up: true
+  seg_use_adapters: true
+  seg_use_aspp: true
+  seg_use_attention_gates: true

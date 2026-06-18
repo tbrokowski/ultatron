@@ -16,13 +16,16 @@ ANATOMY_FINE_BY_FAMILY: Dict[str,list] = {
     "breast":  ["lesion_benign","lesion_malignant","lesion_unknown","mass","cyst","fibroadenoma"],
     "thyroid": ["nodule_benign","nodule_malignant","nodule_unknown","whole_thyroid"],
     "fetal":   ["fetal_head","fetal_brain","head_circumference","fetal_abdomen",
-                "fetal_femur","fetal_heart","maternal_cervix","pubic_symphysis"],
+                "fetal_abdominal_artery","fetal_liver","fetal_stomach",
+                "fetal_abdominal_vein","fetal_femur","fetal_heart",
+                "maternal_cervix","pubic_symphysis"],
     "lung":    [
         "b_line",
         "a_line",
         "consolidation",
         "pleural_effusion",
         "pleural_line",
+        "rib",
         "whole_lung",
         "confluent_b_line",
         "large_consolidation",
@@ -63,8 +66,14 @@ _add(["fetal head","fetal_head"],"fetal","fetal_head")
 _add(["head circumference","hc","head_circumference"],"fetal","head_circumference")
 _add(["fetal brain"],"fetal","fetal_brain")
 _add(["fetal abdomen","fetal_abdomen"],"fetal","fetal_abdomen")
+_add(["fetal abdominal artery","fetal_abdominal_artery","umbilical artery"],"fetal","fetal_abdominal_artery")
+_add(["fetal liver","fetal_liver"],"fetal","fetal_liver")
+_add(["fetal stomach","fetal_stomach"],"fetal","fetal_stomach")
+_add(["fetal abdominal vein","fetal_abdominal_vein","umbilical vein"],"fetal","fetal_abdominal_vein")
 _add(["maternal cervix","cervix"],"fetal","maternal_cervix")
 _add(["b-line","b_line","bline","vertical_artifact"],"lung","b_line")
+_add(["rib","ribs"],"lung","rib")
+_add(["pleural line","pleural_line"],"lung","pleural_line")
 _add(["consolidation","covid","pneumonia"],"lung","consolidation")
 _add(["confluent b-lines","confluent_b_lines","confluent_b_line"],"lung","confluent_b_line")
 _add(["large consolidations","large_consolidation","large consolidation"],"lung","large_consolidation")

@@ -60,6 +60,33 @@ def tus_rec_root_flat(tmp_path_factory):
     return root
 
 
+@pytest.fixture(scope="module")
+def tus_rec_root_zenodo(tmp_path_factory):
+    """
+    Zenodo download layout (matches capstor staging):
+      calib_matrix.csv
+      train_part1/
+        000/
+          LH_Par_C_DtP.h5
+          RH_rotating.h5
+        001/
+          LH_fanning.h5
+    """
+    root = tmp_path_factory.mktemp("TUS_REC_zenodo")
+    (root / "train_part1" / "000").mkdir(parents=True)
+    (root / "train_part1" / "001").mkdir(parents=True)
+    for subj, scans in [
+        ("000", ["LH_Par_C_DtP.h5", "RH_rotating.h5"]),
+        ("001", ["LH_fanning.h5"]),
+    ]:
+        for fname in scans:
+            (root / "train_part1" / subj / fname).write_bytes(b"\x00" * 64)
+    (root / "calib_matrix.csv").write_text(
+        "scaling_from_pixel_to_mm,spatial_calibration\n0.15,identity\n"
+    )
+    return root
+
+
 class TestTUSRECAdapter:
 
     def test_import(self):
@@ -139,6 +166,41 @@ class TestTUSRECAdapter:
         from data.adapters.muscle.tus_rec import TUSRECAdapter
         entries = list(TUSRECAdapter(root=tus_rec_root_flat).iter_entries())
         assert len(entries) == 2
+
+    def test_zenodo_train_part1_layout(self, tus_rec_root_zenodo):
+        """Zenodo/capstor layout: train_part1/ under dataset root."""
+        from data.adapters.muscle.tus_rec import TUSRECAdapter
+        entries = list(TUSRECAdapter(root=tus_rec_root_zenodo).iter_entries())
+        assert len(entries) == 3
+        assert all("train_part1" in e.image_paths[0] for e in entries)
+        assert entries[0].source_meta["calib_csv"].endswith("calib_matrix.csv")
+        assert "train_part1" not in entries[0].source_meta["calib_csv"]
+
+    def test_zenodo_train_part1_and_part2_layout(self, tmp_path):
+        """Both train_part1/ and train_part2/ are scanned for full 2024 data."""
+        from data.adapters.muscle.tus_rec import TUSRECAdapter
+        root = tmp_path / "TUS_REC_parts"
+        for part, subj, scans in [
+            ("train_part1", "000", ["LH_Par_C_DtP.h5", "RH_Per_L_DtP.h5"]),
+            ("train_part2", "025", ["LH_Par_S_PtD.h5"]),
+        ]:
+            d = root / part / subj
+            d.mkdir(parents=True)
+            for fname in scans:
+                (d / fname).write_bytes(b"\x00" * 64)
+        (root / "calib_matrix.csv").write_text("scaling_from_pixel_to_mm\n0.15\n")
+        entries = list(TUSRECAdapter(root=root).iter_entries())
+        assert len(entries) == 3
+        subjects = {e.source_meta["subject_id"] for e in entries}
+        assert subjects == {"000", "025"}
+
+    def test_zenodo_filename_parsing(self, tus_rec_root_zenodo):
+        from data.adapters.muscle.tus_rec import TUSRECAdapter
+        entries = list(TUSRECAdapter(root=tus_rec_root_zenodo).iter_entries())
+        zenodo = next(e for e in entries if "LH_Par_C_DtP" in e.image_paths[0])
+        assert zenodo.source_meta["side"] == "left"
+        assert zenodo.source_meta["motion"] == "Par_C_DtP"
+        assert zenodo.source_meta["scan_name"] == "LH_Par_C_DtP"
 
     def test_build_manifest_for_dataset(self, tus_rec_root, tmp_path):
         from data.schema.manifest import ManifestWriter, load_manifest

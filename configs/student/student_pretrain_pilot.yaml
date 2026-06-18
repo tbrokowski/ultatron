@@ -1,0 +1,190 @@
+# configs/student/student_pretrain_pilot.yaml
+# ============================================================
+# 15k-step pretrain pilot — same stack as full run, all 4 stages.
+#
+# Stage split: 25% image-dominant / 15% video-dominant / 50% combined / 10% phase-4
+#   → 3750 / 2250 / 7500 / 1500 steps at 15k total
+#
+# DEBUG OVERRIDE: stage_mixes below use 100/0 and 0/100 for stages 1–2 (exclusive
+# modalities) to simplify throughput debugging. Full pretrain uses 90/10 and 40/60
+# (see configs/student/student_pretrain.yaml and paper Table 1).
+#
+# Resolution: fixed 512px (no curriculum ramp) — validates throughput +
+# multi-node DDP at realistic batch sizes without 896px memory spikes.
+#
+# Usage:
+#   bash scripts/submit_student_pretrain.sh --pilot
+#   bash scripts/submit_student_pretrain.sh --pilot --nodes 4   # 16 GPU
+#
+# Video stage 2+ @ 512px, 32 frames: micro batch 1 + accum 2 (peak VRAM ~1×32 frames).
+# Effective global batch per optimizer step (32 ranks):
+#   image  32 × 2 × 32 = 2048    video  1 × 2 × 32 = 64    paired  4 × 2 × 32 = 256
+# Raise video effective batch via grad_accum (not micro batch) — accum does not add peak VRAM.
+# Do NOT park V-JEPA on CPU: ~10–50× slower teacher forward, dominates step time.
+# Safe to --resume from latest.pt; LR schedule unchanged (same samples/step).
+#   bash scripts/submit_student_pretrain.sh --pilot --resume
+
+manifest:
+  path: "dataset_exploration_outputs/run1/run1_train_v3.jsonl"
+  root_remap: {}
+  exclude_datasets:
+    - BEHSOF  # encrypted image_Data.zip (BEH*/Image*.jpg) — unreadable without password
+    - BITE    # unreadable MINC volumes on scratch
+    - MIMIC-IV-ECHO  # many empty DICOMs on scratch → DDP stragglers in stage 3 video/paired
+
+training:
+  total_steps: 15000
+  log_every: 10
+  metrics_every: 10    # stage-3 visibility; was 50 (no output for ~15+ min looked like a hang)
+  ckpt_every: 1000      # was 500 — large ckpts; less frequent saves
+  grad_accum_steps: 2   # peak VRAM = one micro-batch; image 2048 / video 64 global batch
+
+  stage_fracs: [0.25, 0.15, 0.50, 0.10]
+  stage3_curriculum_boundaries: [0.33, 0.67]
+
+  optimizer: adamw
+  lr: 5.0e-5
+  lr_min: 1.0e-6
+  weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  warmup_steps: 1000
+  use_amp: true
+
+compute:
+  total_gpus: 32
+  gpus_per_node: 4
+  nodes: 8
+
+loaders:
+  image_batch_size: 32   # ~47 GB/GPU at 512px; headroom for ALP token interpolation
+  video_batch_size: 1    # 32 frames × 1 clip/rank; B×T=32 matches prior 2×16 memory
+  paired_batch_size: 2
+  num_workers: 2   # stage-3 dual teachers + 3 streams OOM'd at 4 workers (job 2544897)
+  pin_memory: true
+
+transforms:
+  image:
+    n_global_crops: 2
+    n_local_crops: 0
+    max_global_crop_px: 512
+    min_crop_px: 32
+    mask_strategy: both
+    mask_ratio: 0.40
+    spatial_mask_ratio: 0.40
+    hflip_p: 0.0
+    vflip_p: 0.0
+    rotation_p: 0.0
+    grayscale_p: 0.5
+    color_jitter_p: 0.2
+    jitter_brightness: 0.2
+    jitter_contrast: 0.2
+    jitter_saturation: 0.1
+    apply_speckle: true
+    speckle_sigma: 0.10
+    apply_blur: false
+    apply_solarize: false
+    freq_mask:
+      mask_ratio: 0.40
+
+  video:
+    n_frames: 32
+    max_n_frames: 64
+    temporal_stride: 2
+    tube_mask_ratio: 0.75
+    max_crop_px: 512
+    min_crop_px: 64
+    mask_strategy: both
+    tube_size: 2
+    spatial_mask_ratio: 0.40
+    hflip_p: 0.0
+    vflip_p: 0.0
+    rotation_p: 0.0
+    grayscale_p: 0.5
+    color_jitter_p: 0.2
+    jitter_brightness: 0.2
+    jitter_contrast: 0.2
+    jitter_saturation: 0.1
+    apply_speckle: true
+    speckle_sigma: 0.08
+    apply_blur: false
+    apply_solarize: false
+    freq_mask:
+      mask_ratio: 0.75
+
+# Fixed resolution for pilot — no step-based ramps (see student_pretrain.yaml for full run)
+resolution_curriculum: []
+
+curriculum:
+  total_training_steps: 15000
+  image_samples_per_epoch: 50000
+  video_samples_per_epoch: 10000
+  # ALP tier expansion + mask-ratio ramps (see CurriculumSampler in samplers.py).
+  # Pilot uses faster boundaries than full 300k run so curriculum is observable in 15k.
+  # Delay ALP tier-2 (mask 0.65) until after image stage ends at step 3750.
+  alp_stage_fracs: [0.25, 0.50]
+  # Clip length by ALP stage [stage1, stage2, stage3]. Stage-2 video warm-start uses 32f.
+  alp_n_frames: [16, 32, 32]
+  # OpenUS-aligned cosine schedules (main_openus.py: alpha_init/final, m_t ramp).
+  alp_alpha_init: 0.1
+  alp_alpha_final: 0.9
+  alp_guidance_threshold_init: 0.1
+  alp_guidance_threshold_final: 0.9
+
+alp:
+  disk_cache_dir: null   # defaults to {ckpt_dir}/alp_cache
+  max_entries: 1000000
+  score_ema: 0.9           # online EMA for S_k / H_k (higher = smoother)
+  hardness_temperature: 1.0
+
+student_data:
+  image_batch_size: 32
+  video_batch_size: 1
+  paired_batch_size: 2
+  num_workers: 2
+  patch_size: 4
+  stage_mixes:
+    - {image_frac: 1.00, video_frac: 0.00, paired_frac: 0.00}  # DEBUG: image-only (prod: 0.90/0.10)
+    - {image_frac: 0.00, video_frac: 1.00, paired_frac: 0.00}  # DEBUG: video-only (prod: 0.40/0.60)
+    - {image_frac: 0.50, video_frac: 0.30, paired_frac: 0.20}  # stage 3: combined
+    - {image_frac: 0.50, video_frac: 0.50, paired_frac: 0.00}  # stage 4: seg heads
+
+model:
+  student:
+    hiera_variant: sam2_hiera_large
+    hiera_hf_cache_dir: null
+    temporal_mixing: factorized_attn
+    temporal_adapter_stages: [2, 3]
+    max_frames: 64   # temporal pos-enc table size; clip length set by alp_n_frames (32)
+    trainable_stages: null
+    align_dim: 1024
+    n_prototypes: 256
+    ema_momentum: 0.9995
+    dino_teacher_key: dinov3_l
+    vjepa_teacher_key: vjepa2_l
+    fusion_radius: 2
+    fusion_init_gate: -3.0
+    dtype: bfloat16
+
+loss_weights:
+  lam_global: 1.0
+  lam_patch: 1.0
+  lam_masked: 1.0
+  lam_proto: 0.25
+  lam_ema_max: 0.15
+  lam_ema_floor: 0.0
+  lam_ema_warmup_steps: 10000
+  lam_tube: 1.0
+  lam_temp: 0.5
+  lam_fused: 0.5
+  lam_preserve: 0.1
+  lam_fc: 0.5
+  lam_seg: 1.0
+  lam_seg_dice: 1.0
+
+pretrain:
+  hf_cache_dir: null
+  ckpt_dir: "/capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrainPilot"
+  save_stage_end_ckpts: true
+  loader_warmup_batches: 0   # stage-3 resume OOM during prefetch (jobs 2543314, 2544897)

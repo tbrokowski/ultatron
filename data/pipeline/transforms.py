@@ -55,6 +55,8 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from torch import Tensor
 
+from data.pipeline.alp_interface import NullALPReader
+
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -104,10 +106,20 @@ class ImageSSLTransformConfig:
     apply_solarize: bool = True
     solarize_thresh: float = 0.5
 
-    # Geometry
+    # Geometry (legacy bool flags; prefer hflip_p / vflip_p)
     allow_hflip: bool = False
     allow_vflip: bool = False
     max_rotation_deg: float = 15.0
+    hflip_p: float = 0.0
+    vflip_p: float = 0.0
+    rotation_p: float = 0.0
+
+    # EchoCare-style photometric (US defaults: no flips, greyscale + weak jitter)
+    grayscale_p: float = 0.0
+    color_jitter_p: float = 0.0
+    jitter_brightness: float = 0.2
+    jitter_contrast: float = 0.2
+    jitter_saturation: float = 0.1
 
     # ── Masking strategy ──────────────────────────────────────────────────────
     # "freq"    : frequency-domain band masking (default)
@@ -147,8 +159,22 @@ class VideoSSLTransformConfig:
     min_crop_px: int = 64
 
     allow_hflip: bool = False
+    allow_vflip: bool = False
     apply_speckle: bool = True
     speckle_sigma: float = 0.08
+    apply_blur: bool = False
+    blur_sigma: Tuple[float, float] = (0.1, 2.0)
+    apply_solarize: bool = False
+    solarize_thresh: float = 0.5
+    hflip_p: float = 0.0
+    vflip_p: float = 0.0
+    max_rotation_deg: float = 15.0
+    rotation_p: float = 0.0
+    grayscale_p: float = 0.0
+    color_jitter_p: float = 0.0
+    jitter_brightness: float = 0.2
+    jitter_contrast: float = 0.2
+    jitter_saturation: float = 0.1
 
     # ── Masking strategy ──────────────────────────────────────────────────────
     # "freq"    : frequency-domain band masking per temporal group (tube_size frames)
@@ -284,6 +310,125 @@ def ensure_rgb(x: Tensor) -> Tensor:
 def add_speckle_noise(x: Tensor, sigma: float = 0.1) -> Tensor:
     """Multiplicative Gaussian noise  y = x * (1 + σ·N(0,1))."""
     return torch.clamp(x * (1 + torch.randn_like(x) * sigma), 0.0, 1.0)
+
+
+# ── Shared geometric / photometric augmentations ───────────────────────────────
+
+@dataclass
+class AugmentParams:
+    """Sampled once per image crop or per video clip (shared across all T)."""
+    hflip: bool = False
+    vflip: bool = False
+    grayscale: bool = False
+    apply_jitter: bool = False
+    jitter_brightness: float = 1.0
+    jitter_contrast: float = 1.0
+    jitter_saturation: float = 1.0
+    apply_speckle: bool = False
+    speckle_sigma: float = 0.0
+    rotation_deg: float = 0.0
+    apply_blur: bool = False
+    blur_sigma: float = 1.0
+    apply_solarize: bool = False
+
+
+def _effective_flip_p(cfg, axis: str) -> float:
+    if axis == "h":
+        p = getattr(cfg, "hflip_p", 0.0)
+        if p <= 0.0 and getattr(cfg, "allow_hflip", False):
+            return 0.5
+        return p
+    p = getattr(cfg, "vflip_p", 0.0)
+    if p <= 0.0 and getattr(cfg, "allow_vflip", False):
+        return 0.5
+    return p
+
+
+def sample_augment_params(cfg) -> AugmentParams:
+    params = AugmentParams(
+        hflip=random.random() < _effective_flip_p(cfg, "h"),
+        vflip=random.random() < _effective_flip_p(cfg, "v"),
+        grayscale=random.random() < getattr(cfg, "grayscale_p", 0.0),
+        apply_jitter=random.random() < getattr(cfg, "color_jitter_p", 0.0),
+        apply_speckle=getattr(cfg, "apply_speckle", False) and random.random() < 0.5,
+        speckle_sigma=getattr(cfg, "speckle_sigma", 0.1),
+        apply_blur=getattr(cfg, "apply_blur", False) and random.random() < 0.5,
+        apply_solarize=getattr(cfg, "apply_solarize", False) and random.random() < 0.2,
+    )
+    if params.apply_jitter:
+        jb = getattr(cfg, "jitter_brightness", 0.2)
+        jc = getattr(cfg, "jitter_contrast", 0.2)
+        js = getattr(cfg, "jitter_saturation", 0.1)
+        params.jitter_brightness = random.uniform(max(0.0, 1.0 - jb), 1.0 + jb)
+        params.jitter_contrast = random.uniform(max(0.0, 1.0 - jc), 1.0 + jc)
+        params.jitter_saturation = random.uniform(max(0.0, 1.0 - js), 1.0 + js)
+    rot_p = getattr(cfg, "rotation_p", 0.0)
+    if rot_p > 0.0 and random.random() < rot_p:
+        max_deg = getattr(cfg, "max_rotation_deg", 0.0)
+        params.rotation_deg = random.uniform(-max_deg, max_deg)
+    if params.apply_blur:
+        blur_range = getattr(cfg, "blur_sigma", (0.1, 2.0))
+        if isinstance(blur_range, (list, tuple)) and len(blur_range) == 2:
+            params.blur_sigma = random.uniform(blur_range[0], blur_range[1])
+        else:
+            params.blur_sigma = float(blur_range)
+    return params
+
+
+def _apply_color_jitter(x: Tensor, params: AugmentParams) -> Tensor:
+    if params.jitter_brightness != 1.0:
+        x = torch.clamp(x * params.jitter_brightness, 0.0, 1.0)
+    if params.jitter_contrast != 1.0:
+        mean = x.mean(dim=(-2, -1), keepdim=True)
+        x = torch.clamp((x - mean) * params.jitter_contrast + mean, 0.0, 1.0)
+    if params.jitter_saturation != 1.0 and x.shape[0] >= 3:
+        grey = x.mean(dim=0, keepdim=True).expand_as(x)
+        x = torch.clamp(grey + (x - grey) * params.jitter_saturation, 0.0, 1.0)
+    return x
+
+
+def _apply_speckle_shared(x: Tensor, params: AugmentParams) -> Tensor:
+    if not params.apply_speckle or params.speckle_sigma <= 0.0:
+        return x
+    if x.dim() == 3:
+        return add_speckle_noise(x, params.speckle_sigma)
+    noise = torch.randn(1, x.shape[1], x.shape[2], x.shape[3], device=x.device, dtype=x.dtype)
+    return torch.clamp(x * (1 + noise * params.speckle_sigma), 0.0, 1.0)
+
+
+def apply_augment(x: Tensor, params: AugmentParams, cfg) -> Tensor:
+    """Apply augmentations to (C,H,W) or (T,C,H,W) using fixed params."""
+    solarize_thresh = getattr(cfg, "solarize_thresh", 0.5)
+
+    def _aug_frame(frame: Tensor) -> Tensor:
+        f = frame
+        if params.rotation_deg != 0.0:
+            f = T.functional.rotate(
+                f, params.rotation_deg,
+                interpolation=T.InterpolationMode.BILINEAR,
+                fill=0.0,
+            )
+        if params.hflip:
+            f = torch.flip(f, dims=(-1,))
+        if params.vflip:
+            f = torch.flip(f, dims=(-2,))
+        if params.grayscale:
+            grey = f.mean(dim=0, keepdim=True)
+            f = grey.expand_as(f)
+        if params.apply_jitter:
+            f = _apply_color_jitter(f, params)
+        f = _apply_speckle_shared(f, params)
+        if params.apply_blur and params.blur_sigma > 0.0:
+            f = T.functional.gaussian_blur(f, kernel_size=23, sigma=params.blur_sigma)
+        if params.apply_solarize:
+            f = torch.where(f < solarize_thresh, f, 1.0 - f)
+        return f
+
+    if x.dim() == 3:
+        return _aug_frame(x)
+    if x.dim() == 4:
+        return torch.stack([_aug_frame(x[t]) for t in range(x.shape[0])], dim=0)
+    raise ValueError(f"apply_augment expects 3D or 4D tensor, got {tuple(x.shape)}")
 
 
 def pad_to_patch_multiple(x: Tensor, patch_size: int) -> Tuple[Tensor, Tensor]:
@@ -579,17 +724,25 @@ def freq_mask_image_alp(
     hardness: Optional[Tensor],
     alpha: float,
     mask_ratio_override: Optional[float] = None,
+    guidance_threshold: Optional[float] = None,
 ) -> Tuple[Tensor, Tensor]:
+    score = _blend_alp_score(saliency, hardness, alpha)
     alp: Optional[Tensor] = None
-    if saliency is not None or hardness is not None:
-        s    = saliency if saliency is not None else torch.zeros_like(hardness)
-        h    = hardness if hardness is not None else torch.zeros_like(saliency)
-        raw  = alpha * s + (1.0 - alpha) * h
-        flat = raw.flatten() - raw.max()
-        flat = torch.exp(flat)
-        alp  = (flat / (flat.sum() + 1e-8)).reshape(raw.shape)
-    return freq_mask_image(x, cfg, patch_size=patch_size, alp=alp,
-                           mask_ratio_override=mask_ratio_override)
+    if score is not None:
+        flat = score.flatten().clamp(min=0.0)
+        alp = (flat / (flat.sum() + 1e-8)).reshape(score.shape)
+    masked_img, spatial_mask = freq_mask_image(
+        x, cfg, patch_size=patch_size, alp=alp,
+        mask_ratio_override=mask_ratio_override,
+    )
+    if score is not None and guidance_threshold is not None:
+        mask_ratio = (
+            mask_ratio_override if mask_ratio_override is not None else cfg.mask_ratio
+        )
+        spatial_mask = guided_priority_mask(
+            saliency, hardness, alpha, mask_ratio, guidance_threshold,
+        )
+    return masked_img, spatial_mask
 
 
 # ── Spatial masking (for "spatial" and "both" strategies) ─────────────────────
@@ -703,24 +856,76 @@ def random_patch_mask(h: int, w: int, patch_size: int, mask_ratio: float) -> Ten
     return mask.reshape(ph, pw)
 
 
+def _minmax_norm(t: Tensor) -> Tensor:
+    """Per-grid min-max normalization (OpenUS pre-blend convention)."""
+    tmin, tmax = t.min(), t.max()
+    return (t - tmin) / (tmax - tmin + 1e-8)
+
+
+def _blend_alp_score(
+    saliency: Optional[Tensor],
+    hardness: Optional[Tensor],
+    alpha: float,
+) -> Optional[Tensor]:
+    if saliency is None and hardness is None:
+        return None
+    s = _minmax_norm(saliency) if saliency is not None else torch.zeros_like(hardness)
+    h = _minmax_norm(hardness) if hardness is not None else torch.zeros_like(saliency)
+    return alpha * s + (1.0 - alpha) * h
+
+
+def guided_priority_mask(
+    saliency: Optional[Tensor],
+    hardness: Optional[Tensor],
+    alpha: float,
+    mask_ratio: float,
+    guidance_threshold: float,
+) -> Tensor:
+    """
+    OpenUS ``GlobalAttGuidedMask_2`` style patch selection.
+
+    Top ``guidance_threshold`` fraction of patches (by ALP score) are
+    preferentially masked; the rest of the ``mask_ratio`` budget is filled
+    randomly from remaining patches.
+    """
+    score = _blend_alp_score(saliency, hardness, alpha)
+    if score is None:
+        raise ValueError("guided_priority_mask requires saliency and/or hardness")
+    ph, pw = score.shape
+    flat = score.flatten()
+    n_total = flat.numel()
+    n_mask = max(1, int(n_total * mask_ratio))
+    top_k = max(1, int(n_total * guidance_threshold))
+    top_k = min(top_k, n_mask)
+
+    _, top_idx = flat.topk(top_k)
+    mask = torch.zeros(n_total, dtype=torch.bool)
+    mask[top_idx] = True
+
+    remaining = n_mask - top_k
+    if remaining > 0:
+        non_top = (~mask).nonzero(as_tuple=True)[0]
+        if len(non_top) > 0:
+            n_pick = min(remaining, len(non_top))
+            perm = non_top[torch.randperm(len(non_top))[:n_pick]]
+            mask[perm] = True
+    return mask.reshape(ph, pw)
+
+
 def priority_weighted_mask(
     saliency: Optional[Tensor],
     hardness: Optional[Tensor],
     alpha: float,
     mask_ratio: float,
+    guidance_threshold: float = 0.5,
 ) -> Tensor:
+    """ALP-guided spatial mask; delegates to OpenUS-style top-k selection."""
     if saliency is None and hardness is None:
-        return random_patch_mask(14 * 16, 14 * 16, 16, mask_ratio)
-    s = saliency if saliency is not None else torch.zeros_like(hardness)
-    h = hardness if hardness is not None else torch.zeros_like(saliency)
-    alp    = alpha * s + (1 - alpha) * h
-    ph, pw = alp.shape
-    flat   = alp.flatten()
-    idx    = torch.multinomial(torch.softmax(flat, dim=0),
-                               int(ph * pw * mask_ratio), replacement=False)
-    mask   = torch.zeros(ph * pw, dtype=torch.bool)
-    mask[idx] = True
-    return mask.reshape(ph, pw)
+        ph = pw = int(math.sqrt(max(1, int(1 / mask_ratio))))
+        return random_patch_mask(ph * 16, pw * 16, 16, mask_ratio)
+    return guided_priority_mask(
+        saliency, hardness, alpha, mask_ratio, guidance_threshold,
+    )
 
 
 def random_tube_mask(
@@ -758,6 +963,20 @@ def _random_block_mask(ph: int, pw: int, n_mask: int) -> Tensor:
 
 # ── Masking dispatch ──────────────────────────────────────────────────────────
 
+def _zero_patches_from_mask(
+    x: Tensor,
+    patch_size: int,
+    spatial_mask: Tensor,
+) -> Tensor:
+    """Zero pixel regions for True entries in (ph, pw) spatial_mask."""
+    mask_px = (
+        spatial_mask
+        .repeat_interleave(patch_size, dim=0)
+        .repeat_interleave(patch_size, dim=1)
+    )
+    return x * (~mask_px).unsqueeze(0).to(dtype=x.dtype)
+
+
 def _apply_image_mask(
     crop: Tensor,             # (C, H, W)
     cfg: ImageSSLTransformConfig,
@@ -765,6 +984,7 @@ def _apply_image_mask(
     hardness: Optional[Tensor],
     alpha: float,
     mask_ratio_override: Optional[float],
+    guidance_threshold: Optional[float] = None,
 ) -> Tuple[Tensor, Tensor]:
     """
     Apply the configured masking strategy to a single image crop.
@@ -783,27 +1003,40 @@ def _apply_image_mask(
             crop, cfg.freq_mask, patch_size,
             saliency, hardness, alpha,
             mask_ratio_override=mask_ratio_override,
+            guidance_threshold=guidance_threshold,
         )
 
     elif strategy == MASK_STRATEGY_SPATIAL:
         ratio = mask_ratio_override if mask_ratio_override is not None \
                 else cfg.spatial_mask_ratio
+        if (saliency is not None or hardness is not None) and guidance_threshold is not None:
+            spatial_mask = guided_priority_mask(
+                saliency, hardness, alpha, ratio, guidance_threshold,
+            )
+            return _zero_patches_from_mask(crop, patch_size, spatial_mask), spatial_mask
         return spatial_patch_mask(crop, patch_size, ratio, block_style=False)
 
     elif strategy == MASK_STRATEGY_BOTH:
-        # Step 1: frequency masking
+        # Step 1: frequency masking (optionally ALP-biased band selection)
         freq_masked, freq_spatial = freq_mask_image_alp(
             crop, cfg.freq_mask, patch_size,
             saliency, hardness, alpha,
             mask_ratio_override=mask_ratio_override,
+            guidance_threshold=guidance_threshold,
         )
-        # Step 2: additional spatial masking on the already freq-masked crop
+        # Step 2: spatial masking — OpenUS guided top-k when scores are available
         ratio = mask_ratio_override if mask_ratio_override is not None \
                 else cfg.spatial_mask_ratio
-        spatial_masked, spatial_mask = spatial_patch_mask(
-            freq_masked, patch_size, ratio, block_style=False
-        )
-        # Union mask: patch is masked if either strategy flagged it
+        if saliency is not None or hardness is not None:
+            gt = guidance_threshold if guidance_threshold is not None else 0.5
+            spatial_mask = guided_priority_mask(
+                saliency, hardness, alpha, ratio, gt,
+            )
+            spatial_masked = _zero_patches_from_mask(freq_masked, patch_size, spatial_mask)
+        else:
+            spatial_masked, spatial_mask = spatial_patch_mask(
+                freq_masked, patch_size, ratio, block_style=False,
+            )
         combined_mask = freq_spatial | spatial_mask
         return spatial_masked, combined_mask
 
@@ -938,10 +1171,48 @@ class ImageSSLTransform:
     """
 
     def __init__(self, cfg: ImageSSLTransformConfig):
-        self.cfg  = cfg
-        self._blur = T.RandomApply(
-            [T.GaussianBlur(kernel_size=23, sigma=cfg.blur_sigma)], p=0.5
-        ) if cfg.apply_blur else None
+        self.cfg = cfg
+        self.alp_reader = None  # set by ImageSSLDataset (NullALPReader default)
+
+    def _alp_patch_scores(
+        self,
+        sample_id: Optional[str],
+        alpha: float,
+        ph: int,
+        pw: int,
+        saliency: Optional[Tensor],
+        hardness: Optional[Tensor],
+    ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
+        if saliency is not None or hardness is not None:
+            return saliency, hardness
+        reader = self.alp_reader
+        if reader is None or not sample_id or isinstance(reader, NullALPReader):
+            return None, None
+        n_patches = ph * pw
+        if hasattr(reader, "get_saliency_hardness"):
+            sal_np, hard_np = reader.get_saliency_hardness(
+                sample_id, n_patches=n_patches,
+            )
+            if sal_np is None and hard_np is None:
+                alp = reader.get(sample_id, alpha=alpha, n_patches=n_patches)
+                if alp is None:
+                    return None, None
+                grid = torch.from_numpy(alp).reshape(ph, pw).float()
+                return grid, grid
+            sal_t = (
+                torch.from_numpy(sal_np).reshape(ph, pw).float()
+                if sal_np is not None else None
+            )
+            hard_t = (
+                torch.from_numpy(hard_np).reshape(ph, pw).float()
+                if hard_np is not None else None
+            )
+            return sal_t, hard_t
+        alp = reader.get(sample_id, alpha=alpha, n_patches=n_patches)
+        if alp is None:
+            return None, None
+        grid = torch.from_numpy(alp).reshape(ph, pw).float()
+        return grid, grid
 
     def __call__(
         self,
@@ -950,6 +1221,8 @@ class ImageSSLTransform:
         hardness: Optional[Tensor] = None,
         alpha: float = 1.0,
         mask_ratio_override: Optional[float] = None,
+        sample_id: Optional[str] = None,
+        guidance_threshold: Optional[float] = None,
     ) -> dict:
         # Preserve original channel count (1 for greyscale, 3 for RGB)
         x = to_canonical_tensor(img)   # (C, H, W)
@@ -962,9 +1235,15 @@ class ImageSSLTransform:
         raw0 = _native_crop(x, c.global_crop_scale, c.patch_size,
                             c.min_crop_px, c.max_global_crop_px)
         raw0 = self._photometric(raw0)
+        ph0 = raw0.shape[-2] // c.patch_size
+        pw0 = raw0.shape[-1] // c.patch_size
+        sal0, hard0 = self._alp_patch_scores(
+            sample_id, alpha, ph0, pw0, saliency, hardness,
+        )
         # Apply masking strategy before padding so it operates on real pixels only
         m0, spatial_mask = _apply_image_mask(
-            raw0, c, saliency, hardness, alpha, mask_ratio_override
+            raw0, c, sal0, hard0, alpha, mask_ratio_override,
+            guidance_threshold=guidance_threshold,
         )
         padded0, pmask0 = pad_to_patch_multiple(m0, c.patch_size)
         global_crops.append(padded0)
@@ -1003,14 +1282,7 @@ class ImageSSLTransform:
         }
 
     def _photometric(self, x: Tensor) -> Tensor:
-        c = self.cfg
-        if c.apply_speckle and random.random() < 0.5:
-            x = add_speckle_noise(x, c.speckle_sigma)
-        if c.apply_solarize and random.random() < 0.2:
-            x = torch.where(x < c.solarize_thresh, x, 1 - x)
-        if self._blur is not None:
-            x = self._blur(x)
-        return x
+        return apply_augment(x, sample_augment_params(self.cfg), self.cfg)
 
 
 # ── Video SSL Transform ───────────────────────────────────────────────────────
@@ -1084,8 +1356,7 @@ class VideoSSLTransform:
 
         clip, padding_mask = self._native_spatial_crop(clip)
 
-        if c.apply_speckle and random.random() < 0.5:
-            clip = add_speckle_noise(clip, random.uniform(0, c.speckle_sigma))
+        clip = apply_augment(clip, sample_augment_params(c), c)
 
         visible_clip, tube_mask = _apply_video_mask(
             clip, c, mask_ratio, self.patch_size
@@ -1141,3 +1412,30 @@ class VideoSSLTransform:
         ch = max(ps, min(c.max_crop_px, round(H / ps) * ps))
         cw = max(ps, min(c.max_crop_px, round(W / ps) * ps))
         return clip[:, :, :ch, :cw], torch.ones(ch // ps, cw // ps, dtype=torch.bool)
+
+
+def build_transform_configs(
+    transforms_cfg: dict,
+) -> Tuple[ImageSSLTransformConfig, VideoSSLTransformConfig]:
+    """Build image/video transform configs from a YAML ``transforms`` section."""
+    img_raw = dict(transforms_cfg.get("image", {}))
+    vid_raw = dict(transforms_cfg.get("video", {}))
+    img_freq = img_raw.pop("freq_mask", {})
+    vid_freq = vid_raw.pop("freq_mask", {})
+
+    for raw in (img_raw, vid_raw):
+        for key in ("global_crop_scale", "local_crop_scale", "blur_sigma", "crop_scale"):
+            if key in raw and isinstance(raw[key], list):
+                raw[key] = tuple(raw[key])
+
+    img_tcfg = ImageSSLTransformConfig(
+        **img_raw,
+        freq_mask=FreqMaskConfig(**img_freq) if img_freq else FreqMaskConfig(),
+    )
+    vid_tcfg = VideoSSLTransformConfig(
+        **vid_raw,
+        freq_mask=FreqMaskConfig(**vid_freq) if vid_freq else FreqMaskConfig(
+            mask_ratio=0.75,
+        ),
+    )
+    return img_tcfg, vid_tcfg

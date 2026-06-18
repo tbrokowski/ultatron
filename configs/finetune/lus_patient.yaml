@@ -1,9 +1,10 @@
 # configs/finetune/lus_patient.yaml
 # ============================================================
-# Finetune hyperparameters for LUS patient-level classification.
-# Tasks: TB, Pneumonia, COVID (binary per task, multi-label head)
+# Finetune hyperparameters for LUS patient-level TB classification.
+# Task: TB vs no-TB (binary, patient-level)
 # Datasets: Benin-LUS + RSA-LUS (pooled, patient-level split)
 # Branch: video branch (vid_branch frozen teacher, clip_cls token)
+# Head: Gated Attention MIL pool → MLPClsHead
 # ============================================================
 
 dataset_root_benin: "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
@@ -25,20 +26,21 @@ finetune:
   num_workers:  4
 
   # ── Head architecture ──────────────────────────────────────────────────────
-  # multi-label linear head: clip_cls → 3-way sigmoid (tb/pneumonia/covid)
-  head_type:  linear
+  head_type:  mil
+  mil_hidden_dim: 256
 
   # ── Early stopping ─────────────────────────────────────────────────────────
   patience:      40
-  monitor:       val_auc_macro   # patient-level macro AUC across 3 tasks
+  monitor:       val_auc_tb
   monitor_mode:  max
 
   # ── Backbone ───────────────────────────────────────────────────────────────
   freeze_backbone: true
 
   # ── Video ──────────────────────────────────────────────────────────────────
-  n_frames:  8       # frames per clip sampled for classification
+  n_frames:  8
   img_size:  224
+  clip_encode_bs: 8
 
   # ── Logging / checkpointing ────────────────────────────────────────────────
   log_every:       5

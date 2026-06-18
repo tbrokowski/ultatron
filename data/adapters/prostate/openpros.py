@@ -153,7 +153,7 @@ class OpenProsAdapter(BaseAdapter):
         sample_key = f"{data_path}::{sample_idx}"
 
         entry = self._make_entry(
-            [str(data_path), str(sos_path)],
+            str(data_path),
             split=split,
             modality="volume",
             study_id=study_id,
@@ -170,6 +170,8 @@ class OpenProsAdapter(BaseAdapter):
                 "batch": meta["batch"],
                 "sample_date": meta["sample_date"],
                 "sample_idx": sample_idx,
+                "frame_idx": sample_idx,
+                "sos_path": str(sos_path),
                 "data_shape": list(_DATA_TRAILING_SHAPE),
                 "sos_shape": list(_SOS_TRAILING_SHAPE),
                 "format": "openpros_numpy_waveform",

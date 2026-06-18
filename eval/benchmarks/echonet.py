@@ -1,5 +1,5 @@
 """
-oura/eval/benchmarks/echonet.py  ·  EchoNet-Dynamic EF regression benchmark
+eval/benchmarks/echonet.py  ·  EchoNet-Dynamic EF regression benchmark
 ============================================================================
 
 EchoNet-Dynamic: 10,030 echocardiogram videos with expert EF labels.
@@ -149,8 +149,8 @@ class EchoNetBenchmark(BaseBenchmark):
         super().__init__(img_branch=None, head=_head,
                          device=device, batch_size=batch_size,
                          num_workers=num_workers, encoder=_enc)
-        # Keep vid_branch for legacy; if encoder provided, encode_video goes through encoder
-        self.vid_branch = vid_branch
+        # Legacy VideoBranch only — StudentEncoder / BackboneEncoder use encoder.encode_video()
+        self.vid_branch = vid_branch if _enc is None else None
         self.n_frames   = n_frames
 
     def build_dataloader(self, root: str, split: str = "TEST") -> DataLoader:
@@ -160,13 +160,13 @@ class EchoNetBenchmark(BaseBenchmark):
                           pin_memory=True)
 
     def predict(self, batch: dict) -> dict:
+        from finetune.video_regression import (
+            encode_clip_for_regression,
+            regression_head_forward,
+        )
         clips = batch["clip"].to(self.device)  # (B, T, 3, 112, 112)
-        if self.encoder is not None:
-            vid_out = self.encoder.encode_video(clips)
-        else:
-            with torch.no_grad():
-                vid_out = self.vid_branch.forward_teacher(clips)
-        ef_pred = self.head(vid_out["clip_cls"])   # (B,) regression output
+        enc_out = encode_clip_for_regression(self.encoder, clips)
+        ef_pred = regression_head_forward(self.head, enc_out)
         return {"pred": ef_pred}
 
     def compute_metrics(self, pred, target, sample_ids) -> list[dict]:

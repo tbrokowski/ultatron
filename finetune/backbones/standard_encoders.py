@@ -20,6 +20,7 @@ from typing import Iterator
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from finetune.backbones.base import BackboneEncoder
@@ -80,7 +81,7 @@ class ResNet50Encoder(BackboneEncoder):
         cls_per_frame = feat.mean(dim=(2, 3))                      # (BT, 2048)
         frame_tokens  = cls_per_frame.reshape(B, T, -1)            # (B, T, 2048)
         clip_cls      = self.temporal_pool(frame_tokens)           # (B, 2048)
-        return {"clip_cls": clip_cls, "tube_tokens": None}
+        return {"clip_cls": clip_cls, "frame_tokens": frame_tokens, "tube_tokens": None}
 
     def trainable_parameters(self) -> Iterator[nn.Parameter]:
         return self.temporal_pool.parameters()
@@ -149,16 +150,22 @@ class ViTEncoder(BackboneEncoder):
         return cls_token, patch_tokens
 
     def encode_image(self, images: Tensor) -> dict:
+        if images.shape[-1] != 224 or images.shape[-2] != 224:
+            images = F.interpolate(
+                images, size=(224, 224), mode="bilinear", align_corners=False,
+            )
         cls, patch = self._forward_vit(images)
         return {"cls": cls, "patch_tokens": patch}
 
     def encode_video(self, clips: Tensor) -> dict:
         B, T, C, H, W = clips.shape
         frames   = clips.reshape(B * T, C, H, W)
+        if frames.shape[-1] != 224 or frames.shape[-2] != 224:
+            frames = F.interpolate(frames, size=(224, 224), mode="bilinear", align_corners=False)
         cls_bt, _ = self._forward_vit(frames)                          # (BT, D)
         frame_tokens = cls_bt.reshape(B, T, -1)                        # (B, T, D)
         clip_cls     = self.temporal_pool(frame_tokens)                 # (B, D)
-        return {"clip_cls": clip_cls, "tube_tokens": None}
+        return {"clip_cls": clip_cls, "frame_tokens": frame_tokens, "tube_tokens": None}
 
     def trainable_parameters(self) -> Iterator[nn.Parameter]:
         return self.temporal_pool.parameters()

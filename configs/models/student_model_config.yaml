@@ -1,0 +1,54 @@
+# configs/models/student_model_config.yaml
+# =========================================
+# Configuration for the Hiera-based single-student encoder.
+# Load alongside the existing model_config.yaml (which controls the
+# dual-branch DINOv3 + V-JEPA2 model — unchanged).
+#
+# Hiera-Large architecture reference (read-only; set by the backbone):
+#   embed_dims : [144, 288, 576, 1152]
+#   depths     : [2, 3, 16, 3]          (hiera_large_video_mae_k400)
+#              : [2, 6, 36, 4]          (sam2_hiera_large)
+#   num_heads  : [2, 4, 8, 16]
+#   patch_stride: 4  (Conv2d 7×7 stride 4)
+
+student:
+
+  # ── Backbone ──────────────────────────────────────────────────────
+  # Options:
+  #   hiera_large_video_mae_k400  →  pip install hiera-transformer
+  #                                  Hiera.from_pretrained("facebook/hiera_large_16x224.mae_k400")
+  #                                  MAE pretrained on Kinetics-400; temporal + spatial warm init
+  #   sam2_hiera_large            →  AutoModel.from_pretrained("facebook/sam2.1-hiera-large")
+  #                                  Dense-prediction adapted; HuggingFace transformers only
+  hiera_variant:     hiera_large_video_mae_k400
+  hiera_hf_cache_dir: null          # inherits global hf_cache_dir if null
+
+  # ── Temporal adapters ─────────────────────────────────────────────
+  # Two FactorizedTemporalAttention modules injected between Hiera stages.
+  # temporal_adapter_stages: [2, 3] means adapters between stages 2→3 and 3→4.
+  # For T=1 (images) these are identity no-ops (zero overhead).
+  temporal_mixing:          factorized_attn   # or depthwise_conv
+  temporal_adapter_stages:  [2, 3]
+  max_frames:               32
+
+  # ── Fine-tuning control ───────────────────────────────────────────
+  # trainable_stages: last N Hiera stages to unfreeze + all temporal adapters.
+  # null = unfreeze everything; 0 = keep Hiera fully frozen (heads/adapters only).
+  trainable_stages:  null
+
+  # ── Shared embedding space ────────────────────────────────────────
+  align_dim:      1024   # shared projection dim — matches dinov3_l / vjepa2_l native D
+  n_prototypes:   256    # number of prototype cluster vectors
+  ema_momentum:   0.9995 # EMA momentum for live student → EMA-student sync (see loss_weights for lam_ema_max)
+
+  # ── Teacher registry keys (reuse existing loaded backbones) ───────
+  dino_teacher_key:   dinov3_l
+  vjepa_teacher_key:  vjepa2_l
+
+  # ── Stage-3 cross-distillation fusion settings ────────────────────
+  fusion_radius:    2      # spatial neighbourhood radius in DINO-patch units
+                           # radius=2 → 5×5 DINO patch neighbourhood per tube
+  fusion_init_gate: -3.0   # initial gate logit; σ(-3.0) ≈ 0.05 (nearly closed)
+
+  # ── Dtype (for teacher wrappers) ─────────────────────────────────
+  dtype: bfloat16

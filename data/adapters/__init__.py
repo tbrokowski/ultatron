@@ -90,7 +90,7 @@ from .muscle.stmus_nda           import STMUSNDAAdapter
 from .muscle.fallmud             import FALLMUDAdapter
 from .muscle.luminous            import LUMINOUSAdapter
 from .muscle.deep_mtj            import DeepMTJAdapter
-from .muscle.knee_us_jocohS      import KneeUSJoCoHSAdapter
+from .muscle.knee_us_jocohs       import KneeUSJoCoHSAdapter
 from .muscle.tus_rec             import TUSRECAdapter
 from .muscle.tus_rec_val         import TUSRECValAdapter
 from .muscle.spinal_cord_injury_us import SpinalCordInjuryUSAdapter
@@ -150,6 +150,7 @@ from .brain.remind2reg            import ReMIND2RegAdapter
 from .multi_organ.annotated_heterogeneous_us_db import AnnotatedHeterogeneousUSDBAdapter
 from .multi_organ.stu_hospital                  import STUHospitalAdapter
 from .multi_organ.us_365k                       import US365KAdapter
+from .multi_organ.usanotai                       import USAnotAIAdapter
 
 # ── Ocular ──────────────────────────────────────────────────────────────────────
 from .ocular.erdes import ERDESAdapter
@@ -211,6 +212,7 @@ ADAPTER_REGISTRY = {
     "STU-Hospital-master":                     STUHospitalAdapter,
     "annotated_heterogeneous_us_db":           AnnotatedHeterogeneousUSDBAdapter,
     "US-365K":                                 US365KAdapter,
+    "USAnotAI-master":                         USAnotAIAdapter,
     "ERDES":                                   ERDESAdapter,
     "Dermatologic-US-Skin-Lesions":            DermatologicSkinLesionsAdapter,
     # Lung
@@ -346,7 +348,7 @@ __all__ = [
     "CommonCarotidArteryImagesAdapter",
     "ThreeDUSNeuroimagesAdapter", "BITEAdapter", "REMINDBrainIUSAdapter",
     "RESECTAdapter", "ReMIND2RegAdapter", "STUHospitalAdapter",
-    "AnnotatedHeterogeneousUSDBAdapter", "ERDESAdapter",
+    "AnnotatedHeterogeneousUSDBAdapter", "USAnotAIAdapter", "ERDESAdapter",
     "DermatologicSkinLesionsAdapter",
     # Breast
     "BrEaSTAdapter", "BUIDAdapter", "BUSBAdapter", "BUSBRAAdapter",

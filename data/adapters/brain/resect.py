@@ -3,8 +3,9 @@ data/adapters/resect.py  ·  RESECT intraoperative brain ultrasound adapter
 ============================================================================
 
 RESECT provides pre-, during-, and post-resection 3D ultrasound NIfTI volumes
-for each case plus MRI and landmark files. The adapter emits only the US
-volumes for SSL pretraining.
+for each case plus MRI and landmark (.tag) files.  Landmarks are registration
+fiducials, not segmentation masks, so US entries are SSL-only.  MRI and
+landmarks are intentionally excluded from the foundation manifest.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Iterator
 
 from data.adapters.base import BaseAdapter
+from data.adapters.brain._volume_utils import nifti_depth
 from data.schema.manifest import USManifestEntry
 
 
@@ -47,6 +49,7 @@ class RESECTAdapter(BaseAdapter):
             for vol_path in sorted((case_dir / "US").glob("*.nii.gz")):
                 stem = vol_path.name.replace(".nii.gz", "")
                 stage = stem.split("-US-", 1)[-1]
+                num_frames = nifti_depth(vol_path)
                 yield self._make_entry(
                     str(vol_path),
                     split=split,
@@ -54,13 +57,17 @@ class RESECTAdapter(BaseAdapter):
                     study_id=case_id,
                     series_id=stem,
                     is_3d=True,
+                    is_cine=True,
+                    has_temporal_order=True,
+                    num_frames=num_frames,
                     view_type=f"resection_{stage}",
                     task_type="ssl_only",
-                    ssl_stream="image",
+                    ssl_stream="both",
                     is_promptable=False,
                     source_meta={
                         "case_id": case_id,
                         "resection_stage": stage,
+                        "num_z_slices": num_frames,
                     },
                 )
 

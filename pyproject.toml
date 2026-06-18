@@ -21,18 +21,20 @@ dependencies = [
     "huggingface_hub>=0.22.0",
 
     # Data loading
-    "numpy>=1.24.0",
+    "numpy>=1.24.0,<1.27",      # ultr-ai / numba / cupy in CSCS container
     "Pillow>=10.0.0",
-    "decord>=0.6.0",           # fast video decoding
+    "decord>=0.6.0; platform_machine != 'aarch64'",  # no aarch64 wheel; use cv2 below
+    "opencv-python-headless>=4.8.0,<4.12; platform_machine == 'aarch64'",  # 4.12+ needs numpy>=2
 
     # Medical image formats
     "pydicom>=2.4.0",          # DICOM support
-    "h5py>=3.10.0",            # HDF5 frame stacks (TUS-REC, etc.)
+    "h5py>=3.11.0,<3.13",      # HDF5 frame stacks; matches ultr-ai image
     "SimpleITK>=2.3.0",        # .mhd/.mha support
 
     # Serialisation / config
     "pyyaml>=6.0",
     "omegaconf>=2.3.0",        # hierarchical config with _base_ inheritance
+    "openpyxl>=3.1.0",         # EchoCP, BUS-B, GDPH-SYSUCC xlsx labels
 
     # Evaluation
     "scikit-learn>=1.3.0",     # linear probe (LogisticRegression, AUC)
@@ -57,6 +59,12 @@ quantisation = [
     "bitsandbytes>=0.41.0",
 ]
 
+# Embedding visualisation (UMAP/t-SNE scatter plots)
+viz = [
+    "matplotlib>=3.7.0",
+    "umap-learn>=0.5.0",
+]
+
 # ── Entry points (CLI scripts) ─────────────────────────────────────────────────
 [project.scripts]
 train         = "train.trainer:main"
@@ -66,7 +74,7 @@ build-manifest= "scripts.build_manifest:main"
 # ── Package discovery ──────────────────────────────────────────────────────────
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ultatron*", "scripts*"]
+include = ["data*", "models*", "train*", "eval*", "finetune*", "scripts*", "viz*", "vlm*"]
 
 # ── Pytest ─────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
@@ -85,7 +93,7 @@ target-version = ["py310", "py311", "py312"]
 [tool.isort]
 profile       = "black"
 line_length   = 100
-known_first_party = ["oura"]
+known_first_party = ["data", "models", "train", "eval", "finetune", "scripts", "viz", "vlm"]
 
 # ── mypy ──────────────────────────────────────────────────────────────────────
 [tool.mypy]

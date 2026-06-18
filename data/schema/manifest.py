@@ -54,6 +54,7 @@ ANATOMY_ALIASES: Dict[str, str] = {
     "fh": "fetal_head", "head_circumference": "fetal_head",
     "muscles": "muscle", "lower_leg": "muscle",
     "lumbar_multifidus": "spine", "msk": "muscle",
+    "musculoskeletal": "muscle",
     "knee": "joint", "mtj": "muscle",
     "brachial_plexus": "nerve", "plexus": "nerve",
     "carotid_artery": "carotid", "microbubbles": "vascular",
@@ -118,7 +119,8 @@ class USManifestEntry:
     label_ids_raw: Optional[List[int]] = None
     task_type: Literal[
         "segmentation","classification","detection","sequence",
-        "measurement","regression","ssl_only","weak_label"
+        "measurement","regression","keypoint","ssl_only","weak_label",
+        "reconstruction_3d",
     ] = "ssl_only"
     has_mask: bool = False
     has_box: bool = False

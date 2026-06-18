@@ -47,6 +47,7 @@ _IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 # Map raw COCO category names → label_ontology
 _LABEL_MAP: dict[str, str] = {
     "gist":         "gist",
+    "lmym":         "leiomyoma",
     "leiomyoma":    "leiomyoma",
     "schwannoma":   "schwannoma",
     "lipoma":       "lipoma",
@@ -87,6 +88,40 @@ def _find_img_dir(images_dir: Path, split: str) -> Path | None:
     return None
 
 
+def _flat_images_dir(images_dir: Path) -> Path | None:
+    """Return images_dir when JPEGs live directly under images/ (no split subdirs)."""
+    if not images_dir.is_dir():
+        return None
+    if any(f.is_file() and f.suffix.lower() in _IMG_EXTS for f in images_dir.iterdir()):
+        return images_dir
+    return None
+
+
+def _discover_annotation_splits(ann_dir: Path) -> list[tuple[str, Path]]:
+    """Return (split, annotation_path) pairs for standard or crop COCO layouts."""
+    splits: list[tuple[str, Path]] = []
+    for split_name in ("train", "val", "test"):
+        ann_path = _find_ann(ann_dir, split_name)
+        if ann_path is not None:
+            splits.append((split_name, ann_path))
+    if splits:
+        return splits
+
+    crop_train = ann_dir / "train_anno_crop_split_0.json"
+    crop_val   = ann_dir / "val_anno_crop_split_0.json"
+    if crop_train.exists():
+        splits.append(("train", crop_train))
+    if crop_val.exists():
+        splits.append(("val", crop_val))
+    if splits:
+        return splits
+
+    all_ann = ann_dir / "all_anno_crop.json"
+    if all_ann.exists():
+        splits.append(("train", all_ann))
+    return splits
+
+
 class GIST514DBAdapter(BaseAdapter):
     """
     Adapter for the GIST514-DB endoscopic ultrasound dataset.
@@ -113,15 +148,11 @@ class GIST514DBAdapter(BaseAdapter):
     def iter_entries(self) -> Iterator[USManifestEntry]:
         ann_dir    = self.root / "annotations"
         images_dir = self.root / "images"
+        flat_dir   = _flat_images_dir(images_dir)
 
-        for split_name in ("train", "val", "test"):
-            ann_path = _find_ann(ann_dir, split_name)
-            if ann_path is None:
-                continue
-
-            img_dir = _find_img_dir(images_dir, split_name)
-
-            split = self.split_override or split_name
+        for split_name, ann_path in _discover_annotation_splits(ann_dir):
+            img_dir = _find_img_dir(images_dir, split_name) or flat_dir
+            split   = self.split_override or split_name
             yield from self._iter_split(ann_path, img_dir, split)
 
     def _iter_split(

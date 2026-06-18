@@ -23,7 +23,7 @@ def bus_b_root(tmp_path_factory):
       GT/
         000001.png
         000002.png
-    No DatasetB.xlsx → labels inferred from mask presence.
+    No DatasetB.xlsx → labels are unknown unless xlsx fixture is used.
     """
     root = tmp_path_factory.mktemp("BUS_B")
     (root / "original").mkdir()
@@ -39,26 +39,36 @@ def bus_b_root(tmp_path_factory):
     return root
 
 
+def _write_dataset_b_xlsx(path: Path, rows: list[tuple[str, str]]) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Image", "Type", "Diagnosis"])
+    for image_id, lesion_type in rows:
+        ws.append([image_id, lesion_type, ""])
+    wb.save(path)
+
+
 @pytest.fixture(scope="module")
 def bus_b_root_with_xlsx(tmp_path_factory):
-    """BUS-B with a minimal DatasetB.xlsx-equivalent CSV for label testing."""
-    import csv
+    """BUS-B with DatasetB.xlsx matching the published column layout."""
     root = tmp_path_factory.mktemp("BUS_B_xlsx")
     (root / "original").mkdir()
     (root / "GT").mkdir()
 
-    stems_labels = [
-        ("000001", "benign"),
-        ("000002", "malignant"),
-        ("000003", "normal"),
+    rows = [
+        ("000001", "Benign"),
+        ("000002", "Malignant"),
+        ("000003", "Normal"),
     ]
-    for stem, label in stems_labels:
+    for stem, label in rows:
         (root / "original" / f"{stem}.png").write_bytes(b"\x89PNG")
-        if label != "normal":
+        if label != "Normal":
             (root / "GT" / f"{stem}.png").write_bytes(b"\x89PNG")
 
-    # Write a CSV that the adapter can fall back to if openpyxl absent
-    # (adapter only reads xlsx; test without xlsx exercises the fallback)
+    _write_dataset_b_xlsx(root / "DatasetB.xlsx", rows)
     return root
 
 
@@ -113,14 +123,43 @@ class TestBUSBAdapter:
         assert e.task_type == "classification"
         assert e.instances[0].mask_path is None
 
-    def test_label_ontology(self, bus_b_root):
+    def test_without_xlsx_labels_are_unknown_not_benign(self, bus_b_root):
         from data.adapters.breast.bus_b_adapter import BUSBAdapter
-        for e in BUSBAdapter(root=bus_b_root).iter_entries():
+        entries = {
+            e.instances[0].instance_id: e
+            for e in BUSBAdapter(root=bus_b_root).iter_entries()
+        }
+        assert entries["000001"].instances[0].label_ontology == "breast_lesion"
+        assert entries["000001"].instances[0].label_raw == "unknown"
+        assert entries["000002"].instances[0].label_raw == "unknown"
+
+    def test_xlsx_labels_benign_malignant_normal(self, bus_b_root_with_xlsx):
+        from data.adapters.breast.bus_b_adapter import BUSBAdapter
+        entries = {
+            e.instances[0].instance_id: e
+            for e in BUSBAdapter(root=bus_b_root_with_xlsx).iter_entries()
+        }
+        assert entries["000001"].instances[0].label_ontology == "breast_lesion_benign"
+        assert entries["000002"].instances[0].label_ontology == "breast_lesion_malignant"
+        assert entries["000003"].instances[0].label_ontology == "breast_normal"
+        assert entries["000003"].task_type == "classification"
+        assert not entries["000003"].has_mask
+
+    def test_load_xlsx_stdlib(self, bus_b_root_with_xlsx):
+        from data.adapters.breast.bus_b_adapter import _load_xlsx_labels
+
+        labels = _load_xlsx_labels(bus_b_root_with_xlsx)
+        assert labels["000001"] == "benign"
+        assert labels["000002"] == "malignant"
+        assert labels["000003"] == "normal"
+
+    def test_label_ontology(self, bus_b_root_with_xlsx):
+        from data.adapters.breast.bus_b_adapter import BUSBAdapter
+        for e in BUSBAdapter(root=bus_b_root_with_xlsx).iter_entries():
             assert e.instances[0].label_ontology in {
                 "breast_lesion_benign",
                 "breast_lesion_malignant",
                 "breast_normal",
-                "breast_lesion",
             }
 
     def test_split_override(self, bus_b_root):

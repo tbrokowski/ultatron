@@ -120,6 +120,14 @@ ANATOMY_LABEL_SPACES: Dict[str, List[str]] = {
         "covid",                 # 4 – may overlap with b_line / consolidation
         "pneumonia",             # 5
     ],
+    "lus_phantom_seg": [
+        "background",            # 0
+        "rib",                   # 1
+        "pleural_line",          # 2
+        "a_line",                # 3
+        "b_line",                # 4
+        "confluent_b_line",      # 5
+    ],
 
     # ── Breast ────────────────────────────────────────────────────────────────
     "breast": [
@@ -459,7 +467,7 @@ def _register_default_heads():
         label_key="ef_value",
         n_classes=1,
         target_mean=55.0, target_std=12.0,   # EF% normalisation
-        dataset_ids=["EchoNet-Dynamic", "MIMIC-IV-ECHO"],
+        dataset_ids=["CAMUS", "EchoNet-Dynamic", "MIMIC-IV-ECHO"],
         aggregation="mean",
     ))
     R.register(HeadSpec(
@@ -483,7 +491,7 @@ def _register_default_heads():
         n_classes=1,
         class_names=["a_line"],
         pos_weight=2.0,   # a-lines less common in pathological datasets
-        dataset_ids=["LUS-multicenter-2025", "COVIDx-US", "POCUS-LUS"],
+        dataset_ids=["LUS-multicenter-2025", "COVIDx-US", "POCUS-LUS", "LUSS-PHANTOM"],
     ))
     R.register(HeadSpec(
         head_id="lus_multiclass_cls",
@@ -503,7 +511,17 @@ def _register_default_heads():
         label_key="seg_mask",
         n_classes=1,
         class_names=["pleural_line"],
-        dataset_ids=["LUS-multicenter-2025"],
+        dataset_ids=["LUS-multicenter-2025", "LUSS-PHANTOM"],
+    ))
+    R.register(HeadSpec(
+        head_id="lus_phantom_seg_multiclass",
+        head_type=HeadType.MULTICLASS_SEG,
+        loss_type=LossType.DICE_CE,
+        anatomy_family="lung",
+        label_key="seg_mask",
+        n_classes=len(ANATOMY_LABEL_SPACES["lus_phantom_seg"]),
+        class_names=ANATOMY_LABEL_SPACES["lus_phantom_seg"],
+        dataset_ids=["LUSS-PHANTOM"],
     ))
     R.register(HeadSpec(
         head_id="lung_clip_pretrain",
@@ -533,7 +551,7 @@ def _register_default_heads():
             "small_consolidation",
             "pneumothorax",
         ],
-        dataset_ids=["Benin-LUS", "RSA-LUS"],
+        dataset_ids=["Benin-LUS", "RSA-LUS", "LUSS-PHANTOM"],
     ))
     R.register(HeadSpec(
         head_id="lus_patient_tb",
@@ -543,7 +561,7 @@ def _register_default_heads():
         label_key="patient_tb_label",
         n_classes=1,
         class_names=["tb"],
-        aggregation="mean",
+        aggregation="mil",
         dataset_ids=["Benin-LUS", "RSA-LUS"],
     ))
     R.register(HeadSpec(
@@ -674,6 +692,19 @@ def _register_default_heads():
         n_classes=len(ANATOMY_LABEL_SPACES["fetal_planes"]),
         class_names=ANATOMY_LABEL_SPACES["fetal_planes"],
         dataset_ids=["FETAL_PLANES_DB"],
+    ))
+    R.register(HeadSpec(
+        head_id="fetal_abdominal_structure_seg",
+        head_type=HeadType.BINARY_SEG,
+        loss_type=LossType.DICE_CE,
+        anatomy_family="fetal_abdomen",
+        label_key="seg_mask",
+        n_classes=1,
+        class_names=[
+            "fetal_abdominal_artery", "fetal_liver",
+            "fetal_stomach", "fetal_abdominal_vein",
+        ],
+        dataset_ids=["FASS"],
     ))
 
     # ── Kidney ────────────────────────────────────────────────────────────────

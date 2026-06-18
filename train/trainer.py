@@ -623,10 +623,8 @@ class Trainer:
                     )
                     # run() is the full finetune training loop with early stopping
                     experiment.run()
-                    # evaluate() runs the test-set benchmark and saves results
+                    # evaluate() runs the test-set benchmark, saves results, and figures
                     results = experiment.evaluate("test")
-                    # run_viz() produces figures
-                    experiment.run_viz(results, experiment.output_dir)
                     log.info(f"  ✓ {experiment.EXPERIMENT_NAME}: {results}")
 
             if self.rank == 0:

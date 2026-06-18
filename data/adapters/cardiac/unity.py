@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, List
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry
@@ -57,13 +57,30 @@ def _active_keypoints(kp_dict: dict) -> dict:
     return active
 
 
+def _parse_keypoint_coords(kp_type: str, x_str: str, y_str: str) -> List[List[float]]:
+    """Parse Unity point/curve strings into [[x, y], ...] coordinate lists."""
+    if kp_type == "point":
+        try:
+            return [[float(x_str), float(y_str)]]
+        except ValueError:
+            return []
+    if kp_type == "curve":
+        try:
+            xs = [float(v) for v in x_str.split()]
+            ys = [float(v) for v in y_str.split()]
+            return [[x, y] for x, y in zip(xs, ys)]
+        except ValueError:
+            return []
+    return []
+
+
 class UnityAdapter(BaseAdapter):
     """
     Unity Imaging echocardiography adapter.
 
-    Each entry is a single annotated frame.  Keypoint annotations (cardiac
-    landmarks) are stored in source_meta["keypoints"] so downstream tasks can
-    use them without requiring a pixel-level mask file.
+    Each entry is a single annotated frame.  Active cardiac landmarks are
+    emitted as Instance objects with keypoint coordinates and task_type
+    "keypoint".  A compact copy is also kept in source_meta["keypoints"].
     """
 
     DATASET_ID     = "Unity-Echo"
@@ -106,20 +123,38 @@ class UnityAdapter(BaseAdapter):
                 split = "train"
 
             keypoints = _active_keypoints(annotation.get("labels", {}))
+            instances = self._keypoint_instances(filename, keypoints)
+            has_kp    = bool(keypoints)
 
             yield self._make_entry(
                 str(img_path), split,
                 modality      = "image",
-                instances     = [],
+                instances     = instances,
                 study_id      = filename.split("-")[1],   # hash as pseudo study ID
-                task_type     = "ssl_only",
+                task_type     = "keypoint" if has_kp else "ssl_only",
                 ssl_stream    = "image",
-                is_promptable = False,
+                is_promptable = has_kp,
                 has_mask      = False,
+                has_points    = has_kp,
                 source_meta   = {
-                    "root":      str(self.root),
-                    "doi":       self.DOI,
                     "filename":  filename,
                     "keypoints": keypoints,
                 },
             )
+
+    def _keypoint_instances(self, filename: str, keypoints: dict) -> list:
+        instances = []
+        for name, info in keypoints.items():
+            coords = _parse_keypoint_coords(info["type"], info["x"], info["y"])
+            if not coords:
+                continue
+            instances.append(
+                self._make_instance(
+                    instance_id    = f"{filename}_{name}",
+                    label_raw      = name,
+                    label_ontology = name,
+                    keypoints      = coords,
+                    is_promptable  = True,
+                )
+            )
+        return instances

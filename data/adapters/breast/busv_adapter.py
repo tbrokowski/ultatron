@@ -35,11 +35,14 @@ Key observations
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Iterator, Optional
 
 from data.adapters.base import BaseAdapter
 from data.schema.manifest import USManifestEntry
+
+log = logging.getLogger(__name__)
 
 # ── Label ontology mapping ─────────────────────────────────────────────────
 CLASSES = {
@@ -75,9 +78,43 @@ class BUSVAdapter(BaseAdapter):
 
     # ── Private helpers ────────────────────────────────────────────────────
 
+    @staticmethod
+    def _clip_id_from_json_entry(entry) -> str:
+        """Map a JSON video entry to the rawframes/ clip directory name."""
+        if isinstance(entry, str):
+            return entry.split("/")[-1]
+        if isinstance(entry, dict):
+            name = entry.get("name") or ""
+            if name:
+                return name.split("/")[-1]
+            for key in ("file_name", "video_id", "id"):
+                value = entry.get(key)
+                if value is not None:
+                    return str(value).split("/")[-1]
+        return str(entry)
+
+    def _video_ids_from_json(self, data) -> list[str]:
+        """
+        Extract clip directory ids from BUSV split JSON.
+
+        Supports both the simple list-of-ids layout used in tests and the
+        COCO-style release on capstor (top-level ``videos`` list with
+        ``name`` like ``benign/<clip_id>``).
+        """
+        if isinstance(data, list):
+            return [self._clip_id_from_json_entry(v) for v in data]
+        if isinstance(data, dict):
+            videos = data.get("videos")
+            if isinstance(videos, list):
+                return [self._clip_id_from_json_entry(v) for v in videos]
+            video_ids = data.get("video_ids")
+            if isinstance(video_ids, list):
+                return [self._clip_id_from_json_entry(v) for v in video_ids]
+        return []
+
     def _load_split_map(self) -> dict[str, str]:
         """
-        Build a mapping video_id → "train" | "val" from the JSON split files.
+        Build a mapping clip_id → "train" | "val" from the JSON split files.
         Falls back to empty dict if files are missing.
         """
         split_map: dict[str, str] = {}
@@ -92,25 +129,11 @@ class BUSVAdapter(BaseAdapter):
             try:
                 with open(json_path) as f:
                     data = json.load(f)
-                # The JSON may be a list of video_ids or a dict with a "videos" key
-                if isinstance(data, list):
-                    video_ids = data
-                elif isinstance(data, dict):
-                    # Try common keys
-                    video_ids = (
-                        data.get("videos") or
-                        data.get("video_ids") or
-                        list(data.keys())
-                    )
-                else:
-                    video_ids = []
-                for vid in video_ids:
-                    # vid may be a string id or a dict with an "id" field
-                    if isinstance(vid, dict):
-                        vid = vid.get("id") or vid.get("video_id", "")
-                    split_map[str(vid)] = split_label
-            except Exception:
-                pass
+                for clip_id in self._video_ids_from_json(data):
+                    if clip_id:
+                        split_map[clip_id] = split_label
+            except Exception as exc:
+                log.warning("Failed to parse BUSV split file %s: %s", json_path, exc)
 
         return split_map
 

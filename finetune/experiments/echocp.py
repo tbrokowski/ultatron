@@ -31,34 +31,10 @@ from models.heads import build_cls_head
 from eval.metrics import binary_auc, binary_f1, binary_accuracy
 
 log = logging.getLogger(__name__)
+from data.adapters.cardiac.echocp import _ACTION_MAP, _load_labels
+
 N_FRAMES  = 16
 CLIP_SIZE = 112
-_ACTION_MAP = {"r": "rest", "v": "valsalva"}
-
-
-def _load_labels(root: Path) -> dict[tuple[str, str], int]:
-    """Return {(idx_zfill3, action_full): pfo_level} from xlsx."""
-    xlsx = root / "echoCP_diagnosis_label.xlsx"
-    if not xlsx.exists():
-        return {}
-    try:
-        import openpyxl
-        ws   = openpyxl.load_workbook(xlsx, read_only=True, data_only=True).active
-        rows = list(ws.iter_rows(values_only=True))
-    except ImportError:
-        return {}
-    labels: dict[tuple[str, str], int] = {}
-    for row in rows[1:]:
-        if row[0] is None:
-            continue
-        idx    = str(int(row[0])).zfill(3)
-        action = str(row[1]).strip().lower() if row[1] else ""
-        level  = int(row[2]) if row[2] is not None else -1
-        if action in ("r", "rest"):
-            labels[(idx, "rest")] = level
-        elif action in ("v", "valsalva"):
-            labels[(idx, "valsalva")] = level
-    return labels
 
 
 def _load_nifti_clip(path: str, n_frames: int) -> torch.Tensor:
@@ -223,7 +199,7 @@ class EchoCPFinetune(FinetuneExperiment):
                 "val_f1":   round(binary_f1(preds, t), 4)}
 
     def run_viz(self, results: dict, output_dir: Path) -> None:
-        pass
+        raise NotImplementedError("Visualisation not yet implemented for EchoCP.")
 
 
 if __name__ == "__main__":

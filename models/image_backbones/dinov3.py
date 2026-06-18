@@ -51,8 +51,10 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..base import ImageBackboneBase, FrozenTeacherBase
+from ..hf_loading import load_pretrained
 from ..registry import register_image_backbone, register_frozen_teacher
 
 log = logging.getLogger(__name__)
@@ -69,6 +71,24 @@ _DINOV3_HF_IDS = {
 
 
 # ── Padding mask helpers ──────────────────────────────────────────────────────
+
+def _align_padding_mask_to_patch_grid(
+    padding_mask: torch.Tensor,
+    pixel_values: torch.Tensor,
+    patch_size: int,
+) -> torch.Tensor:
+    """Resize (B, ph, pw) mask to match ViT patch grid for ``pixel_values``."""
+    ph = pixel_values.shape[-2] // patch_size
+    pw = pixel_values.shape[-1] // patch_size
+    if padding_mask.shape[1] == ph and padding_mask.shape[2] == pw:
+        return padding_mask
+    pm = F.interpolate(
+        padding_mask.float().unsqueeze(1),
+        size=(ph, pw),
+        mode="nearest",
+    )
+    return pm.squeeze(1).bool()
+
 
 def _make_attn_bias(
     padding_mask: torch.Tensor,   # (B, ph, pw) — True = valid patch
@@ -106,6 +126,24 @@ def _make_attn_bias(
         is_pad.unsqueeze(1).expand(-1, seq, -1), float("-inf")
     )
     return bias.expand(-1, n_heads, -1, -1)     # (B, n_heads, seq, seq)
+
+
+def cls_patch_attention(
+    attentions: tuple,
+    n_reg: int,
+) -> torch.Tensor:
+    """
+    Mean CLS→patch attention from the last ViT layer.
+
+    OpenUS uses ``teacher_attn.mean(dim=1)`` on a (B, N, N) matrix; for
+    DINOv3 we take the CLS query row from the last layer and average heads:
+
+        attentions[-1] : (B, n_heads, seq, seq)
+        seq = 1 (CLS) + n_reg + N_patches
+        returns (B, N_patches)
+    """
+    last = attentions[-1]
+    return last[:, :, 0, 1 + n_reg:].mean(dim=1)
 
 
 class _AttentionMaskHook:
@@ -150,6 +188,7 @@ class DINOv3ImageBackbone(ImageBackboneBase):
         self._n_reg      = getattr(hf_model.config, "num_register_tokens", 0)
         self.variant_key = variant_key
         self._use_gradient_checkpointing = False
+        self._eager_attention_enabled = False
 
         # Import the concrete attention class so we can target it precisely.
         # Lazy import keeps the top-level module importable without transformers.
@@ -168,6 +207,15 @@ class DINOv3ImageBackbone(ImageBackboneBase):
             "DINOv3ImageBackbone: registered attention-mask hooks on "
             "%d DINOv3ViTAttention modules.", len(self._hook_handles)
         )
+
+    def _ensure_eager_attention(self) -> None:
+        """SDPA/Flash backends cannot return attention weights; switch once."""
+        if self._eager_attention_enabled:
+            return
+        if hasattr(self._vit, "set_attn_implementation"):
+            self._vit.set_attn_implementation("eager")
+            self._eager_attention_enabled = True
+            log.info("DINOv3ImageBackbone: switched to eager attention for output_attentions.")
 
     def _vit_forward_with_mask(
         self,
@@ -192,10 +240,15 @@ class DINOv3ImageBackbone(ImageBackboneBase):
         self,
         pixel_values: torch.Tensor,              # (B, 3, H, W)
         padding_mask: Optional[torch.Tensor] = None,  # (B, ph, pw)
+        output_attentions: bool = False,
         **kwargs,
     ) -> dict:
         bias: Optional[torch.Tensor] = None
         if padding_mask is not None:
+            patch_size = getattr(self._vit.config, "patch_size", 16)
+            padding_mask = _align_padding_mask_to_patch_grid(
+                padding_mask, pixel_values, patch_size,
+            )
             bias = _make_attn_bias(padding_mask, self._n_heads, self._n_reg)
             bias = bias.to(pixel_values.device)
 
@@ -209,8 +262,20 @@ class DINOv3ImageBackbone(ImageBackboneBase):
                 bias,
                 use_reentrant=False,
             )
+            attn_tuple = None
         else:
-            hs = self._vit_forward_with_mask(pixel_values, bias)
+            if output_attentions:
+                self._ensure_eager_attention()
+            if bias is not None:
+                self._hook.set_mask(bias)
+            out = self._vit(
+                pixel_values=pixel_values,
+                output_attentions=output_attentions,
+                output_hidden_states=False,
+            )
+            self._hook.set_mask(None)
+            hs = out.last_hidden_state
+            attn_tuple = out.attentions if output_attentions else None
 
         result = {
             "cls":          hs[:, 0],
@@ -218,6 +283,8 @@ class DINOv3ImageBackbone(ImageBackboneBase):
         }
         if self._n_reg > 0:
             result["register_tokens"] = hs[:, 1:1 + self._n_reg]
+        if attn_tuple is not None:
+            result["cls_patch_attention"] = cls_patch_attention(attn_tuple, self._n_reg)
         return result
 
     def enable_gradient_checkpointing(self) -> None:
@@ -288,8 +355,8 @@ def _make_dinov3_factory(variant_key: str):
     ) -> DINOv3ImageBackbone:
         from transformers import AutoModel
         log.info(f"Loading {variant_key} ({hf_id}) ...")
-        hf_model = AutoModel.from_pretrained(
-            hf_id, dtype=dtype, cache_dir=hf_cache_dir
+        hf_model = load_pretrained(
+            AutoModel, hf_id, dtype=dtype, hf_cache_dir=hf_cache_dir,
         )
         backbone = DINOv3ImageBackbone(hf_model, variant_key=variant_key)
         log.info(f"  {backbone}")
@@ -315,11 +382,12 @@ def _load_dinov3_7b(
     hf_id = _DINOV3_HF_IDS["dinov3_7b"]
     log.info(f"Loading frozen DINOv3-7B teacher ({hf_id}) ...")
     log.info("  Requires ~14 GB VRAM (bf16).")
-    hf_model = AutoModel.from_pretrained(
+    hf_model = load_pretrained(
+        AutoModel,
         hf_id,
         torch_dtype=torch.bfloat16,
         device_map=device,
-        cache_dir=hf_cache_dir,
+        hf_cache_dir=hf_cache_dir,
     )
     teacher = DINOv3FrozenTeacher(hf_model)
     log.info(f"  DINOv3FrozenTeacher ready.  D={teacher.hidden_size}")

@@ -44,6 +44,10 @@ from typing import Dict, List, Optional, Tuple
 
 CSCS_STORE_ROOT  = "/capstor/store/cscs/swissai/a127/ultrasound"
 CSCS_SCRATCH_TPL = "/capstor/scratch/cscs/{user}/ultrasound"
+HF_CACHE_STORE   = f"{CSCS_STORE_ROOT}/hf_cache"
+ABLATION_WEIGHTS_STORE = f"{CSCS_STORE_ROOT}/checkpoints/Ablations"
+STUDENT_SMOKE_CHECKPOINTS_STORE = f"{CSCS_STORE_ROOT}/checkpoints/StudentSmoke"
+FINETUNE_CHECKPOINTS_STORE = f"{CSCS_STORE_ROOT}/checkpoints/Finetune"
 
 # Anatomy families → store subdirectory
 ANATOMY_STORE_DIRS = [
@@ -157,6 +161,14 @@ class CSCSConfig:
 
     def store_checkpoints_dir(self, phase: int = 1) -> Path:
         return self.store_root / "checkpoints" / f"phase{phase}"
+
+    def ablation_weights_dir(self) -> Path:
+        """External foundation-model weights for finetune comparison ablations."""
+        return self.store_root / "checkpoints" / "Ablations"
+
+    def student_smoke_checkpoints_dir(self) -> Path:
+        """Student-pipeline smoke / pretrain checkpoints (alongside Ablations/)."""
+        return self.store_root / "checkpoints" / "StudentSmoke"
 
     # ── DataModule integration ────────────────────────────────────────────────
 
@@ -340,6 +352,52 @@ class CSCSConfig:
             f"CSCSConfig(store={self.store_root}, "
             f"scratch={self.scratch_root})"
         )
+
+
+# ── HuggingFace cache ─────────────────────────────────────────────────────────
+
+def _hf_cache_has_models(path: Path) -> bool:
+    return path.exists() and any(path.glob("models--*"))
+
+
+def select_hf_cache(cscs: Optional[CSCSConfig] = None) -> Path:
+    """
+    Resolve the HuggingFace model cache directory on CSCS.
+
+    Prefers scratch when it already contains downloaded models; otherwise
+    falls back to the shared Capstor store cache.
+    """
+    if cscs is None:
+        cscs = CSCSConfig.from_env()
+    scratch_hf = cscs.scratch_path("hf_cache")
+    store_hf = cscs.store_path("hf_cache")
+
+    if _hf_cache_has_models(scratch_hf):
+        return scratch_hf
+    if _hf_cache_has_models(store_hf):
+        return store_hf
+    if scratch_hf.exists():
+        return scratch_hf
+    return store_hf
+
+
+def configure_hf_environment(
+    cache_dir: Optional[str | Path] = None,
+    *,
+    cscs: Optional[CSCSConfig] = None,
+) -> Path:
+    """
+    Point HuggingFace libraries at a shared Capstor cache.
+
+    Sets HF_HOME / HF_HUB_CACHE / TRANSFORMERS_CACHE so gated models can load
+    offline when weights are already cached.  Auth for fresh downloads still
+    uses HF_TOKEN or ~/.cache/huggingface/token (not the cache directory).
+    """
+    resolved = Path(cache_dir) if cache_dir else select_hf_cache(cscs)
+    resolved.mkdir(parents=True, exist_ok=True)
+    for key in ("HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        os.environ[key] = str(resolved)
+    return resolved
 
 
 # ── Convenience for data_config.yaml ─────────────────────────────────────────

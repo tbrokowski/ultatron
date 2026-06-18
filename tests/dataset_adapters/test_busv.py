@@ -106,6 +106,45 @@ class TestBUSVAdapter:
         assert entries["def456"].split == "val"
         assert entries["ghi789"].split == "train"
 
+    def test_split_from_coco_json(self, tmp_path):
+        """Capstor release uses COCO-style split JSON with class-prefixed names."""
+        from data.adapters.breast.busv_adapter import BUSVAdapter
+
+        root = tmp_path / "BUSV-coco"
+        for cls, vid_id, n_frames in [
+            ("benign", "abc123", 3),
+            ("benign", "def456", 2),
+            ("malignant", "ghi789", 4),
+        ]:
+            clip_dir = root / "rawframes" / cls / vid_id
+            clip_dir.mkdir(parents=True)
+            for i in range(n_frames):
+                (clip_dir / f"{i:06d}.png").write_bytes(b"\x89PNG")
+
+        (root / "imagenet_vid_train_15frames.json").write_text(
+            json.dumps({
+                "categories": [{"id": 1, "name": "benign"}],
+                "videos": [
+                    {"id": 1, "name": "benign/abc123"},
+                    {"id": 2, "name": "malignant/ghi789"},
+                ],
+            })
+        )
+        (root / "imagenet_vid_val.json").write_text(
+            json.dumps({
+                "categories": [{"id": 1, "name": "benign"}],
+                "videos": [{"id": 3, "name": "benign/def456"}],
+            })
+        )
+
+        entries = {
+            e.source_meta["video_id"]: e
+            for e in BUSVAdapter(root=root).iter_entries()
+        }
+        assert entries["abc123"].split == "train"
+        assert entries["def456"].split == "val"
+        assert entries["ghi789"].split == "train"
+
     def test_label_ontology(self, busv_root):
         from data.adapters.breast.busv_adapter import BUSVAdapter
         ontologies = {
@@ -140,3 +179,36 @@ class TestBUSVAdapter:
         assert count == 3
         entries = load_manifest(out)
         assert all(e.dataset_id == "BUSV" for e in entries)
+
+
+@pytest.mark.skipif(
+    not Path(
+        "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/"
+        "Miccai 2022 BUV Dataset/rawframes"
+    ).is_dir(),
+    reason="BUSV not mounted on capstor",
+)
+def test_busv_real_capstor_splits():
+    import json
+    from data.adapters.breast.busv_adapter import BUSVAdapter
+
+    root = Path(
+        "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/"
+        "Miccai 2022 BUV Dataset"
+    )
+    with open(root / "imagenet_vid_train_15frames.json") as f:
+        train_ids = {
+            v["name"].split("/")[-1] for v in json.load(f)["videos"]
+        }
+    with open(root / "imagenet_vid_val.json") as f:
+        val_ids = {
+            v["name"].split("/")[-1] for v in json.load(f)["videos"]
+        }
+
+    entries = list(BUSVAdapter(root=root).iter_entries())
+    assert len(entries) == 186
+    for e in entries:
+        vid = e.source_meta["video_id"]
+        expected = "train" if vid in train_ids else "val"
+        assert e.split == expected
+        assert all(Path(p).exists() for p in e.image_paths)

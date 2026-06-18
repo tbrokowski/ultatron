@@ -117,9 +117,10 @@ ANATOMY_LABEL_VOCAB: Dict[str, List[str]] = {
         "cranium", "cavum_septi_pellucidi", "cerebellum",
     ],
     "fetal_abdomen": [
-        "fetal_abdomen", "fetal_brain", "fetal_femur",
-        "fetal_thorax", "fetal_face", "placenta",
-        "maternal_cervix", "other_fetal_plane",
+        "fetal_abdomen", "fetal_abdominal_artery", "fetal_liver",
+        "fetal_stomach", "fetal_abdominal_vein",
+        "fetal_brain", "fetal_femur", "fetal_thorax", "fetal_face",
+        "placenta", "maternal_cervix", "other_fetal_plane",
     ],
     "liver": [
         "liver", "hepatocellular_carcinoma", "hemangioma",

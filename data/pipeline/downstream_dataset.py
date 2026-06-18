@@ -136,11 +136,15 @@ class DownstreamDataset(USFoundationDataset):
         e = self.entries[idx]
 
         # ── Load image ───────────────────────────────────────────────────────
+        source_frame_idx = -1
         if e.modality_type in ("video", "pseudo_video"):
-            frames = self._load_clip(e, max_frames=64)
-            frame_idx = torch.randint(len(frames), (1,)).item()
-            img = frames[frame_idx]
+            frames = self._load_clip(e, max_frames=None)
+            source_frame_idx = self._pick_video_frame_index(e, len(frames))
+            img = frames[source_frame_idx]
         else:
+            meta_frame = (e.source_meta or {}).get("frame_idx")
+            if meta_frame is not None:
+                source_frame_idx = int(meta_frame)
             img = self._load_frame(e, 0)
 
         if self.return_aug:
@@ -179,7 +183,10 @@ class DownstreamDataset(USFoundationDataset):
             if inst.mask_path and seg_mask is None:
                 mp = self._remap_path(inst.mask_path)
                 if Path(mp).exists():
-                    mask_np = load_mask(mp)
+                    mask_np = load_mask(
+                        mp,
+                        mask_channel=getattr(inst, "mask_channel", None),
+                    )
                     seg_mask = torch.from_numpy(mask_np).float().unsqueeze(0)
             if inst.classification_label is not None and cls_label == -1:
                 cls_label = inst.classification_label
@@ -195,19 +202,21 @@ class DownstreamDataset(USFoundationDataset):
                     prompt_points.extend(inst.keypoints)
 
         return {
-            "image":          image_tensor,
-            "sample_id":      e.sample_id,
-            "dataset_id":     e.dataset_id,
-            "anatomy":        e.anatomy_family,
-            "modality_type":  e.modality_type,
-            "label_targets":  targets,
-            "is_promptable":  e.is_promptable,
-            "prompt_boxes":   prompt_boxes,
-            "prompt_points":  prompt_points,
+            "image":            image_tensor,
+            "sample_id":        e.sample_id,
+            "dataset_id":       e.dataset_id,
+            "study_id":         e.study_id or "",
+            "anatomy":          e.anatomy_family,
+            "modality_type":    e.modality_type,
+            "source_frame_idx": source_frame_idx,
+            "label_targets":    targets,
+            "is_promptable":    e.is_promptable,
+            "prompt_boxes":     prompt_boxes,
+            "prompt_points":    prompt_points,
             # Legacy
-            "seg_mask":       seg_mask,
-            "cls_label":      cls_label,
-            "task_type":      e.task_type,
+            "seg_mask":         seg_mask,
+            "cls_label":        cls_label,
+            "task_type":        e.task_type,
         }
 
     def _build_target(
@@ -241,7 +250,10 @@ class DownstreamDataset(USFoundationDataset):
             mp = self._remap_path(inst.mask_path)
             if not Path(mp).exists():
                 continue
-            mask_np = load_mask(mp)
+            mask_np = load_mask(
+                mp,
+                mask_channel=getattr(inst, "mask_channel", None),
+            )
             mask_t = torch.from_numpy(mask_np).float().unsqueeze(0)
             return LabelTarget(
                 head_id=spec.head_id,

@@ -30,6 +30,11 @@ The CSV frame_label is emitted as a secondary classification instance:
   4 -> 1 = only_sp
   5 -> 2 = only_head
   6 -> 3 = sp_head
+
+Manifest:
+  * One image entry per CSV-listed frame (segmentation / image SSL stream).
+  * One pseudo_video entry per session folder (78 videos), built from the same
+    extracted frames in CSV order for video SSL training.
 """
 from __future__ import annotations
 
@@ -105,87 +110,196 @@ class JNUIFMAdapter(BaseAdapter):
         }
 
         for video_dir in video_dirs:
-            csv_path = video_dir / "frame_label.csv"
-            image_dir = video_dir / "image"
-            mask_dir = video_dir / "mask"
-            if not csv_path.exists() or not image_dir.exists():
+            split = self.split_override or video_split.get(video_dir.name, "train")
+            yield from self._iter_video_entries(video_dir, split)
+
+    def _iter_video_entries(
+        self,
+        video_dir: Path,
+        split: str,
+    ) -> Iterator[USManifestEntry]:
+        csv_path = video_dir / "frame_label.csv"
+        image_dir = video_dir / "image"
+        mask_dir = video_dir / "mask"
+        if not csv_path.exists() or not image_dir.exists():
+            return
+
+        frame_records: List[dict] = []
+        for frame_id, raw_frame_label in self._load_frame_rows(csv_path):
+            stem = f"{video_dir.name}_{frame_id}"
+            img_path = image_dir / f"{stem}.png"
+            raw_mask_path = mask_dir / f"{stem}_mask.png"
+            if not img_path.exists():
                 continue
 
-            rows = self._load_frame_rows(csv_path)
-            for frame_id, raw_frame_label in rows:
-                stem = f"{video_dir.name}_{frame_id}"
-                img_path = image_dir / f"{stem}.png"
-                raw_mask_path = mask_dir / f"{stem}_mask.png"
-                if not img_path.exists():
-                    continue
-
-                has_mask = raw_mask_path.exists()
-                remapped_mask_path = (
-                    self._build_remapped_mask(
-                        raw_mask_path=raw_mask_path,
-                        video_id=video_dir.name,
-                        stem=stem,
-                    )
-                    if has_mask else None
+            has_mask = raw_mask_path.exists()
+            remapped_mask_path = (
+                self._build_remapped_mask(
+                    raw_mask_path=raw_mask_path,
+                    video_id=video_dir.name,
+                    stem=stem,
                 )
+                if has_mask else None
+            )
 
-                frame_label_raw, frame_label_idx = FRAME_LABELS.get(
-                    raw_frame_label,
-                    (f"unknown_{raw_frame_label}", -1),
-                )
+            frame_label_raw, frame_label_idx = FRAME_LABELS.get(
+                raw_frame_label,
+                (f"unknown_{raw_frame_label}", -1),
+            )
 
-                instances = []
-                if has_mask:
-                    instances.extend(
-                        self._make_instance(
-                            instance_id=f"{stem}_{struct_name}",
-                            label_raw=struct_name,
-                            label_ontology=label_ontology,
-                            mask_path=str(remapped_mask_path),
-                            mask_channel=class_value,
-                            is_promptable=self._structure_visible(raw_frame_label, struct_name),
-                        )
-                        for struct_name, label_ontology, class_value in STRUCTURES
-                    )
+            instances = self._frame_instances(
+                stem=stem,
+                raw_frame_label=raw_frame_label,
+                frame_label_raw=frame_label_raw,
+                frame_label_idx=frame_label_idx,
+                has_mask=has_mask,
+                remapped_mask_path=remapped_mask_path,
+            )
 
-                instances.append(
+            common_meta = {
+                "video_id": video_dir.name,
+                "frame_id": frame_id,
+                "frame_label_raw": raw_frame_label,
+                "frame_label": frame_label_raw,
+                "frame_label_index": frame_label_idx,
+                "raw_mask_path": str(raw_mask_path) if raw_mask_path.exists() else None,
+                "remapped_mask_path": str(remapped_mask_path) if remapped_mask_path else None,
+                "mask_value_mapping": {"7": 1, "8": 2},
+                "mask_enhance_ignored": True,
+                "is_grayscale": self._is_grayscale(img_path),
+            }
+
+            yield self._make_entry(
+                str(img_path),
+                split=split,
+                modality="image",
+                instances=instances,
+                study_id=video_dir.name,
+                series_id=stem,
+                instance_id=stem,
+                frame_indices=[frame_id],
+                view_type="intrapartum_transperineal",
+                has_mask=has_mask,
+                task_type="segmentation" if has_mask else "classification",
+                ssl_stream="image",
+                is_promptable=has_mask,
+                source_meta=common_meta,
+            )
+
+            frame_records.append({
+                "frame_id": frame_id,
+                "stem": stem,
+                "img_path": img_path,
+                "instances": instances,
+                "has_mask": has_mask,
+                "frame_label_raw": frame_label_raw,
+                "frame_label_index": frame_label_idx,
+                "raw_frame_label": raw_frame_label,
+            })
+
+        if not frame_records:
+            return
+
+        yield self._make_pseudo_video_entry(video_dir.name, split, frame_records)
+
+    def _make_pseudo_video_entry(
+        self,
+        video_id: str,
+        split: str,
+        frame_records: List[dict],
+    ) -> USManifestEntry:
+        image_paths = [str(rec["img_path"]) for rec in frame_records]
+        frame_ids = [rec["frame_id"] for rec in frame_records]
+        has_mask = any(rec["has_mask"] for rec in frame_records)
+
+        vid_instances = []
+        for rec in frame_records:
+            for inst in rec["instances"]:
+                vid_instances.append(
                     self._make_instance(
-                        instance_id=f"{stem}_frame_label",
-                        label_raw=frame_label_raw,
-                        label_ontology="jnu_ifm_frame_visibility",
-                        classification_label=frame_label_idx,
-                        is_promptable=False,
+                        instance_id=f"{inst.instance_id}_vid",
+                        label_raw=inst.label_raw,
+                        label_ontology=inst.label_ontology,
+                        mask_path=inst.mask_path,
+                        mask_channel=inst.mask_channel,
+                        classification_label=inst.classification_label,
+                        is_promptable=inst.is_promptable,
                     )
                 )
 
-                split = self.split_override or video_split.get(video_dir.name, "train")
-                yield self._make_entry(
-                    str(img_path),
-                    split=split,
-                    modality="image",
-                    instances=instances,
-                    study_id=video_dir.name,
-                    series_id=stem,
-                    instance_id=stem,
-                    frame_indices=[frame_id],
-                    view_type="intrapartum_transperineal",
-                    has_mask=has_mask,
-                    task_type="segmentation" if has_mask else "classification",
-                    ssl_stream="image",
-                    is_promptable=has_mask,
-                    source_meta={
-                        "video_id": video_dir.name,
-                        "frame_id": frame_id,
-                        "frame_label_raw": raw_frame_label,
-                        "frame_label": frame_label_raw,
-                        "frame_label_index": frame_label_idx,
-                        "raw_mask_path": str(raw_mask_path) if raw_mask_path.exists() else None,
-                        "remapped_mask_path": str(remapped_mask_path) if remapped_mask_path else None,
-                        "mask_value_mapping": {"7": 1, "8": 2},
-                        "mask_enhance_ignored": True,
-                        "is_grayscale": self._is_grayscale(img_path),
-                    },
+        height, width = self._image_dims(frame_records[0]["img_path"])
+        frame_labels = [
+            {
+                "frame_id": rec["frame_id"],
+                "frame_label": rec["frame_label_raw"],
+                "frame_label_index": rec["frame_label_index"],
+                "frame_label_raw": rec["raw_frame_label"],
+            }
+            for rec in frame_records
+        ]
+
+        return self._make_entry(
+            image_paths,
+            split=split,
+            modality="pseudo_video",
+            instances=vid_instances,
+            study_id=video_id,
+            series_id=video_id,
+            instance_id=video_id,
+            view_type="intrapartum_transperineal",
+            height=height,
+            width=width,
+            num_frames=len(image_paths),
+            frame_indices=frame_ids,
+            is_cine=True,
+            has_temporal_order=True,
+            has_mask=has_mask,
+            task_type="segmentation" if has_mask else "classification",
+            ssl_stream="video",
+            is_promptable=has_mask,
+            source_meta={
+                "video_id": video_id,
+                "video_source": "extracted_frames",
+                "n_frames": len(image_paths),
+                "frame_labels": frame_labels,
+                "mask_value_mapping": {"7": 1, "8": 2},
+                "mask_enhance_ignored": True,
+            },
+        )
+
+    def _frame_instances(
+        self,
+        stem: str,
+        raw_frame_label: int,
+        frame_label_raw: str,
+        frame_label_idx: int,
+        has_mask: bool,
+        remapped_mask_path: Optional[Path],
+    ) -> list:
+        instances = []
+        if has_mask:
+            instances.extend(
+                self._make_instance(
+                    instance_id=f"{stem}_{struct_name}",
+                    label_raw=struct_name,
+                    label_ontology=label_ontology,
+                    mask_path=str(remapped_mask_path),
+                    mask_channel=class_value,
+                    is_promptable=self._structure_visible(raw_frame_label, struct_name),
                 )
+                for struct_name, label_ontology, class_value in STRUCTURES
+            )
+
+        instances.append(
+            self._make_instance(
+                instance_id=f"{stem}_frame_label",
+                label_raw=frame_label_raw,
+                label_ontology="jnu_ifm_frame_visibility",
+                classification_label=frame_label_idx,
+                is_promptable=False,
+            )
+        )
+        return instances
 
     @staticmethod
     def _load_frame_rows(csv_path: Path) -> List[Tuple[int, int]]:
@@ -231,3 +345,12 @@ class JNUIFMAdapter(BaseAdapter):
                 return img.mode in ("L", "LA")
         except Exception:
             return False
+
+    @staticmethod
+    def _image_dims(img_path: Path) -> Tuple[int, int]:
+        try:
+            with Image.open(img_path) as img:
+                width, height = img.size
+                return height, width
+        except Exception:
+            return 0, 0

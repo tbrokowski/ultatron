@@ -7,6 +7,7 @@ Dataset layout (Store):
     /capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos/
       cleaned/
         videos/                 # {PatientID}_{Site}_{Depth}_{Count}.mp4
+        images/                 # {PatientID}_{Site}_{Depth}_{Count}.png (still frames)
         processed_files.csv
         rsa_pathology_labels.csv
 
@@ -23,7 +24,8 @@ We interpret:
   * {SITE}_severity              → ordinal severity (1–7, -1 = not measured)
 
 This adapter mirrors BeninLUSAdapter but adds a per-video `severity` field
-in source_meta for a regression-style head.
+in source_meta for a regression-style head. It emits one USManifestEntry per
+media file (video OR image).
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from data.schema.manifest import USManifestEntry, Instance
 from .benin_lus import (
     LUS_CANONICAL_FINDINGS,
     _SUFFIX_TO_INDEX,
+    resolve_lus_media,
 )
 
 
@@ -68,9 +71,10 @@ class RSALUSAdapter(BaseAdapter):
         if not labels_path.exists():
             raise FileNotFoundError(f"RSA-LUS rsa_pathology_labels.csv not found at {labels_path}")
 
+        # Load all rows — both video and image rows (Type column, capital T)
         with processed_path.open() as f:
             reader = csv.DictReader(f)
-            self._processed_rows = [row for row in reader if row.get("Type", "").lower() == "video"]
+            self._processed_rows = list(reader)
 
         with labels_path.open() as f:
             reader = csv.DictReader(f)
@@ -128,6 +132,7 @@ class RSALUSAdapter(BaseAdapter):
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
         videos_root = self.cleaned_root / "videos"
+        images_root = self.cleaned_root / "images"
 
         for row in self._processed_rows:
             patient_id = row.get("Patient ID")
@@ -139,9 +144,10 @@ class RSALUSAdapter(BaseAdapter):
             if not new_name:
                 continue
 
-            vpath = videos_root / new_name
-            if not vpath.exists():
+            resolved = resolve_lus_media(row, videos_root, images_root)
+            if resolved is None:
                 continue
+            media_path, modality, ssl_stream, is_cine, media_meta = resolved
 
             split = self._patient_splits.get(patient_id, "train")
 
@@ -191,6 +197,7 @@ class RSALUSAdapter(BaseAdapter):
                 "site": site,
                 "depth": depth,
             }
+            source_meta.update(media_meta)
             if patient_labels is not None:
                 source_meta["patient_labels"] = patient_labels
             if video_labels:
@@ -199,18 +206,16 @@ class RSALUSAdapter(BaseAdapter):
                 source_meta["severity"] = severity
 
             yield self._make_entry(
-                str(vpath),
+                str(media_path),
                 split=split,
-                modality="video",
+                modality=modality,
                 instances=instances,
                 study_id=patient_id,
                 view_type=site,
-                is_cine=True,
-                has_temporal_order=True,
+                is_cine=is_cine,
+                has_temporal_order=(modality == "video"),
                 task_type=task_type,
-                # Include RSA videos in BOTH streams so Phase 3 can sample
-                # frames (image stream) paired with clips (video stream).
-                ssl_stream="both",
+                ssl_stream=ssl_stream,
                 is_promptable=False,
                 source_meta=source_meta,
             )

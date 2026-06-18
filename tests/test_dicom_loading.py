@@ -19,7 +19,14 @@ from data.pipeline.dataset import (
 )
 
 
-def _write_dicom(path, pixel_array, *, photometric="MONOCHROME2", samples_per_pixel=1):
+def _write_dicom(
+    path,
+    pixel_array,
+    *,
+    photometric="MONOCHROME2",
+    samples_per_pixel=1,
+    include_planar=True,
+):
     import pydicom
     from pydicom.uid import generate_uid
 
@@ -33,7 +40,7 @@ def _write_dicom(path, pixel_array, *, photometric="MONOCHROME2", samples_per_pi
 
     ds.PhotometricInterpretation = photometric
     ds.SamplesPerPixel = samples_per_pixel
-    if samples_per_pixel > 1:
+    if samples_per_pixel > 1 and include_planar:
         ds.PlanarConfiguration = 0
     ds.Rows, ds.Columns = pixel_array.shape[-2], pixel_array.shape[-1]
     ds.BitsAllocated = 8
@@ -113,3 +120,37 @@ def test_dicom_frames_returns_rgb_uint8(tmp_path):
     assert len(frames) >= 1
     assert frames[0].dtype == np.uint8
     assert frames[0].shape == (16, 16, 3)
+
+
+def test_dicom_frames_patches_missing_planar_configuration(tmp_path):
+    pixels = np.random.randint(0, 255, (16, 16, 3), dtype=np.uint8)
+    dcm_path = tmp_path / "rgb_no_planar.dcm"
+    _write_dicom(
+        dcm_path, pixels, photometric="RGB", samples_per_pixel=3, include_planar=False,
+    )
+
+    frames = _dicom_frames(str(dcm_path))
+    assert len(frames) >= 1
+    assert frames[0].dtype == np.uint8
+    assert frames[0].shape == (16, 16, 3)
+
+
+def test_dicom_frames_raises_when_no_pixel_data(tmp_path):
+    import pydicom
+    from pydicom.uid import generate_uid
+
+    ds = Dataset()
+    ds.file_meta = FileMetaDataset()
+    ds.file_meta.TransferSyntaxUID = ImplicitVRLittleEndian
+    ds.file_meta.MediaStorageSOPClassUID = generate_uid()
+    ds.file_meta.MediaStorageSOPInstanceUID = generate_uid()
+    ds.is_little_endian = True
+    ds.is_implicit_VR = True
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.SamplesPerPixel = 1
+    ds.Rows, ds.Columns = 8, 8
+    dcm_path = tmp_path / "metadata_only.dcm"
+    pydicom.dcmwrite(str(dcm_path), ds)
+
+    with pytest.raises(ValueError, match="no pixel data"):
+        _dicom_frames(str(dcm_path))

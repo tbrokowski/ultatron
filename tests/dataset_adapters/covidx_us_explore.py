@@ -24,7 +24,7 @@ from typing import Iterable, List
 import numpy as np
 from PIL import Image
 
-from data.adapters.dataset_adapters import COVIDxUSAdapter
+from data.adapters.lung.covidx_us import COVIDxUSAdapter
 from data.schema.manifest import (
     ManifestWriter,
     USManifestEntry,

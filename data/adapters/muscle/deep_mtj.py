@@ -72,13 +72,20 @@ def _load_keypoints(root: Path) -> dict[str, tuple[float, float]]:
     Returns {filename_stem: (x, y)}.
     """
     kp: dict[str, tuple[float, float]] = {}
-    for csv_name in ("MTJ_Benchmark_Labels.csv", "labels.csv", "annotations.csv"):
-        csv_path = root / csv_name
-        if csv_path.exists():
+    csv_names = ("MTJ_Benchmark_Labels.csv", "labels.csv", "annotations.csv")
+    search_roots = [root]
+    if root.is_dir():
+        search_roots.extend(p for p in root.iterdir() if p.is_dir())
+    for search_root in search_roots:
+        if not search_root.is_dir():
+            continue
+        for csv_name in csv_names:
+            csv_path = search_root / csv_name
+            if not csv_path.is_file():
+                continue
             with open(csv_path, newline="") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    # Flexible column name handling
                     fname_col = next(
                         (k for k in row if "file" in k.lower() or "name" in k.lower()), None
                     )
@@ -90,7 +97,8 @@ def _load_keypoints(root: Path) -> dict[str, tuple[float, float]]:
                             kp[stem] = (float(row[x_col]), float(row[y_col]))
                         except (ValueError, KeyError):
                             pass
-            break
+            if kp:
+                return kp
     return kp
 
 
@@ -129,21 +137,22 @@ class DeepMTJAdapter(BaseAdapter):
         resolutions: list[str] | None = None,
     ):
         super().__init__(root, split_override)
-        self._resolutions = resolutions  # None = all found
+        # Default to fullres to avoid duplicate entries across resolutions.
+        self._resolutions = resolutions if resolutions is not None else ["fullres"]
 
     def iter_entries(self) -> Iterator[USManifestEntry]:
         keypoints = _load_keypoints(self.root)
 
-        # Collect images across all resolution subdirs
         samples: list[tuple[Path, str]] = []
 
         res_dirs = [
             d for d in _RES_DIRS
-            if (self.root / d).is_dir()
-            and (self._resolutions is None or d in self._resolutions)
+            if (self.root / d).is_dir() and d in self._resolutions
         ]
+        # Fallback to any available resolution dir if preferred dirs missing.
+        if not res_dirs:
+            res_dirs = [d for d in _RES_DIRS if (self.root / d).is_dir()]
 
-        # Fallback: images directly at root
         if not res_dirs:
             for p in sorted(self.root.iterdir()):
                 if _is_image(p):
@@ -162,12 +171,23 @@ class DeepMTJAdapter(BaseAdapter):
             kp           = keypoints.get(img_path.stem)
             has_kp       = kp is not None
 
+            instances = []
+            if has_kp:
+                instances.append(self._make_instance(
+                    instance_id=img_path.stem,
+                    label_raw="mtj",
+                    label_ontology="mtj",
+                    keypoints=[[kp[0], kp[1]]],
+                    is_promptable=False,
+                ))
+
             yield self._make_entry(
                 str(img_path),
                 split,
                 modality      = "image",
-                instances     = [],          # keypoint = no mask Instance
+                instances     = instances,
                 has_mask      = False,
+                has_points    = has_kp,
                 task_type     = "keypoint" if has_kp else "ssl_only",
                 ssl_stream    = "image",
                 is_promptable = False,

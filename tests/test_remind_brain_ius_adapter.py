@@ -17,7 +17,10 @@ def test_remind_brain_ius_adapter_filters_to_us_dicom_series(remind_brain_ius_ro
         assert entry.anatomy_family == "brain"
         assert entry.modality_type == "volume"
         assert entry.is_3d is True
+        assert entry.is_cine is True
+        assert entry.has_temporal_order is True
         assert entry.task_type == "ssl_only"
+        assert entry.ssl_stream == "both"
+        assert entry.instances == []
         assert entry.series_id.startswith("US_")
         assert "/US_" in entry.image_paths[0]
-

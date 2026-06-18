@@ -11,7 +11,7 @@ seed: 42
 
 # Canonical run1 manifest (repo-local; paths point at Scratch after staging).
 manifest:
-  path: "dataset_exploration_outputs/run1/run1_train_v2.jsonl"
+  path: "dataset_exploration_outputs/run1/run1_train_v3.jsonl"
   val_path: null
   root_remap: {}
 

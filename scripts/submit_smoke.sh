@@ -43,6 +43,7 @@ JOB_ID=$(sbatch \
     --parsable \
     --wrap="
 set -euo pipefail
+ulimit -c 0
 cd ${REPO_DIR}
 source .venv/bin/activate
 

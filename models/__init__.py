@@ -3,6 +3,9 @@ models/__init__.py
 ==================
 Import all backbone subpackages so their registrations fire on first import.
 Then expose the public API: ModelConfig, build_image_branch, build_video_branch.
+
+Single-student Hiera pipeline is exposed under models.student.*
+The dual-branch model and all its internals are unchanged.
 """
 # Trigger all @register_* decorators
 from . import image_backbones   # noqa: F401
@@ -25,4 +28,10 @@ from .registry import (         # noqa: F401
     list_image_backbones,
     list_video_backbones,
     list_frozen_teachers,
+    build_student_backbone,
+    list_student_backbones,
+    register_student_backbone,
 )
+
+# Single-student Hiera pipeline (imported lazily to avoid mandatory heavy deps)
+from . import student           # noqa: F401

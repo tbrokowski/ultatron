@@ -2,16 +2,19 @@
 data/adapters/remind_brain_ius.py  ·  ReMIND raw intraoperative brain US
 ============================================================================
 
-REMIND-Brain-iUS stores mixed MRI, US, and SEG DICOM series per case. For the
-foundation manifest we keep only the ultrasound DICOM objects and ignore the
-MRI/SEG modalities.
+REMIND-Brain-iUS stores mixed MRI, US, and SEG DICOM series per case.  The
+foundation manifest keeps only the 3D iUS sweeps (``US_*`` series).  Co-located
+``SEG_*`` DICOM files are MRI-referenced segmentations (tumor, cerebrum,
+ventricles, etc.) and are not attached as US mask labels because they live in
+pre-operative MR space rather than iUS space.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterator, List
+from typing import Dict, Iterator
 
 from data.adapters.base import BaseAdapter
+from data.adapters.brain._volume_utils import dicom_num_frames, dicom_series_description
 from data.schema.manifest import USManifestEntry
 
 
@@ -50,6 +53,8 @@ class REMINDBrainIUSAdapter(BaseAdapter):
                 for series_dir in us_series_dirs:
                     dcm_files = sorted(series_dir.glob("*.dcm"))
                     for dcm_path in dcm_files:
+                        num_frames = dicom_num_frames(dcm_path)
+                        series_desc = dicom_series_description(dcm_path)
                         yield self._make_entry(
                             str(dcm_path),
                             split=split,
@@ -57,14 +62,19 @@ class REMINDBrainIUSAdapter(BaseAdapter):
                             study_id=case_id,
                             series_id=series_dir.name,
                             is_3d=True,
-                            view_type="intraoperative_us_dicom",
+                            is_cine=True,
+                            has_temporal_order=True,
+                            num_frames=num_frames,
+                            view_type=series_desc or "intraoperative_us_dicom",
                             task_type="ssl_only",
-                            ssl_stream="image",
+                            ssl_stream="both",
                             is_promptable=False,
                             source_meta={
                                 "case_id": case_id,
                                 "study_uid": study_dir.name,
                                 "series_uid": series_dir.name,
+                                "series_description": series_desc,
+                                "num_frames": num_frames,
                             },
                         )
 

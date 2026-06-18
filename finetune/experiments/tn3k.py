@@ -22,7 +22,8 @@ from torch.utils.data import DataLoader, Dataset
 
 from data.adapters.thyroid.tn3k_layout import list_tn3k_samples
 from finetune.base import FinetuneExperiment, FinetuneConfig
-from models.heads import build_seg_head
+from finetune.seg_common import build_seg_finetune_head, compute_binary_seg_loss
+from models.heads import forward_seg_head
 from eval.metrics import dice_score, iou_score
 from eval.benchmarks.tn3k import TN3KBenchmark
 
@@ -60,23 +61,17 @@ class TN3KFinetune(FinetuneExperiment):
     BENCHMARK_CLS   = TN3KBenchmark
 
     def build_head(self, embed_dim: int, cfg: FinetuneConfig) -> nn.Module:
-        return build_seg_head(embed_dim, n_classes=1, head_type=cfg.head_type)
+        return build_seg_finetune_head(self.encoder, cfg, n_classes=1)
 
     def build_dataloader(self, split: str) -> DataLoader:
-        return DataLoader(TN3KFinetuneDataset(str(self.data_root), split),
+        return DataLoader(TN3KFinetuneDataset(str(self.data_root), split, fold=self.cfg.cv_fold),
                           batch_size=self.cfg.batch_size, shuffle=(split == "train"),
                           num_workers=self.cfg.num_workers, pin_memory=True)
 
     def compute_loss(self, batch, feats, head_output) -> torch.Tensor:
-        target = batch["mask"]
-        pred   = F.interpolate(head_output, size=target.shape[-2:],
-                               mode="bilinear", align_corners=False)
-        bce   = F.binary_cross_entropy_with_logits(pred, target)
-        p_s   = torch.sigmoid(pred)
-        inter = (p_s * target).sum(dim=(1, 2, 3))
-        denom = p_s.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
-        dice  = (1.0 - (2.0 * inter + 1.0) / (denom + 1.0)).mean()
-        return bce + dice
+        return compute_binary_seg_loss(
+            head_output, batch["mask"], self.cfg, use_pos_weight=False,
+        )
 
     @torch.no_grad()
     def compute_val_metrics(self, val_loader: DataLoader) -> dict:
@@ -91,7 +86,7 @@ class TN3KFinetune(FinetuneExperiment):
                      if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
             feats   = self.encoder.encode_image(batch["image"])
-            logits  = self.head(feats["patch_tokens"])
+            logits  = forward_seg_head(self.head, feats)
             pred    = F.interpolate(logits, size=batch["mask"].shape[-2:],
                                     mode="bilinear", align_corners=False)
             loss    = self.compute_loss(batch, feats, logits)
@@ -110,41 +105,6 @@ class TN3KFinetune(FinetuneExperiment):
             "val_dice": round(float(np.mean([s["dice"] for s in per_sample])), 4),
             "val_iou":  round(float(np.mean([s["iou"]  for s in per_sample])), 4),
         }
-
-    def run_viz(self, results: dict, output_dir: Path) -> None:
-        try:
-            from viz.segmentation import plot_segmentation_grid, plot_dice_distribution
-            from viz.core import save_figure
-        except ImportError:
-            return
-        test_loader = self.build_dataloader("test")
-        images, preds, gts, ids = [], [], [], []
-        self.head.eval()
-        self.encoder.eval()
-        with torch.no_grad():
-            for batch in test_loader:
-                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-                         for k, v in batch.items()}
-                feats   = self.encoder.encode_image(batch["image"])
-                logits  = self.head(feats["patch_tokens"])
-                pred    = F.interpolate(logits, size=(IMG_SIZE, IMG_SIZE),
-                                        mode="bilinear", align_corners=False)
-                pred_np = (torch.sigmoid(pred) > 0.5).cpu().numpy()[:, 0]
-                gt_np   = (batch["mask"] > 0.5).cpu().numpy()[:, 0]
-                img_np  = (batch["image"].cpu().permute(0, 2, 3, 1).numpy() * 255
-                           ).astype(np.uint8)
-                for i in range(len(pred_np)):
-                    images.append(img_np[i]); preds.append(pred_np[i])
-                    gts.append(gt_np[i]);     ids.append(batch["sample_id"][i])
-                if len(images) >= 24: break
-        fig = plot_segmentation_grid(images[:24], preds[:24], gts[:24],
-                                      sample_ids=ids[:24],
-                                      title="TN3K Thyroid Nodule Segmentation")
-        save_figure(fig, output_dir / "tn3k_seg_grid.png")
-        dices = [dice_score(preds[i].astype(float), gts[i].astype(float))
-                 for i in range(len(preds))]
-        fig2 = plot_dice_distribution(np.array(dices), title="TN3K Dice Distribution")
-        save_figure(fig2, output_dir / "tn3k_dice_hist.png")
 
 
 if __name__ == "__main__":
