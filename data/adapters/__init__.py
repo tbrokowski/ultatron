@@ -120,6 +120,7 @@ from .thyroid.tn3k    import TN3KAdapter
 from .thyroid.tn5000  import TN5000Adapter
 from .thyroid.tnscui  import TNSCUIAdapter
 from .thyroid.thyroid_nodule_pathology import ThyroidNodulePathologyAdapter
+from .thyroid.us_enhance               import USEnhanceAdapter
 
 # ── Ovarian ───────────────────────────────────────────────────────────────────
 from .ovarian.mmotu3d                 import MMOTU3DAdapter
@@ -285,6 +286,7 @@ ADAPTER_REGISTRY = {
     "TN5000":           TN5000Adapter,
     "TNSCUI":           TNSCUIAdapter,
     "Thyroid-Nodule-Pathology": ThyroidNodulePathologyAdapter,
+    "us-enhance-2023":          USEnhanceAdapter,
     "MuSeg":                    MuSegAdapter,
     "Micro-Ultrasound-Prostate-Segmentation": MicroUltrasoundProstateSegAdapter,
     # Ovarian
@@ -384,7 +386,7 @@ __all__ = [
     "NormalKidneyCVAdapter", "KidneyUSAdapter",
     # Thyroid
     "SegthyAdapter", "DDTIAdapter", "TG3KAdapter", "TN5000Adapter",
-    "TNSCUIAdapter",
+    "TNSCUIAdapter", "USEnhanceAdapter",
     # Ovarian
     "MMOTU3DAdapter", "MMOTU2DAdapter", "PolycysticOvaryTelkomAdapter",
     "PCOSGenAdapter",
