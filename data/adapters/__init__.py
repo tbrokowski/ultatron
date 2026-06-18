@@ -159,7 +159,8 @@ from .skin.dermatologic_skin_lesions import DermatologicSkinLesionsAdapter
 
 # ── Nerve ───────────────────────────────────────────────────────────────────────
 from .nerve.optic_nerve_sheaths  import OpticNerveSheathsAdapter
-from .nerve.us_guided_anesthesia import USGuidedAnesthesiaAdapter
+from .nerve.us_guided_anesthesia  import USGuidedAnesthesiaAdapter
+from .nerve.brachial_plexus_full  import BrachialPlexusFullAdapter
 
 # ── Generic mask-pair factory ─────────────────────────────────────────────────
 from .generic_mask import GenericMaskPairAdapter, _make_generic
@@ -300,7 +301,8 @@ ADAPTER_REGISTRY = {
     "braTioUS":         BraTioUSAdapter,
     # Nerve
     "optic-nerve-sheaths":  OpticNerveSheathsAdapter,
-    "us-guided-anesthesia": USGuidedAnesthesiaAdapter,
+    "us-guided-anesthesia":   USGuidedAnesthesiaAdapter,
+    "brachial-plexus-full":   BrachialPlexusFullAdapter,
 }
 
 
@@ -393,7 +395,7 @@ __all__ = [
     # Brain
     "BraTioUSAdapter",
     # Nerve
-    "OpticNerveSheathsAdapter", "USGuidedAnesthesiaAdapter",
+    "OpticNerveSheathsAdapter", "USGuidedAnesthesiaAdapter", "BrachialPlexusFullAdapter",
     # Generic
     "GenericMaskPairAdapter", "_make_generic",
     # Helpers
