@@ -54,6 +54,7 @@ from .lung.covid_blues     import COVIDBLUESAdapter
 from .lung.pocus_lus       import POCUSLUSAdapter
 from .lung.ultrasound_lus  import ULTRASOUNDLUSAdapter
 from .lung.lus_data          import LUSDataAdapter
+from .lung.uganda_lus        import UgandaLUSAdapter
 
 # ── Liver ─────────────────────────────────────────────────────────────────────
 from .liver.aul               import AULAdapter
@@ -227,6 +228,7 @@ ADAPTER_REGISTRY = {
     "POCUS-LUS":                POCUSLUSAdapter,
     "ULTRASOUND-LUS":           ULTRASOUNDLUSAdapter,
     "LUS-data":                 LUSDataAdapter,
+    "uganda-lus":               UgandaLUSAdapter,
     # Liver
     "AUL":                      AULAdapter,
     "105US":                    US105Adapter,
@@ -359,6 +361,7 @@ __all__ = [
     "LUSSPhantomAdapter", "LungDatabaseAdapter", "PocusCovidAdapter",
     "BeninVideosAdapter", "COVIDBLUESAdapter", "POCUSLUSAdapter",
     "ULTRASOUNDLUSAdapter",
+    "UgandaLUSAdapter",
     # Liver
     "AULAdapter", "US105Adapter", "FattyLiverBmodeAdapter",
     "LiverCVProjectAdapter", "LEPsetAdapter",
