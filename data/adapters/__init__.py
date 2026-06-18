@@ -285,7 +285,7 @@ ADAPTER_REGISTRY = {
     "TG3K":             TG3KAdapter,
     "TN5000":           TN5000Adapter,
     "TNSCUI":           TNSCUIAdapter,
-    "Thyroid-Nodule-Pathology": ThyroidNodulePathologyAdapter,
+    "thyroid-nodule-pathology": ThyroidNodulePathologyAdapter,
     "us-enhance-2023":          USEnhanceAdapter,
     "MuSeg":                    MuSegAdapter,
     "Micro-Ultrasound-Prostate-Segmentation": MicroUltrasoundProstateSegAdapter,
