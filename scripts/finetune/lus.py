@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benin-LUS + RSA-LUS patient-level TB classification (MIL) — all backbones, one GPU.
+Benin-LUS patient-level TB classification (MIL) — all backbones, one GPU.
 
 Also runnable as: python scripts/finetune/benin_lus.py
 """
@@ -17,7 +17,7 @@ from scripts.finetune.common import add_common_args, launch_experiment
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Finetune comparison: LUS patient TB (Benin + RSA)",
+        description="Finetune comparison: LUS patient TB (Benin-LUS only, gated MIL)",
     )
     add_common_args(parser)
     args = parser.parse_args()

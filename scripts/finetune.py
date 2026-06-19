@@ -406,20 +406,20 @@ def _run_echonet(img_branch, vid_branch, data_root, raw_cfg,
 
 def _run_lus(img_branch, vid_branch, benin_root, rsa_root, raw_cfg,
              out_dir, device, eval_only, all_results):
-    from finetune.experiments.lus_patient import LUSPatientFinetune
+    from finetune.experiments.lus_patient import LUSPatientFinetune, lus_patient_kwargs_from_raw
     from finetune.base import FinetuneConfig
 
+    include_rsa = bool(raw_cfg.get("include_rsa", False))
     has_benin = benin_root and Path(benin_root).exists()
-    has_rsa   = rsa_root   and Path(rsa_root).exists()
+    has_rsa   = include_rsa and rsa_root and Path(rsa_root).exists()
     if not has_benin and not has_rsa:
-        log.warning(f"[LUS] Neither benin_root nor rsa_root found. Skipping.")
+        log.warning("[LUS] Benin root not found (and RSA not enabled/found). Skipping.")
         all_results["lus_patient"] = {"skipped": True,
                                       "reason": "dataset roots not found"}
         return
 
-    # Fall back to empty string if one is missing (dataset reads will warn + skip)
     benin_root = benin_root or ""
-    rsa_root   = rsa_root   or ""
+    rsa_root   = rsa_root if include_rsa else ""
 
     out_dir = Path(out_dir)
     out_dir, ckpt_dir = _prepare_finetune_dirs(out_dir, _find_repo_root())
@@ -427,13 +427,10 @@ def _run_lus(img_branch, vid_branch, benin_root, rsa_root, raw_cfg,
     ft_raw = raw_cfg.get("finetune", raw_cfg)
     cfg = FinetuneConfig.from_dict(ft_raw)
     exp = LUSPatientFinetune(
-        data_root_benin = benin_root,
-        data_root_rsa   = rsa_root,
-        output_dir      = str(out_dir),
-        cfg             = cfg,
-        checkpoint_dir  = str(ckpt_dir),
-        n_frames        = ft_raw.get("n_frames", 8),
-        img_size        = ft_raw.get("img_size",  224),
+        output_dir=str(out_dir),
+        cfg=cfg,
+        checkpoint_dir=str(ckpt_dir),
+        **lus_patient_kwargs_from_raw(raw_cfg, ft_raw),
     )
     exp.setup(img_branch, device=device, vid_branch=vid_branch)
 
@@ -611,6 +608,10 @@ def _resolve_dataset_roots(cfg: dict, repo: Path) -> dict[str, str]:
     return roots
 
 
+# Comparison sweeps set head_type per backbone×experiment×head loop; smoke YAML must not override it.
+_SMOKE_OVERRIDE_SKIP = frozenset({"head_type"})
+
+
 def _apply_smoke_overrides(
     cfg,
     overrides: dict | None,
@@ -622,6 +623,8 @@ def _apply_smoke_overrides(
         if not src:
             continue
         for key, val in src.items():
+            if key in _SMOKE_OVERRIDE_SKIP:
+                continue
             if hasattr(cfg, key):
                 setattr(cfg, key, val)
 
@@ -697,27 +700,34 @@ def _run_comparison_experiment(
     if exp_name in ("lus", "lus_video"):
         benin_root = roots.get("benin", "")
         rsa_root   = roots.get("rsa", "")
-        has_data = (benin_root and Path(benin_root).exists()) or \
-                   (rsa_root and Path(rsa_root).exists())
+        if exp_name == "lus":
+            lus_raw = _load_finetune_cfg(str(repo / "configs" / "finetune" / "lus_patient.yaml"))
+            include_rsa = bool(lus_raw.get("include_rsa", False))
+            has_data = (benin_root and Path(benin_root).exists()) or \
+                       (include_rsa and rsa_root and Path(rsa_root).exists())
+        else:
+            has_data = (benin_root and Path(benin_root).exists()) or \
+                       (rsa_root and Path(rsa_root).exists())
         if not has_data:
             log.warning(f"[{exp_name}] dataset roots not found — skipping.")
             return {"skipped": True, "reason": "dataset roots not found"}
 
         if exp_name == "lus":
-            from finetune.experiments.lus_patient import LUSPatientFinetune
+            from finetune.experiments.lus_patient import LUSPatientFinetune, lus_patient_kwargs_from_raw
             lus_raw = _load_finetune_cfg(str(repo / "configs" / "finetune" / "lus_patient.yaml"))
             ft_raw  = dict(lus_raw.get("finetune", lus_raw))
             ft_raw["head_type"] = head_type
             cfg = FinetuneConfig.from_dict(ft_raw)
             _apply_smoke_overrides(cfg, smoke_overrides, exp_name, experiment_smoke_overrides)
+            cfg.head_type = head_type
+            lus_kwargs = lus_patient_kwargs_from_raw(lus_raw, ft_raw)
+            if not lus_kwargs["include_rsa"]:
+                lus_kwargs["data_root_rsa"] = ""
             exp = LUSPatientFinetune(
-                data_root_benin = benin_root or "",
-                data_root_rsa   = rsa_root or "",
-                output_dir      = str(out_dir),
-                cfg             = cfg,
-                checkpoint_dir  = str(ckpt_dir),
-                n_frames        = ft_raw.get("n_frames", 8),
-                img_size        = ft_raw.get("img_size", 224),
+                output_dir=str(out_dir),
+                cfg=cfg,
+                checkpoint_dir=str(ckpt_dir),
+                **lus_kwargs,
             )
         else:
             from finetune.experiments.lus_video import LUSVideoFinetune
@@ -728,6 +738,7 @@ def _run_comparison_experiment(
             ft_raw["head_type"] = head_type
             cfg = FinetuneConfig.from_dict(ft_raw)
             _apply_smoke_overrides(cfg, smoke_overrides, exp_name, experiment_smoke_overrides)
+            cfg.head_type = head_type
             exp = LUSVideoFinetune(
                 data_root_benin = benin_root or "",
                 data_root_rsa   = rsa_root or "",
@@ -764,6 +775,7 @@ def _run_comparison_experiment(
                 ft_raw["camus_variant"] = camus_variant_overrides["variant"]
         cfg = FinetuneConfig.from_dict(ft_raw)
         _apply_smoke_overrides(cfg, smoke_overrides, exp_name, experiment_smoke_overrides)
+        cfg.head_type = head_type
 
         mod = importlib.import_module(module_name)
         cls = getattr(mod, cls_name)
@@ -1182,7 +1194,7 @@ def run_comparison(args) -> None:
     model_cfg_dict["hf_cache_dir"] = hf_cache
     model_cfg_dict["frozen_teacher"] = None
 
-    output_dir = Path(cmp_cfg.get("output_dir", "dataset_exploration_outputs/finetune"))
+    output_dir = Path(cmp_cfg.get("output_dir", "results/finetune/representative"))
     if not output_dir.is_absolute():
         output_dir = repo / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1279,6 +1291,11 @@ def run_comparison(args) -> None:
         )
 
     report = generate_comparison_report(output_dir)
+    from finetune.report import generate_dashboard
+    from finetune.results_collector import collect_all_sweeps
+
+    dashboard_tree = collect_all_sweeps(from_logs=False)
+    generate_dashboard(dashboard_tree)
     print("\n" + "=" * 60)
     print("COMPARISON REPORT")
     print("=" * 60)
@@ -1286,6 +1303,7 @@ def run_comparison(args) -> None:
     print(f"\nResults written to: {output_dir}")
     print(f"Checkpoints on Capstor: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Finetune/")
     print(f"\nCharts written to: {output_dir / 'charts'}")
+    print(f"Dashboard written to: results/finetune/_dashboard/")
 
 
 if __name__ == "__main__":

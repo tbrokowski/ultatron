@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Alias for scripts/finetune/lus.py (Benin-LUS + RSA-LUS patient TB MIL)."""
+"""Alias for scripts/finetune/lus.py (Benin-LUS patient-level TB MIL)."""
 from __future__ import annotations
 
 import sys

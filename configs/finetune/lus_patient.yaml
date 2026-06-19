@@ -2,15 +2,16 @@
 # ============================================================
 # Finetune hyperparameters for LUS patient-level TB classification.
 # Task: TB vs no-TB (binary, patient-level)
-# Datasets: Benin-LUS + RSA-LUS (pooled, patient-level split)
+# Dataset: Benin-LUS only (80/10/10 patient splits from adapter)
 # Branch: video branch (vid_branch frozen teacher, clip_cls token)
 # Head: Gated Attention MIL pool → MLPClsHead
 # ============================================================
 
 dataset_root_benin: "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/Benin_Videos"
-dataset_root_rsa:   "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
+include_rsa: false
+# dataset_root_rsa only used when include_rsa: true
+dataset_root_rsa: "/capstor/store/cscs/swissai/a127/ultrasound/raw/lung/RSA_Videos"
 
-# Model backbone (which checkpoint to load from)
 model:
   image_backbone: dinov3_l
   video_backbone: vjepa2_l
@@ -18,30 +19,25 @@ model:
   dtype: bfloat16
 
 finetune:
-  # ── Optimiser ──────────────────────────────────────────────────────────────
   lr:           5.0e-5
   weight_decay: 0.01
   max_epochs:   40
   batch_size:   8
   num_workers:  4
 
-  # ── Head architecture ──────────────────────────────────────────────────────
-  head_type:  mil
+  head_type: mil
   mil_hidden_dim: 256
 
-  # ── Early stopping ─────────────────────────────────────────────────────────
-  patience:      40
-  monitor:       val_auc_tb
-  monitor_mode:  max
+  patience: 40
+  monitor: val_auc_tb
+  monitor_mode: max
 
-  # ── Backbone ───────────────────────────────────────────────────────────────
   freeze_backbone: true
 
-  # ── Video ──────────────────────────────────────────────────────────────────
-  n_frames:  8
-  img_size:  224
-  clip_encode_bs: 8
+  n_frames: 8
+  img_size: 224
+  clip_encode_bs: 16
+  max_clips_per_patient: 12   # train only; val/test use all clips
 
-  # ── Logging / checkpointing ────────────────────────────────────────────────
-  log_every:       5
+  log_every: 5
   checkpoint_best: true

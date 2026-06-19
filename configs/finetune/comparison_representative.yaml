@@ -93,6 +93,14 @@ experiment_smoke_overrides:
     monitor: val_dice
     monitor_mode: max
     head_type: dpt
+  lus:
+    max_epochs: 40
+    patience: 15
+    monitor: val_auc_tb
+    monitor_mode: max
+    freeze_backbone: true
+    batch_size: 8
+    num_workers: 4
 
 camus_variants:
   - variant: lv_endo
