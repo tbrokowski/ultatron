@@ -194,4 +194,11 @@ def forward_seg_head(
     """Run seg head on encoder features (UPerNet or patch-token head)."""
     if is_hierarchical_seg_head(head):
         return head(hierarchical_feature_dict(feats), padding_mask=padding_mask)
-    return head(feats["patch_tokens"], padding_mask=padding_mask)
+    patch_tokens = feats.get("patch_tokens")
+    if patch_tokens is None:
+        raise ValueError(
+            "Encoder returned patch_tokens=None. Segmentation heads require "
+            "spatial patch tokens — this encoder cannot be used for segmentation tasks. "
+            "Use a backbone that produces patch_tokens (e.g. ViT, DINOv3, ResNet, UNet)."
+        )
+    return head(patch_tokens, padding_mask=padding_mask)
