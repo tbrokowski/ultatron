@@ -172,6 +172,15 @@ def build_encoder(
             embed_dim         = spec.get("embed_dim", 768),
         )
 
+    # ── UNet (segmentation-only ablation) ────────────────────────────────────
+    elif btype == "unet" or key == "unet":
+        from finetune.backbones.unet_encoder import UNetEncoder
+        encoder = UNetEncoder(
+            in_channels=spec.get("in_channels", 3),
+            base_channels=spec.get("base_channels", 64),
+            patch_grid=spec.get("patch_grid", 14),
+        )
+
     # ── DINOv3 ────────────────────────────────────────────────────────────────
     elif btype == "dinov3" or str(key).startswith("dinov3"):
         from finetune.backbones.dinov3_encoder import DINOv3Encoder
@@ -184,7 +193,7 @@ def build_encoder(
     else:
         raise ValueError(
             f"Unknown backbone type {btype!r} (key={key!r}). "
-            f"Valid types: student, ours, vjepa, standard, dinov3, biomedclip, usfm, echocare, openus."
+            f"Valid types: student, ours, vjepa, standard, unet, dinov3, biomedclip, usfm, echocare, openus."
         )
 
     return encoder.to(device).eval()

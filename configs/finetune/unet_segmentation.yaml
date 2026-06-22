@@ -1,0 +1,71 @@
+# UNet segmentation ablation — end-to-end trained baseline
+#
+# UNet is a standalone encoder+decoder; all parameters are trainable
+# (freeze_backbone must be false). Works with BUSI, BUS-BRA, TN3K, CAMUS.
+#
+# Usage:
+#   python scripts/finetune/run_all.py --comparison-config configs/finetune/unet_segmentation.yaml
+
+train_config: configs/student/student_pretrain.yaml
+
+output_dir: results/finetune/unet_seg
+device: cuda
+eval_only: false
+
+parallel_experiments: false
+parallel_strategy: per_experiment
+
+smoke_overrides:
+  max_epochs: 100
+  batch_size: 8
+  patience: 20
+  num_workers: 4
+  lr: 1.0e-4
+  weight_decay: 0.01
+  freeze_backbone: false
+  head_type: linear
+  input_size: 224
+  output_size: 224
+  monitor: val_dice
+  monitor_mode: max
+  boundary_loss_weight: 0.5
+  seg_use_adapters: false
+  seg_use_aspp: false
+
+experiment_smoke_overrides:
+  busi:
+    max_epochs: 200
+    patience: 40
+    monitor: dice_tumor_mean
+    seg_only: true
+    tumor_only_train: false
+    eval_tumor_only: true
+    split_manifest: dataset_exploration_outputs/busi_usfm/split_manifest.json
+    cls_loss_weight: 0.0
+    bg_seg_loss_weight: 0.25
+    input_size: 224
+    output_size: 224
+  camus:
+    camus_variant: lv_epi
+    camus_training_mode: binary
+    lv_target: lv_structures
+    camus_quality_filter: false
+    input_size: 256
+    output_size: 256
+    batch_size: 8
+
+backbones:
+  - key: unet
+    type: unet
+    base_channels: 64
+
+experiments:
+  - busi
+  - camus
+
+head_types:
+  default: [linear]
+
+dataset_roots:
+  busi:  "/capstor/store/cscs/swissai/a127/ultrasound/raw/breast/BUSI"
+  camus: "/capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CAMUS"
