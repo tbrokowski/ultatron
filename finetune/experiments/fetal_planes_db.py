@@ -212,7 +212,7 @@ class FetalPlanesDBFinetune(FinetuneExperiment):
         }
 
     def run_viz(self, results: dict, output_dir: Path | None = None) -> None:
-        raise NotImplementedError("Visualisation not yet implemented for Fetal Planes DB.")
+        pass
 
 
 if __name__ == "__main__":
