@@ -196,10 +196,12 @@ class BUSIFinetune(FinetuneExperiment):
 
     def setup(self, img_branch=None, device="cuda", vid_branch=None, encoder=None):
         super().setup(img_branch, device, vid_branch, encoder=encoder)
-        assert self.cfg.freeze_backbone, (
-            "[BUSI] freeze_backbone must be true — use scripts/run_busi_finetune.sh "
-            "for full USFM backbone fine-tuning"
-        )
+        from finetune.backbones.unet_encoder import UNetEncoder
+        if not isinstance(self.encoder, UNetEncoder):
+            assert self.cfg.freeze_backbone, (
+                "[BUSI] freeze_backbone must be true — use scripts/run_busi_finetune.sh "
+                "for full USFM backbone fine-tuning"
+            )
         if self.cfg.seg_only:
             self.head2 = None
             log.info("[BUSI] seg_only=True — tumour segmentation head only (frozen backbone)")
