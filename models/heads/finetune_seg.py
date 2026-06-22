@@ -191,7 +191,29 @@ def forward_seg_head(
     feats: dict,
     padding_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run seg head on encoder features (UPerNet or patch-token head)."""
+    """
+    Run seg head on encoder features (UPerNet or patch-token head).
+
+    Parameters
+    ----------
+    head : nn.Module
+        Segmentation head (UPerNetDecoder, EnhancedDPTSegHead, or LinearSegHead).
+    feats : dict
+        Encoder output with keys 'cls', 'patch_tokens', and optionally 'F1'–'F4'.
+    padding_mask : (B, ph, pw) or None
+        Spatial mask for native-resolution batches (True = valid content).
+
+    Returns
+    -------
+    torch.Tensor
+        Segmentation logits (B, n_classes, H, W).
+
+    Raises
+    ------
+    ValueError
+        If the encoder returned patch_tokens=None (cls-only encoders like
+        EchoCare cannot be used for segmentation).
+    """
     if is_hierarchical_seg_head(head):
         return head(hierarchical_feature_dict(feats), padding_mask=padding_mask)
     patch_tokens = feats.get("patch_tokens")

@@ -38,6 +38,11 @@ build_encoder(spec, device, train_cfg) → BackboneEncoder
     - key: dinov3_b
       type: dinov3
       variant: dinov3_b
+
+    - key: unet
+      type: unet
+      base_channels: 64     # optional; default 64
+      # UNet trains end-to-end (freeze_backbone: false)
 """
 from __future__ import annotations
 

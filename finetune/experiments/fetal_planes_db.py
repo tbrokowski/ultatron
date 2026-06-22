@@ -212,7 +212,7 @@ class FetalPlanesDBFinetune(FinetuneExperiment):
         }
 
     def run_viz(self, results: dict, output_dir: Path | None = None) -> None:
-        pass
+        """No visualization for classification tasks — base evaluate() calls this unconditionally."""
 
 
 if __name__ == "__main__":

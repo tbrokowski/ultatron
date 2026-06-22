@@ -28,6 +28,8 @@ log = logging.getLogger(__name__)
 
 
 class _ConvBlock(nn.Module):
+    """Two 3×3 conv layers with BatchNorm and ReLU (standard UNet building block)."""
+
     def __init__(self, in_ch: int, out_ch: int):
         super().__init__()
         self.block = nn.Sequential(
@@ -44,13 +46,32 @@ class _ConvBlock(nn.Module):
 
 
 class _UNetModel(nn.Module):
-    """Standard 4-level UNet with skip connections."""
+    """
+    Standard 4-level UNet with skip connections.
+
+    Architecture: 4 encoder stages (each doubles channels) → bottleneck →
+    4 decoder stages (each halves channels via transposed conv + skip concat).
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input image channels (3 for RGB).
+    base_channels : int
+        Channel count at the first encoder level; each subsequent level
+        doubles (c, 2c, 4c, 8c, bottleneck=16c, then back down).
+
+    Returns
+    -------
+    tuple of (decoder_output, bottleneck)
+        decoder_output : (B, base_channels, H, W) — full-resolution features
+        bottleneck     : (B, 16*base_channels, H/16, W/16) — deepest features
+    """
 
     def __init__(self, in_channels: int = 3, base_channels: int = 64):
         super().__init__()
         c = base_channels
 
-        # Encoder
+        # Encoder path: progressive downsampling with channel doubling
         self.enc1 = _ConvBlock(in_channels, c)
         self.enc2 = _ConvBlock(c, c * 2)
         self.enc3 = _ConvBlock(c * 2, c * 4)
@@ -58,10 +79,10 @@ class _UNetModel(nn.Module):
 
         self.pool = nn.MaxPool2d(2)
 
-        # Bottleneck
+        # Bottleneck at lowest resolution
         self.bottleneck = _ConvBlock(c * 8, c * 16)
 
-        # Decoder
+        # Decoder path: transposed conv upsample + skip connection concat
         self.up4 = nn.ConvTranspose2d(c * 16, c * 8, 2, stride=2)
         self.dec4 = _ConvBlock(c * 16, c * 8)
         self.up3 = nn.ConvTranspose2d(c * 8, c * 4, 2, stride=2)
@@ -71,7 +92,8 @@ class _UNetModel(nn.Module):
         self.up1 = nn.ConvTranspose2d(c * 2, c, 2, stride=2)
         self.dec1 = _ConvBlock(c * 2, c)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        # Encoder: extract multi-scale features
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
         e3 = self.enc3(self.pool(e2))
@@ -79,6 +101,7 @@ class _UNetModel(nn.Module):
 
         b = self.bottleneck(self.pool(e4))
 
+        # Decoder: upsample + concatenate skip connections
         d4 = self.dec4(torch.cat([self._match_and_cat(self.up4(b), e4)], dim=1))
         d3 = self.dec3(torch.cat([self._match_and_cat(self.up3(d4), e3)], dim=1))
         d2 = self.dec2(torch.cat([self._match_and_cat(self.up2(d3), e2)], dim=1))
@@ -88,9 +111,10 @@ class _UNetModel(nn.Module):
 
     @staticmethod
     def _match_and_cat(upsampled: Tensor, skip: Tensor) -> Tensor:
-        """Pad upsampled tensor to match skip connection spatial dims."""
+        """Pad upsampled tensor if needed to match skip connection spatial dims, then concatenate."""
         dh = skip.shape[2] - upsampled.shape[2]
         dw = skip.shape[3] - upsampled.shape[3]
+        # Transposed conv can produce slightly smaller outputs for odd input sizes
         if dh != 0 or dw != 0:
             upsampled = F.pad(upsampled, [0, dw, 0, dh])
         return torch.cat([upsampled, skip], dim=1)
@@ -106,6 +130,23 @@ class UNetEncoder(BackboneEncoder):
     on top produces the final segmentation logits.
 
     All parameters are trainable — set ``freeze_backbone: false`` in config.
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input image channels (default 3 for RGB).
+    base_channels : int
+        UNet first-level channel width; controls model capacity.
+        64 is standard, 32 is a lighter variant for faster iteration.
+    patch_grid : int
+        Spatial size of the output patch grid. Decoder features are
+        adaptively pooled to (patch_grid, patch_grid) before returning
+        as patch_tokens. Default 14 matches ViT-B/16 at 224px.
+
+    Outputs
+    -------
+    cls          : (B, 16*base_channels)   global avg pool of bottleneck
+    patch_tokens : (B, patch_grid², base_channels)  pooled decoder features
     """
 
     def __init__(
@@ -127,10 +168,25 @@ class UNetEncoder(BackboneEncoder):
         return self._base_channels
 
     def encode_image(self, images: Tensor, **kwargs) -> dict:
+        """
+        Run full UNet forward pass and return features as patch_tokens.
+
+        Parameters
+        ----------
+        images : (B, C, H, W) input tensor
+
+        Returns
+        -------
+        dict with:
+            cls          : (B, 16*base_channels) — bottleneck global avg pool
+            patch_tokens : (B, patch_grid², base_channels) — decoder features
+        """
         dec_features, bottleneck = self._model(images)
 
         B, C, H, W = dec_features.shape
         pg = self._patch_grid
+        # Pool full-res decoder output to a fixed grid so seg heads
+        # receive the same spatial token count regardless of input size
         pooled = F.adaptive_avg_pool2d(dec_features, (pg, pg))
         patch_tokens = pooled.reshape(B, C, pg * pg).permute(0, 2, 1)
 
@@ -138,6 +194,7 @@ class UNetEncoder(BackboneEncoder):
         return {"cls": cls_token, "patch_tokens": patch_tokens}
 
     def trainable_parameters(self) -> Iterator[nn.Parameter]:
+        """All UNet parameters — the entire model trains end-to-end."""
         return self._model.parameters()
 
     def to(self, *args, **kwargs) -> "UNetEncoder":

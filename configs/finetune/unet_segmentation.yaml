@@ -3,66 +3,75 @@
 # UNet is a standalone encoder+decoder; all parameters are trainable
 # (freeze_backbone must be false). Works with BUSI, BUS-BRA, TN3K, CAMUS.
 #
+# Unlike frozen-backbone configs, UNet trains the full model end-to-end.
+# The seg head is LinearSegHead (a 1×1 conv) since UNet's decoder already
+# produces rich spatial features — DPT on top would be redundant.
+#
 # Usage:
 #   python scripts/finetune/run_all.py --comparison-config configs/finetune/unet_segmentation.yaml
 
+# Required for building student backbones (unused here but needed by the runner)
 train_config: configs/student/student_pretrain.yaml
 
 output_dir: results/finetune/unet_seg
 device: cuda
 eval_only: false
 
+# Single-GPU sequential — UNet is a single backbone, no parallelism needed
 parallel_experiments: false
 parallel_strategy: per_experiment
 
+# ── Default hyperparameters applied to all experiments ─────────────────────────
 smoke_overrides:
   max_epochs: 100
   batch_size: 8
-  patience: 20
+  patience: 20              # early stopping patience (epochs without improvement)
   num_workers: 4
   lr: 1.0e-4
   weight_decay: 0.01
-  freeze_backbone: false
-  head_type: linear
-  input_size: 224
-  output_size: 224
-  monitor: val_dice
+  freeze_backbone: false    # UNet must train end-to-end
+  head_type: linear         # 1×1 conv — UNet decoder is the "real" head
+  input_size: 224           # fixed resize for all images
+  output_size: 224          # seg head output resolution (upsampled to match GT in loss)
+  monitor: val_dice         # early stopping metric
   monitor_mode: max
-  boundary_loss_weight: 0.5
-  seg_use_adapters: false
-  seg_use_aspp: false
+  boundary_loss_weight: 0.5 # weight for boundary ring BCE term in seg loss
+  seg_use_adapters: false   # disable SegAdapter (only useful for frozen ViT patch tokens)
+  seg_use_aspp: false       # disable ASPP (redundant — UNet decoder already has multi-scale)
 
+# ── Per-experiment overrides ──────────────────────────────────────────────────
 experiment_smoke_overrides:
   busi:
     max_epochs: 200
     patience: 40
-    monitor: dice_tumor_mean
-    seg_only: true
-    tumor_only_train: false
-    eval_tumor_only: true
+    monitor: dice_tumor_mean  # primary metric: mean Dice over benign + malignant
+    seg_only: true            # tumour segmentation only (no cls multitask head)
+    tumor_only_train: false   # include normal images as negatives during training
+    eval_tumor_only: true     # primary Dice computed on tumour images only
     split_manifest: dataset_exploration_outputs/busi_usfm/split_manifest.json
-    cls_loss_weight: 0.0
-    bg_seg_loss_weight: 0.25
+    cls_loss_weight: 0.0      # no classification loss (seg_only=true)
+    bg_seg_loss_weight: 0.25  # low weight on normal-image all-background seg loss
     input_size: 224
     output_size: 224
   camus:
-    camus_variant: lv_epi
-    camus_training_mode: binary
-    lv_target: lv_structures
-    camus_quality_filter: false
-    input_size: 256
+    camus_variant: lv_epi          # segment LV epicardium (myocardium + cavity)
+    camus_training_mode: binary    # binary mask (not multiclass 4-structure)
+    lv_target: lv_structures       # mask definition: epicardial boundary
+    camus_quality_filter: false    # include all quality grades (Good + Medium + Poor)
+    input_size: 256                # CAMUS images are ~256px native
     output_size: 256
     batch_size: 8
 
 backbones:
   - key: unet
     type: unet
-    base_channels: 64
+    base_channels: 64   # first encoder level width (standard UNet = 64)
 
 experiments:
   - busi
   - camus
 
+# LinearSegHead is the only sensible choice for UNet (decoder already decoded)
 head_types:
   default: [linear]
 

@@ -196,6 +196,8 @@ class BUSIFinetune(FinetuneExperiment):
 
     def setup(self, img_branch=None, device="cuda", vid_branch=None, encoder=None):
         super().setup(img_branch, device, vid_branch, encoder=encoder)
+        # UNet is an end-to-end encoder+decoder that requires freeze_backbone=False;
+        # all other backbones must be frozen (head-only training).
         from finetune.backbones.unet_encoder import UNetEncoder
         if not isinstance(self.encoder, UNetEncoder):
             assert self.cfg.freeze_backbone, (
