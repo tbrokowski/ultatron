@@ -197,13 +197,14 @@ class OpenUSEncoder(BackboneEncoder):
             ) from exc
 
         # SSM params matched to the OpenUS checkpoint tensor shapes:
-        #   A_logs: [768, 1]              → d_state=1
-        #   in_proj.weight: [192, 96]     → inner_dim=192=2×96, ssm_ratio=2.0
-        #   dt_projs_weight: [4, 192, 6]  → dt_rank=6
+        #   A_logs: [768, 1]                        → d_state=1
+        #   in_proj.weight: [192, 96] at layer 0    → 2×ratio×dim = 2×1.0×96 = 192, ratio=1.0
+        #   dt_projs_weight: [4, 8, 192] at layer 0, [4, 14, 384] at layer 1
+        #     → dt_rank scales with dim (8≈96/12, 14≈192/14), consistent with "auto"
         model = VSSM(
             patch_size=4, in_chans=3,
             depths=[2, 2, 9, 2], dims=[96, 192, 384, 768],
-            ssm_d_state=1, ssm_ratio=2.0, ssm_dt_rank=6,
+            ssm_d_state=1, ssm_ratio=1.0, ssm_dt_rank="auto",
             mlp_ratio=4.0, patch_norm=True, use_checkpoint=False,
         )
         log.info("[openus] VMamba-Small built via vmamba_models.vmamba.VSSM")
