@@ -174,52 +174,36 @@ class OpenUSEncoder(BackboneEncoder):
         return model
 
     def _build_vmamba_model(self) -> nn.Module:
-        """Try multiple import strategies for the VMamba-Small model."""
-        errors = []
+        """
+        Build a VMamba-Small model from the vendor/openus repo.
 
-        # Strategy 1: vmamba_models package (preferred, matches repo structure)
+        Imports VSSM from vendor/openus/vmamba_models/vmamba.py (the repo's
+        actual location). vendor/openus/ must already be on sys.path (done
+        in _load_model before this is called).
+
+        Returns
+        -------
+        nn.Module
+            VMamba-Small with depths=[2,2,9,2], dims=[96,192,384,768].
+        """
         try:
-            from vmamba_models.vmamba import VSSM   # type: ignore[import]
-            model = VSSM(
-                patch_size=4, in_chans=3,
-                depths=[2, 2, 9, 2], dims=[96, 192, 384, 768],
-                ssm_d_state=16, ssm_ratio=2.0, ssm_dt_rank="auto",
-                mlp_ratio=4.0, patch_norm=True, use_checkpoint=False,
-            )
-            log.info("[openus] VMamba built via vmamba_models.vmamba.VSSM")
-            return model
-        except Exception as e:
-            errors.append(f"vmamba_models.vmamba: {e}")
+            from vmamba_models.vmamba import VSSM  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "Could not import VSSM from vendor/openus/vmamba_models/vmamba.py.\n"
+                f"Ensure the OpenUS repo is cloned at {_VENDOR_PATH} and that\n"
+                "mamba_ssm is installed (requires CUDA).\n"
+                f"Original error: {exc}"
+            ) from exc
 
-        # Strategy 2: models.vmamba
-        try:
-            from models.vmamba import VSSM   # type: ignore[import]
-            model = VSSM(
-                patch_size=4, in_chans=3,
-                depths=[2, 2, 9, 2], dims=[96, 192, 384, 768],
-                ssm_d_state=16, ssm_ratio=2.0, ssm_dt_rank="auto",
-                mlp_ratio=4.0, patch_norm=True, use_checkpoint=False,
-            )
-            log.info("[openus] VMamba built via models.vmamba.VSSM")
-            return model
-        except Exception as e:
-            errors.append(f"models.vmamba: {e}")
-
-        # Strategy 3: direct build function
-        try:
-            from vmamba_models import build_model   # type: ignore[import]
-            model = build_model("vmamba_small")
-            log.info("[openus] VMamba built via vmamba_models.build_model")
-            return model
-        except Exception as e:
-            errors.append(f"vmamba_models.build_model: {e}")
-
-        raise ImportError(
-            "Could not build VMamba model from vendor/openus. Tried:\n"
-            + "\n".join(f"  - {e}" for e in errors)
-            + "\nUpdate the import in finetune/backbones/openus_encoder.py "
-            "to match the actual OpenUS repository structure."
+        model = VSSM(
+            patch_size=4, in_chans=3,
+            depths=[2, 2, 9, 2], dims=[96, 192, 384, 768],
+            ssm_d_state=16, ssm_ratio=2.0, ssm_dt_rank="auto",
+            mlp_ratio=4.0, patch_norm=True, use_checkpoint=False,
         )
+        log.info("[openus] VMamba-Small built via vmamba_models.vmamba.VSSM")
+        return model
 
     @property
     def name(self) -> str:
