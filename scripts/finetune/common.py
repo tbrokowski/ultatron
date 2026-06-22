@@ -47,10 +47,8 @@ RESULTS_ROOT = REPO_DIR / "results" / "finetune"
 DEFAULT_COMPARISON_CONFIG = REPO_DIR / "configs" / "finetune" / "comparison_representative.yaml"
 
 DEFAULT_BACKBONES = [
-    "student_stage1",
-    "student_stage2",
-    "student_stage3",
-    "student_stage4",
+    "student_img",
+    "student_vid",
     "resnet50",
     "vit_b_16",
     "dinov3_l",

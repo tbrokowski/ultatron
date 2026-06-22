@@ -10,7 +10,7 @@ LOG_ROOT="${REPO_DIR}/logs/finetune"
 DEFAULT_COMPARISON_CONFIG="${REPO_DIR}/configs/finetune/comparison_representative.yaml"
 
 STORE="/capstor/store/cscs/swissai/a127/ultrasound"
-DEFAULT_BACKBONES=(student_stage1 resnet50 vit_b_16 dinov3_l biomedclip usfm echocare)
+DEFAULT_BACKBONES=(student_img student_vid resnet50 vit_b_16 dinov3_l biomedclip usfm echocare)
 
 _die() { echo "[ERROR] $*" >&2; exit 1; }
 _info() { echo "[INFO]  $*"; }
