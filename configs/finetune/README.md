@@ -8,7 +8,7 @@ All finetune metrics and charts live under `results/finetune/`.
 |---|---|---|
 | `comparison_representative.yaml` | `results/finetune/representative` | busi, busi_multitask, camus, echonet, lus, lus_video |
 | `openus_segmentation.yaml` | `results/finetune/openus_seg` | busbra, tn3k |
-| `fetal_planes_classification.yaml` | `results/finetune/fetal_planes` | fetal_planes_db |
+| `comparison_fetal_planes.yaml` | `results/finetune/fetal_planes` | fetal_planes_db |
 
 ## Run finetune
 

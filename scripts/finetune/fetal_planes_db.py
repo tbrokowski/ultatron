@@ -19,7 +19,7 @@ def main() -> None:
             Path(__file__).resolve().parent.parent.parent
             / "configs"
             / "finetune"
-            / "fetal_planes_classification.yaml"
+            / "comparison_fetal_planes.yaml"
         )
     )
     args = parser.parse_args()
