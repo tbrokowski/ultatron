@@ -14,7 +14,7 @@ Per-stage mix ratios are loaded from YAML config:
   stage1:  {image_frac: 0.90, video_frac: 0.10, paired_frac: 0.00}
   stage2:  {image_frac: 0.40, video_frac: 0.60, paired_frac: 0.00}
   stage3:  {image_frac: 0.50, video_frac: 0.30, paired_frac: 0.20}
-  stage4:  {}  # task-dependent, handled by finetune/ experiments
+  stage4:  {image_frac: 0.50, video_frac: 0.30, paired_frac: 0.20}  # EMA divergence
 
 Each batch dict is tagged with batch["sample_type"] ∈ {"image","video","paired"}.
 Loss functions in student_phase_steps.py route on this key.
@@ -132,7 +132,7 @@ class StudentDataConfig:
             StageMixConfig(image_frac=0.90, video_frac=0.10, paired_frac=0.00),  # stage 1
             StageMixConfig(image_frac=0.40, video_frac=0.60, paired_frac=0.00),  # stage 2
             StageMixConfig(image_frac=0.50, video_frac=0.30, paired_frac=0.20),  # stage 3
-            StageMixConfig(image_frac=0.50, video_frac=0.50, paired_frac=0.00),  # stage 4
+            StageMixConfig(image_frac=0.50, video_frac=0.30, paired_frac=0.20),  # stage 4
         ]
     )
     image_batch_size:  int   = 64
@@ -313,8 +313,12 @@ class StudentMixedCollator:
         vid = aligned.video_batch
         batch = dict(vid)
         batch["frame"] = img["global_crops"][:, 0]
+        if img["global_crops"].shape[1] >= 2:
+            batch["clean_frame"] = img["global_crops"][:, 1]
         if img.get("global_pmasks") is not None:
             batch["global_pmasks"] = img["global_pmasks"]
+            if img["global_pmasks"].shape[1] >= 2:
+                batch["clean_frame_pmask"] = img["global_pmasks"][:, 1]
         if img.get("patch_masks") is not None:
             batch["patch_masks"] = img["patch_masks"]
         batch["alignment_pairs"] = aligned.alignment_pairs

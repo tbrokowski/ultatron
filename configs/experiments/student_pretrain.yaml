@@ -15,8 +15,8 @@ experiment:
   name: student_pretrain_hiera_large
   description: >
     Single shared Hiera-L student encoder pretraining.
-    100k steps (30k/20k/40k/10k stages), 32 GH200 GPUs,
-    DINO+V-JEPA distillation + cross-view fusion.
+    100k steps (25k/20k/20k/35k stages), 64 GH200 GPUs,
+    DINO+V-JEPA bootstrap, cross-modal fusion, then EMA divergence.
   tags:
     - student
     - hiera
@@ -37,6 +37,6 @@ paths:
 
 training:
   total_steps: 100000
-  stage_fracs: [0.30, 0.20, 0.40, 0.10]   # 30k / 20k / 40k / 10k
+  stage_fracs: [0.25, 0.20, 0.20, 0.35]   # 25k / 20k / 20k / 35k
   lr: 1.0e-4
   warmup_steps: 10000

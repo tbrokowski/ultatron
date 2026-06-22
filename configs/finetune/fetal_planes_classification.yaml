@@ -6,7 +6,7 @@
 
 train_config: configs/student/student_pretrain.yaml
 
-output_dir: dataset_exploration_outputs/finetune_fetal_planes
+output_dir: results/finetune/fetal_planes
 device: cuda
 eval_only: false
 
@@ -30,7 +30,7 @@ smoke_overrides:
 backbones:
   - key: student_stage1
     type: student
-    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_10000.pt
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_22500.pt
     use_ema: true
 
   - key: resnet50

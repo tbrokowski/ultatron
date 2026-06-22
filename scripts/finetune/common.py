@@ -11,20 +11,46 @@ import sys
 import tempfile
 from pathlib import Path
 
+import yaml
+
 REPO_DIR = Path(__file__).resolve().parent.parent.parent
 ACCOUNT = "a127"
 PARTITION = "normal"
 EDF_ENV = Path.home() / ".edf" / "ultatron.toml"
 LOG_ROOT = REPO_DIR / "logs" / "finetune"
 
+# Prefer Python >=3.10 (login-node python3 may be 3.6).
+import shutil
+import subprocess
+import sys as _sys
+
+
+def _find_finetune_python() -> str:
+    if _sys.version_info >= (3, 10):
+        return _sys.executable
+    for name in ("python3.12", "python3.11"):
+        exe = shutil.which(name)
+        if exe:
+            r = subprocess.run(
+                [exe, "-c", "import sys; raise SystemExit(0 if sys.version_info>=(3,10) else 1)"],
+                capture_output=True,
+            )
+            if r.returncode == 0:
+                return exe
+    return _sys.executable
+
+
+FINETUNE_PYTHON = _find_finetune_python()
+
 STORE = Path("/capstor/store/cscs/swissai/a127/ultrasound")
-COMPARISON_OUTPUT = REPO_DIR / "dataset_exploration_outputs" / "finetune"
+RESULTS_ROOT = REPO_DIR / "results" / "finetune"
 DEFAULT_COMPARISON_CONFIG = REPO_DIR / "configs" / "finetune" / "comparison_representative.yaml"
 
 DEFAULT_BACKBONES = [
     "student_stage1",
     "student_stage2",
     "student_stage3",
+    "student_stage4",
     "resnet50",
     "vit_b_16",
     "dinov3_l",
@@ -55,6 +81,19 @@ def _die(msg: str, code: int = 1) -> None:
 
 def _info(msg: str) -> None:
     print(f"[INFO]  {msg}")
+
+
+def resolve_output_dir(comparison_config: str | Path) -> Path:
+    """Read output_dir from comparison YAML."""
+    cfg_path = Path(comparison_config)
+    if not cfg_path.is_absolute():
+        cfg_path = REPO_DIR / cfg_path
+    with cfg_path.open() as f:
+        cfg = yaml.safe_load(f)
+    out = Path(cfg.get("output_dir", "results/finetune/representative"))
+    if not out.is_absolute():
+        out = REPO_DIR / out
+    return out
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -97,9 +136,9 @@ def finetune_python_cmd(
     parallel_experiments: bool = False,
     num_gpus: int | None = None,
 ) -> str:
-    """Shell command fragment for scripts/finetune.py comparison mode."""
+    """Shell command fragment for scripts/finetune.py (runtime Python resolved in inner script)."""
     parts = [
-        "python3 scripts/finetune.py",
+        f'"${{FINETUNE_PYTHON}}" scripts/finetune.py',
         f"--comparison-config {comparison_config}",
         f"--busi-root    {DATASET_ROOTS['busi']}",
         f"--echonet-root {DATASET_ROOTS['echonet']}",
@@ -132,8 +171,9 @@ def write_inner_script(
     num_gpus: int | None,
     log_label: str,
 ) -> Path:
+    output_dir = resolve_output_dir(comparison_config)
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
-    COMPARISON_OUTPUT.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     inner = LOG_ROOT / f".inner_finetune_{log_label}.sh"
 
     ft_cmd = finetune_python_cmd(
@@ -166,23 +206,29 @@ nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>
 echo "================================================================"
 echo ""
 echo "Config     : {comparison_config}"
-echo "Results dir : {COMPARISON_OUTPUT}"
+echo "Results dir : {output_dir}"
 echo "Checkpoints  : /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Finetune/"
 echo ""
 
 bash "{REPO_DIR}/scripts/ensure_deps.sh"
 bash "{REPO_DIR}/scripts/ensure_ablation_deps.sh"
 source "{REPO_DIR}/scripts/setup_hf_cache.sh"
+source "{REPO_DIR}/scripts/finetune/runtime_python.sh"
+FINETUNE_PYTHON="$(resolve_finetune_python)"
+echo "Python: ${{FINETUNE_PYTHON}} ($(${{FINETUNE_PYTHON}} --version 2>&1))"
 
 {ft_cmd}
 
 FT_EXIT=$?
 
+"${{FINETUNE_PYTHON}}" scripts/finetune/report.py --dashboard || true
+
 echo ""
 echo "================================================================"
 echo " FINETUNE COMPLETE  exit=${{FT_EXIT}}  $(date)"
-[[ ${{FT_EXIT}} -eq 0 ]] && echo " Report  : {COMPARISON_OUTPUT}/comparison_report.md"
-[[ ${{FT_EXIT}} -eq 0 ]] && echo " Charts  : {COMPARISON_OUTPUT}/charts/"
+[[ ${{FT_EXIT}} -eq 0 ]] && echo " Report  : {output_dir}/comparison_report.md"
+[[ ${{FT_EXIT}} -eq 0 ]] && echo " Charts  : {output_dir}/charts/"
+[[ ${{FT_EXIT}} -eq 0 ]] && echo " Dashboard: {RESULTS_ROOT}/_dashboard/"
 echo "================================================================"
 exit ${{FT_EXIT}}
 """

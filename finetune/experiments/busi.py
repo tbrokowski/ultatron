@@ -261,7 +261,7 @@ class BUSIFinetune(FinetuneExperiment):
             return DataLoader(
                 ds, batch_size=self.cfg.batch_size, sampler=sampler,
                 num_workers=self.cfg.num_workers, pin_memory=True,
-                collate_fn=collate,
+                collate_fn=collate, drop_last=True,
             )
         return DataLoader(
             ds, batch_size=self.cfg.batch_size, shuffle=False,

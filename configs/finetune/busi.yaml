@@ -29,7 +29,7 @@ finetune:
   num_workers:  4
 
   # ── Head ────────────────────────────────────────────────────────────────────
-  head_type:    upernet      # upernet (student F1–F4) | dpt (enhanced single-scale)
+  head_type:    dpt
   freeze_backbone: true      # required for this config
 
   # ── BUSI protocol (USFM breast segmentation) ────────────────────────────────

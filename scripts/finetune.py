@@ -962,20 +962,8 @@ def _run_backbones_for_experiment(
         variant_runs = camus_variants if exp_name == "camus" and camus_variants else [None]
         for variant_cfg in variant_runs:
             variant_name = variant_cfg.get("variant") if variant_cfg else None
-            from models.heads.finetune_seg import (
-                encoder_has_hierarchical_features,
-                head_type_requires_hierarchy,
-            )
-            for head_type in head_types:
-                if (
-                    head_type_requires_hierarchy(head_type)
-                    and not encoder_has_hierarchical_features(encoder)
-                ):
-                    log.warning(
-                        "Skipping %s / %s — %s requires a hierarchical encoder",
-                        bkey, head_type, head_type,
-                    )
-                    continue
+            from models.heads.finetune_seg import filter_head_types_for_encoder
+            for head_type in filter_head_types_for_encoder(head_types, encoder):
                 if variant_name:
                     run_dir = output_dir / bkey / exp_name / variant_name / head_type
                     label = f"{exp_name}/{variant_name}"
@@ -1089,7 +1077,8 @@ def _run_comparison_sequential(
 
         for exp_name in experiments:
             head_types = head_types_cfg.get(exp_name, default_heads)
-            for head_type in head_types:
+            from models.heads.finetune_seg import filter_head_types_for_encoder
+            for head_type in filter_head_types_for_encoder(head_types, encoder):
                 run_dir = output_dir / bkey / exp_name / head_type
                 log.info(f"  → {exp_name} / {head_type} → {run_dir}")
                 try:

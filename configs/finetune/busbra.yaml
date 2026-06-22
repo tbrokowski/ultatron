@@ -27,8 +27,8 @@ finetune:
   batch_size:   8
   num_workers:  4
 
-  # ── Head (student: upernet; ViT/FMs: dpt via comparison sweep) ──────────────
-  head_type:         upernet
+  # ── Head (DPT for all backbones in comparison sweep) ─────────────────────────
+  head_type:         dpt
   freeze_backbone:   true
 
   # ── BUS-BRA / OpenUS split ──────────────────────────────────────────────────

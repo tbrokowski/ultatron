@@ -32,9 +32,9 @@ with eval.benchmarks.echonet when DataLoader workers spawn.
 """
 from __future__ import annotations
 
-from .base import FinetuneExperiment, FinetuneConfig
-
 _LAZY_EXPORTS = {
+    "FinetuneExperiment": (".base", "FinetuneExperiment"),
+    "FinetuneConfig":     (".base", "FinetuneConfig"),
     "CAMUSFinetune":   (".experiments.camus",   "CAMUSFinetune"),
     "BUSIFinetune":    (".experiments.busi",    "BUSIFinetune"),
     "EchoNetFinetune": (".experiments.echonet", "EchoNetFinetune"),

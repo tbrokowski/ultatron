@@ -15,6 +15,7 @@ from .finetune_seg import (
     is_hierarchical_seg_head,
     encoder_has_hierarchical_features,
     head_type_requires_hierarchy,
+    filter_head_types_for_encoder,
 )
 from .classification_head import (
     LinearClsHead,
@@ -33,7 +34,7 @@ __all__ = [
     "UPerNetDecoder", "build_hierarchical_seg_head",
     "build_finetune_seg_head", "forward_seg_head",
     "is_hierarchical_seg_head", "encoder_has_hierarchical_features",
-    "head_type_requires_hierarchy",
+    "head_type_requires_hierarchy", "filter_head_types_for_encoder",
     # Classification
     "LinearClsHead", "MLPClsHead", "AttentivePoolClsHead", "build_cls_head",
     # Concept detection

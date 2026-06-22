@@ -1,7 +1,7 @@
 # configs/smoke/student_smoke.yaml
 # ============================================================
 # Full student-pipeline smoke test: 800 training steps (200 per stage)
-# across all four curriculum stages, sampling from every available dataset.
+# across all four curriculum stages (bootstrap → fusion → EMA divergence).
 #
 # Used ONLY by tests/dataset_adapters/student_training_smoke.py
 
@@ -68,7 +68,7 @@ student_data:
     - {image_frac: 1.00, video_frac: 0.00, paired_frac: 0.00}  # stage 1: image-only (no full-video decode)
     - {image_frac: 0.40, video_frac: 0.60, paired_frac: 0.00}
     - {image_frac: 0.50, video_frac: 0.30, paired_frac: 0.20}
-    - {image_frac: 0.50, video_frac: 0.50, paired_frac: 0.00}
+    - {image_frac: 0.50, video_frac: 0.30, paired_frac: 0.20}  # stage 4: EMA divergence
 
 model:
   student:
@@ -95,6 +95,10 @@ loss_weights:
   lam_ema_max: 0.15
   lam_ema_floor: 0.0
   lam_ema_warmup_steps: 50
+  lam_ema_divergence_peak: 0.8
+  lam_teacher_floor: 0.05
+  stage4_teacher_decay: cosine
+  stage4_ema_ramp: cosine
   lam_tube: 1.0
   lam_temp: 0.5
   lam_fused: 0.5

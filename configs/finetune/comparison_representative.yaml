@@ -54,7 +54,6 @@ experiment_smoke_overrides:
     tumor_only_train: true
     eval_tumor_only: true
     split_manifest: dataset_exploration_outputs/busi_usfm/split_manifest.json
-    head_type: upernet
     lr: 3.0e-4
     batch_size: 8
     cls_loss_weight: 0.0
@@ -72,7 +71,6 @@ experiment_smoke_overrides:
     tumor_only_train: false
     eval_tumor_only: true
     split_manifest: dataset_exploration_outputs/busi_usfm/split_manifest.json
-    head_type: upernet
     lr: 3.0e-4
     batch_size: 8
     cls_loss_weight: 1.0

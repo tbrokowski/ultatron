@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# submit_student_pretrain.sh  ·  Student Hiera pretrain (64 GPU default)
+# submit_student_pretrain.sh  ·  Student Hiera pretrain (128 GPU default)
 # =============================================================================
 #
-# Full run (100k steps, stages 30k/20k/40k/10k — chain with --resume):
+# Full run (100k steps, stages 25k/20k/20k/35k — chain with --resume):
 #   bash scripts/submit_student_pretrain.sh
 #   bash scripts/submit_student_pretrain.sh --resume
+#   bash scripts/submit_student_pretrain.sh --resume --after-job 2575865
 #
 # 15k pilot (all 4 stages, fixed 512px, separate ckpt dir):
 #   bash scripts/submit_student_pretrain.sh --pilot
@@ -19,7 +20,10 @@
 # Overrides:
 #   US_STUDENT_STEPS=50000 bash scripts/submit_student_pretrain.sh
 #   US_STUDENT_LR=5e-5 bash scripts/submit_student_pretrain.sh --nodes 4
-#   US_STUDENT_RESUME_CKPT=/path/to/step_01500.pt bash scripts/submit_student_pretrain.sh --pilot --resume
+#   US_STUDENT_RESUME_CKPT=/path/to/step_01500.pt bash scripts/submit_student_pretrain.sh --resume
+#   US_STUDENT_RESUME_STAGE_FRACS=checkpoint  # keep checkpoint schedule (legacy runs)
+#   US_STUDENT_RESUME_STAGE_FRACS=config       # default: use yaml stage_fracs (EMA stage 4)
+#   bash scripts/submit_student_pretrain.sh --resume --after-job JOBID  # chain after Slurm job
 #
 # Checkpoints:
 #   Full  : .../checkpoints/StudentPretrain/
@@ -37,7 +41,8 @@ LOG_DIR="${REPO_DIR}/logs/pretrain"
 PILOT=0
 RESUME=0
 RESUME_ARGS=""
-NODES=16
+AFTER_JOB=""
+NODES=32
 GPUS_PER_NODE=4
 CPUS=32
 # GH200 nodes expose ~480 GB unified memory; stage-3 resume peaked ~589 GB (job 2544897).
@@ -52,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --pilot)     PILOT=1; shift ;;
         --resume)    RESUME=1; RESUME_ARGS="--resume"; shift ;;
+        --after-job) AFTER_JOB="$2"; shift 2 ;;
         --nodes)     NODES="$2"; shift 2 ;;
         --gpus)      GPUS_PER_NODE="$2"; shift 2 ;;
         --single)    NODES=1; GPUS_PER_NODE=4; CPUS=32; shift ;;
@@ -68,14 +74,15 @@ if [[ "${PILOT}" -eq 1 ]]; then
     STEPS_LABEL="15k pilot"
 fi
 
-# Stage-3+ resume: skip loader warmup + cap workers (OOM / shm, jobs 2543314/2544897/2547540).
-STAGE3_RESUME_ENV=""
+# Stage-3/4 resume: skip loader warmup + cap workers (OOM / shm, jobs 2543314/2544897/2547540).
+STAGE34_RESUME_ENV=""
 if [[ "${RESUME}" -eq 1 ]]; then
-    STAGE3_RESUME_ENV=$(
-        cat <<'STAGE3_EOF'
+    STAGE34_RESUME_ENV=$(
+        cat <<'STAGE34_EOF'
+export US_STUDENT_RESUME=1
 export US_STUDENT_LOADER_WARMUP=0
 export US_STUDENT_NUM_WORKERS=2
-STAGE3_EOF
+STAGE34_EOF
     )
 fi
 
@@ -102,7 +109,7 @@ export TORCH_SHARED_MEMORY_STRATEGY=file_system
 export US_STUDENT_CONFIG="${CONFIG}"
 export US_STUDENT_MODE=pretrain
 RESUME_ARGS="${RESUME_ARGS}"
-${STAGE3_RESUME_ENV}
+${STAGE34_RESUME_ENV}
 
 export LD_LIBRARY_PATH=\$(echo "\${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v 'aws-ofi-nccl' | paste -sd ':' -)
 export NCCL_NET=Socket
@@ -123,8 +130,8 @@ echo " Nodes  : \${SLURM_NNODES:-1}  GPUs/node: ${GPUS_PER_NODE}"
 echo " Config : ${CONFIG}"
 echo " Resume : $([ "${RESUME}" -eq 1 ] && echo yes || echo no)"
 echo " Mem    : ${NODE_MEM}/node"
-if [[ -n "${STAGE3_RESUME_ENV}" ]]; then
-echo " Stage3 : loader_warmup=0 num_workers=2"
+if [[ -n "${STAGE34_RESUME_ENV}" ]]; then
+echo " Resume : loader_warmup=0 num_workers=2 US_STUDENT_RESUME=1"
 fi
 echo " Start  : \$(date)"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null \
@@ -162,23 +169,31 @@ OUTER_EOF
 chmod +x "${OUTERSCRIPT}"
 
 echo "Submitting ${JOB_NAME} (${NODES} nodes × ${GPUS_PER_NODE} GPU = ${TOTAL_GPUS} total)..."
-JOB_ID=$(sbatch \
-    --job-name="${JOB_NAME}" \
-    --nodes="${NODES}" \
-    --ntasks-per-node=1 \
-    --gpus-per-node="${GPUS_PER_NODE}" \
-    --cpus-per-task="${CPUS}" \
-    --mem="${NODE_MEM}" \
-    --time="${TIME_LIMIT}" \
-    --partition="${PARTITION}" \
-    --account="${ACCOUNT}" \
-    --output="${LOG_DIR}/${JOB_NAME}_%j.out" \
-    --error="${LOG_DIR}/${JOB_NAME}_%j.err" \
-    --parsable \
-    "${OUTERSCRIPT}")
+SBATCH_CMD=(
+    sbatch
+    --job-name="${JOB_NAME}"
+    --nodes="${NODES}"
+    --ntasks-per-node=1
+    --gpus-per-node="${GPUS_PER_NODE}"
+    --cpus-per-task="${CPUS}"
+    --mem="${NODE_MEM}"
+    --time="${TIME_LIMIT}"
+    --partition="${PARTITION}"
+    --account="${ACCOUNT}"
+    --output="${LOG_DIR}/${JOB_NAME}_%j.out"
+    --error="${LOG_DIR}/${JOB_NAME}_%j.err"
+    --parsable
+)
+if [[ -n "${AFTER_JOB}" ]]; then
+    SBATCH_CMD+=(--dependency="afterok:${AFTER_JOB}")
+fi
+JOB_ID=$("${SBATCH_CMD[@]}" "${OUTERSCRIPT}")
 
 echo ""
 echo "  Job ID : ${JOB_ID}"
+if [[ -n "${AFTER_JOB}" ]]; then
+echo "  After  : ${AFTER_JOB} (afterok)"
+fi
 echo "  GPUs   : ${TOTAL_GPUS} (${NODES} nodes × ${GPUS_PER_NODE})"
 echo "  Config : ${CONFIG}"
 echo "  Launch : ${INNERSCRIPT}"

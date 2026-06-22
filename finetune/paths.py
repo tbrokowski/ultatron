@@ -3,7 +3,7 @@ finetune/paths.py  ·  Finetune results vs checkpoint path layout
 ==================================================================
 
 Results (metrics, logs, visualizations) live under the repo finetune tree:
-  dataset_exploration_outputs/finetune/{backbone}/{experiment}/{head_type}/
+  results/finetune/{sweep}/{backbone}/{experiment}/{head_type}/
 
 Task-head weights (.pt) live on Capstor store:
   /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/Finetune/...
@@ -15,7 +15,7 @@ from pathlib import Path
 
 from data.infra.cscs_paths import CSCS_STORE_ROOT
 
-FINETUNE_RESULTS_SUBDIR = "dataset_exploration_outputs/finetune"
+FINETUNE_RESULTS_SUBDIR = "results/finetune/representative"
 FINETUNE_CHECKPOINTS_SUBDIR = "checkpoints/Finetune"
 
 
@@ -54,13 +54,9 @@ def finetune_run_dirs(
 def mirror_checkpoint_dir(results_dir: Path, repo: Path | None = None) -> Path:
     """Map a results directory to the matching Capstor checkpoint path.
 
-    When the results directory sits under the default finetune output root
-    (``dataset_exploration_outputs/finetune``), the relative path is used
-    directly.  When a non-default output directory is used (e.g.
-    ``finetune_openus_seg``), the path relative to
-    ``dataset_exploration_outputs/`` is used instead, so that the full
-    backbone/experiment/head_type hierarchy is preserved and different
-    backbone runs never share the same checkpoint file.
+    When the results directory sits under ``results/finetune/`` (or legacy
+    ``dataset_exploration_outputs/finetune``), the relative path is used
+    directly.
     """
     repo = repo or Path(__file__).resolve().parents[1]
     results_dir = Path(results_dir)
@@ -70,9 +66,10 @@ def mirror_checkpoint_dir(results_dir: Path, repo: Path | None = None) -> Path:
         results_dir = results_dir.resolve()
 
     results_root = finetune_results_root(repo).resolve()
+    finetune_root = (repo / "results" / "finetune").resolve()
     deo = (repo / "dataset_exploration_outputs").resolve()
 
-    for base in (results_root, deo):
+    for base in (results_root, finetune_root, deo):
         try:
             rel = results_dir.relative_to(base)
             return finetune_checkpoints_root() / rel

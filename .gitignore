@@ -46,6 +46,7 @@ htmlcov/
 # ── Exploration & generated outputs ──────────────────────────────────────────
 dataset_exploration_outputs/
 echonet_exploration_outputs/
+results/finetune/
 finetune/outputs/
 masks_binary/
 
@@ -96,10 +97,13 @@ scripts/download_mimic_echoqa.sh
 
 # ── Transient / local artifacts ───────────────────────────────────────────────
 tmp/
+temp/
 viz_outputs/
 =1.2.0
-"hparam_loss_table_last100 (1).csv"
+configs/hparam_tuning.yaml
+submit_hparam_tuning.sh
 hparam_loss_table_last100*
+"hparam_loss_table_last100 (1).csv"
 
 # ── Paper drafts (internal, not for public distribution) ─────────────────────
 paper/

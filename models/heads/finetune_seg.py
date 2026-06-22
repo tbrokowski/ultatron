@@ -16,10 +16,13 @@ Comparison / finetune protocol (frozen backbone, trainable head only):
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 import torch
 import torch.nn as nn
+
+log = logging.getLogger(__name__)
 
 from .hierarchical_seg import UPerNetDecoder, build_hierarchical_seg_head
 from .segmentation_head import (
@@ -58,6 +61,25 @@ def is_enhanced_dpt_head(head: nn.Module) -> bool:
 
 def head_type_requires_hierarchy(head_type: str) -> bool:
     return head_type.lower() in _HIERARCHICAL_HEAD_TYPES
+
+
+def filter_head_types_for_encoder(head_types: list[str], encoder: Any) -> list[str]:
+    """Drop hierarchical head types when the encoder lacks F1–F4 multi-scale features."""
+    filtered: list[str] = []
+    for head_type in head_types:
+        if (
+            head_type_requires_hierarchy(head_type)
+            and not encoder_has_hierarchical_features(encoder)
+        ):
+            log.warning(
+                "Skipping %s — %s requires a hierarchical encoder (%s)",
+                head_type,
+                head_type,
+                type(encoder).__name__,
+            )
+            continue
+        filtered.append(head_type)
+    return filtered
 
 
 def seg_encoder_dim(encoder: Any, embed_dim: Optional[int] = None) -> int:
@@ -120,19 +142,22 @@ def build_finetune_seg_head(
 
     if ht in _HIERARCHICAL_HEAD_TYPES:
         if not encoder_has_hierarchical_features(encoder):
-            raise ValueError(
-                f"head_type={head_type!r} requires a hierarchical encoder "
-                f"(embed_dims); got {type(encoder).__name__}."
+            log.warning(
+                "head_type=%r requires a hierarchical encoder (%s); using dpt instead",
+                head_type,
+                type(encoder).__name__,
             )
-        return build_hierarchical_seg_head(
-            list(encoder.embed_dims),
-            n_classes,
-            fpn_channels,
-            use_adapters=use_adapters,
-            use_attention_gates=use_attention_gates,
-            use_aspp=use_aspp,
-            use_refine_up=use_refine_up,
-        )
+            ht = "dpt"
+        else:
+            return build_hierarchical_seg_head(
+                list(encoder.embed_dims),
+                n_classes,
+                fpn_channels,
+                use_adapters=use_adapters,
+                use_attention_gates=use_attention_gates,
+                use_aspp=use_aspp,
+                use_refine_up=use_refine_up,
+            )
 
     if ht == "dpt":
         return _build_enhanced_dpt(

@@ -7,7 +7,6 @@ ACCOUNT="${ULTATRON_ACCOUNT:-a127}"
 PARTITION="${ULTATRON_PARTITION:-normal}"
 EDF_ENV="${ULTATRON_EDF_ENV:-${HOME}/.edf/ultatron.toml}"
 LOG_ROOT="${REPO_DIR}/logs/finetune"
-COMPARISON_OUTPUT="${REPO_DIR}/dataset_exploration_outputs/finetune"
 DEFAULT_COMPARISON_CONFIG="${REPO_DIR}/configs/finetune/comparison_representative.yaml"
 
 STORE="/capstor/store/cscs/swissai/a127/ultrasound"
@@ -15,6 +14,31 @@ DEFAULT_BACKBONES=(student_stage1 resnet50 vit_b_16 dinov3_l biomedclip usfm ech
 
 _die() { echo "[ERROR] $*" >&2; exit 1; }
 _info() { echo "[INFO]  $*"; }
+
+# Login-node python3 is 3.6; finetune needs >=3.10. Prefer 3.12 (compute EDF) then 3.11.
+_FINETUNE_PYTHON=""
+for _py in python3.12 python3.11 python3; do
+  if command -v "${_py}" >/dev/null 2>&1 && "${_py}" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
+    _FINETUNE_PYTHON="${_py}"
+    break
+  fi
+done
+[[ -n "${_FINETUNE_PYTHON}" ]] || _die "Need Python >=3.10 (tried python3.12, python3.11, python3)"
+
+_resolve_output_dir() {
+  "${_FINETUNE_PYTHON}" -c "
+import yaml
+from pathlib import Path
+repo = Path('${REPO_DIR}')
+cfg_path = Path('${COMPARISON_CONFIG}')
+if not cfg_path.is_absolute():
+    cfg_path = repo / cfg_path
+with cfg_path.open() as f:
+    out = yaml.safe_load(f).get('output_dir', 'results/finetune/representative')
+out = Path(out)
+print(out if out.is_absolute() else repo / out)
+"
+}
 
 _build_backbones_arg() {
   BACKBONES_ARG=""
@@ -37,8 +61,7 @@ _build_finetune_cmd() {
   local parallel="${2:-0}"
   local num_gpus="${3:-}"
 
-  FINETUNE_CMD=(
-    python3 scripts/finetune.py
+  FINETUNE_ARGS=(
     "--comparison-config" "${COMPARISON_CONFIG}"
     "--busi-root"    "${STORE}/raw/breast/BUSI"
     "--echonet-root" "${STORE}/raw/cardiac/EchoNet-Dynamic"
@@ -47,22 +70,22 @@ _build_finetune_cmd() {
     "--rsa-root"     "${STORE}/raw/lung/RSA_Videos"
   )
   if [[ -n "${experiments}" ]]; then
-    FINETUNE_CMD+=(--experiments ${experiments})
+    FINETUNE_ARGS+=(--experiments ${experiments})
   fi
   if [[ "${EVAL_ONLY}" -eq 1 ]]; then
-    FINETUNE_CMD+=(--eval-only)
+    FINETUNE_ARGS+=(--eval-only)
   fi
   if [[ -n "${BACKBONES_ARG}" ]]; then
     # shellcheck disable=SC2206
-    FINETUNE_CMD+=(${BACKBONES_ARG})
+    FINETUNE_ARGS+=(${BACKBONES_ARG})
   fi
   if [[ "${parallel}" -eq 1 ]]; then
-    FINETUNE_CMD+=(--parallel-experiments)
+    FINETUNE_ARGS+=(--parallel-experiments)
     if [[ -n "${num_gpus}" ]]; then
-      FINETUNE_CMD+=(--num-gpus "${num_gpus}")
+      FINETUNE_ARGS+=(--num-gpus "${num_gpus}")
     fi
   else
-    FINETUNE_CMD+=(--no-parallel-experiments)
+    FINETUNE_ARGS+=(--no-parallel-experiments)
   fi
 }
 
@@ -73,6 +96,7 @@ _write_inner_script() {
   local num_gpus="${4:-}"
 
   _build_finetune_cmd "${experiments}" "${parallel}" "${num_gpus}"
+  COMPARISON_OUTPUT="$(_resolve_output_dir)"
   mkdir -p "${LOG_ROOT}" "${COMPARISON_OUTPUT}"
   INNER_SCRIPT="${LOG_ROOT}/.inner_finetune_${log_label}.sh"
 
@@ -102,15 +126,21 @@ _write_inner_script() {
     echo "bash \"${REPO_DIR}/scripts/ensure_deps.sh\""
     echo "bash \"${REPO_DIR}/scripts/ensure_ablation_deps.sh\""
     echo "source \"${REPO_DIR}/scripts/setup_hf_cache.sh\""
+    echo "source \"${REPO_DIR}/scripts/finetune/runtime_python.sh\""
+    echo 'FINETUNE_PYTHON="$(resolve_finetune_python)"'
+    echo 'echo "Python: ${FINETUNE_PYTHON} ($(${FINETUNE_PYTHON} --version 2>&1))"'
     echo ''
-    printf '%q ' "${FINETUNE_CMD[@]}"
+    printf '"${FINETUNE_PYTHON}" scripts/finetune.py '
+    printf '%q ' "${FINETUNE_ARGS[@]}"
     echo ''
     echo 'FT_EXIT=$?'
+    echo '"${FINETUNE_PYTHON}" scripts/finetune/report.py --dashboard || true'
     echo 'echo ""'
     echo 'echo "================================================================"'
     echo 'echo " FINETUNE COMPLETE  exit=${FT_EXIT}  $(date)"'
     echo '[[ ${FT_EXIT} -eq 0 ]] && echo " Report  : '"${COMPARISON_OUTPUT}"'/comparison_report.md"'
     echo '[[ ${FT_EXIT} -eq 0 ]] && echo " Charts  : '"${COMPARISON_OUTPUT}"'/charts/"'
+    echo '[[ ${FT_EXIT} -eq 0 ]] && echo " Dashboard: '"${REPO_DIR}"'/results/finetune/_dashboard/"'
     echo 'echo "================================================================"'
     echo 'exit ${FT_EXIT}'
   } > "${INNER_SCRIPT}"

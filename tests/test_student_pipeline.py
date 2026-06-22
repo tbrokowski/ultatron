@@ -79,7 +79,8 @@ from models.losses.student_losses import (
 )
 from train.student_phase_steps import (
     student_stage1_step, student_stage2_step, student_stage4_step,
-    _lam_ema_eff, _dino_patch_masks,
+    student_stage4_divergence_step,
+    _lam_ema_eff, _stage4_ema_scale, _dino_patch_masks,
 )
 from data.labels.label_spec import TaskType, LossType
 from data.schema.manifest import USManifestEntry, ManifestWriter
@@ -771,6 +772,91 @@ class TestPhaseSteps:
         assert _lam_ema_eff(lam, 0) == 0.0
         assert _lam_ema_eff(lam, 50) == pytest.approx(0.1)
         assert _lam_ema_eff(lam, 100) == pytest.approx(0.2)
+
+    def test_lam_ema_eff_by_stage(self):
+        lam = dict(
+            lam_ema_max=0.15,
+            lam_ema_warmup_steps=100,
+            lam_ema_max_by_stage={2: 1.0, 3: 1.0},
+        )
+        assert _lam_ema_eff(lam, 100, stage=1) == pytest.approx(0.15)
+        assert _lam_ema_eff(lam, 100, stage=2) == pytest.approx(1.0)
+        assert _lam_ema_eff(lam, 100, stage=3) == pytest.approx(1.0)
+
+    def test_stage4_ema_scale_ramp(self):
+        lam = dict(lam_ema_max=0.15, lam_ema_divergence_peak=0.8)
+        assert _stage4_ema_scale(lam, 0, 0, 100) == pytest.approx(0.15)
+        assert _stage4_ema_scale(lam, 100, 0, 100) == pytest.approx(0.8)
+        mid = _lam_ema_eff(lam, 50, stage=4, stage4_start=0, stage4_end=100)
+        assert mid > 0.15
+        assert mid < 0.8
+
+    def test_stage4_divergence_image_batch(self):
+        student, ema, _dino, proto = self._make_components()
+        batch = self._make_image_batch_ssl()
+        lam = dict(
+            lam_patch=1.0, lam_masked=1.0, lam_proto=0.2,
+            lam_ema_max=0.15, lam_ema_divergence_peak=0.8,
+        )
+        out = student_stage4_divergence_step(
+            batch, student, ema, proto, lam,
+            global_step=50, stage4_start=0, stage4_end=100,
+        )
+        assert "loss" in out
+        assert out["loss"].requires_grad
+        assert out["loss_ema"] > 0.0
+        assert out["lam_ema_eff"] > 0.15
+        assert "loss_fused" not in out
+
+    def test_stage4_divergence_paired_batch(self):
+        student, ema, _dino, proto = self._make_components()
+        B, T, H, W = 1, 4, 64, 64
+        ph = H // STUB_PATCH_STRIDE
+        batch = {
+            "sample_type": "paired",
+            "frame": torch.randn(B, 3, H, W),
+            "clean_frame": torch.randn(B, 3, H, W),
+            "full_clips": torch.randn(B, T, 3, H, W),
+            "visible_clips": torch.randn(B, T, 3, H, W),
+            "padding_masks": torch.ones(B, ph, ph, dtype=torch.bool),
+            "frame_pmask": torch.ones(B, ph, ph, dtype=torch.bool),
+            "global_pmasks": torch.ones(B, 2, ph, ph, dtype=torch.bool),
+        }
+        lam = dict(lam_fc=0.5, lam_ema_max=0.15, lam_ema_divergence_peak=0.8)
+        out = student_stage4_divergence_step(
+            batch, student, ema, proto, lam,
+            global_step=100, stage4_start=0, stage4_end=100,
+        )
+        assert out["sample_type"] == "paired"
+        assert "loss_fc" in out
+        assert "loss_fused" not in out
+        assert out["lam_ema_eff"] == pytest.approx(0.8)
+
+    def test_resume_migration_at_25k_uses_config_schedule(self, monkeypatch):
+        from tests.dataset_adapters.student_training_smoke import (
+            _resolve_resume_stage_fracs,
+            _stage_for_step,
+        )
+
+        old = [0.30, 0.20, 0.40, 0.10]
+        new = [0.25, 0.20, 0.20, 0.35]
+        monkeypatch.delenv("US_STUDENT_RESUME_STAGE_FRACS", raising=False)
+        resolved = _resolve_resume_stage_fracs(old, new, 100_000, 25000)
+        assert resolved == new
+        assert _stage_for_step(25001, 100_000, resolved) == 2
+
+    def test_resume_checkpoint_mode_keeps_legacy_schedule(self, monkeypatch):
+        from tests.dataset_adapters.student_training_smoke import (
+            _resolve_resume_stage_fracs,
+            _stage_for_step,
+        )
+
+        old = [0.30, 0.20, 0.40, 0.10]
+        new = [0.25, 0.20, 0.20, 0.35]
+        monkeypatch.setenv("US_STUDENT_RESUME_STAGE_FRACS", "checkpoint")
+        resolved = _resolve_resume_stage_fracs(old, new, 100_000, 25000)
+        assert resolved == old
+        assert _stage_for_step(25001, 100_000, resolved) == 1
 
     def test_dino_patch_masks_disjoint(self):
         B, N = 2, 16

@@ -526,7 +526,7 @@ class FinetuneExperiment(ABC):
                             help="Dataset root directory")
         parser.add_argument("--config",     required=True,
                             help="Path to finetune YAML config")
-        parser.add_argument("--output-dir", default="dataset_exploration_outputs/finetune",
+        parser.add_argument("--output-dir", default="results/finetune/representative",
                             help="Where to write metrics, logs, and visualizations")
         parser.add_argument("--checkpoint-dir", default=None,
                             help="Where to save task-head weights (default: Capstor Finetune/)")

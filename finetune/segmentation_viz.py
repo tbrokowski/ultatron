@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FIGURES_ROOT = REPO_ROOT / "finetune" / "outputs"
 
 _EXPERIMENT_SLUGS = {
     "camus": "camus",
@@ -120,7 +119,7 @@ def collect_seg_sample(
 
 
 def save_segmentation_figure(exp: "FinetuneExperiment") -> Path | None:
-    """Save GT vs pred overlay to finetune/outputs/{dataset}/figures/{model}_{head}_segmentation.png."""
+    """Save GT vs pred overlay to {run_dir}/figures/{model}_segmentation.png."""
     if exp.encoder is None:
         log.warning("[%s] No encoder — skipping segmentation figure", exp.EXPERIMENT_NAME)
         return None
@@ -134,7 +133,7 @@ def save_segmentation_figure(exp: "FinetuneExperiment") -> Path | None:
 
     slug = dataset_slug_for_experiment(exp)
     model_name = f"{exp.encoder.name}_{exp.cfg.head_type}"
-    out_dir = FIGURES_ROOT / slug / "figures"
+    out_dir = exp.output_dir / "figures"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{model_name}_segmentation.png"
 

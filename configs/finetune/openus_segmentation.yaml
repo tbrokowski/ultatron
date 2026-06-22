@@ -13,7 +13,7 @@
 
 train_config: configs/student/student_pretrain.yaml
 
-output_dir: dataset_exploration_outputs/finetune_openus_seg
+output_dir: results/finetune/openus_seg
 device: cuda
 eval_only: false
 
@@ -58,7 +58,7 @@ experiment_smoke_overrides:
 backbones:
   - key: student_stage1
     type: student
-    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_10000.pt
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_22500.pt
     use_ema: true
 
   - key: resnet50
@@ -93,7 +93,7 @@ experiments:
 
 head_types:
   default: [dpt]
-  busbra: [upernet, dpt]
+  busbra: [dpt]
   tn3k: [dpt]
 
 dataset_roots:

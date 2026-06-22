@@ -25,7 +25,7 @@ finetune:
   batch_size:   8
   num_workers:  4
 
-  head_type:    upernet
+  head_type:    dpt
   freeze_backbone: true
 
   # ── Multitask (seg + cls) ───────────────────────────────────────────────────

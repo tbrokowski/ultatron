@@ -7,10 +7,10 @@ Loads real pretrained models (Hiera student, DINOv3-L, V-JEPA2-L) and trains
 for 800 steps (200 per stage) across all four curriculum stages, sampling from
 every dataset that has a root configured in configs/run1/data_run1.yaml.
 
-  Stage 1 (200 steps)  — image semantic warm-start
-  Stage 2 (200 steps)  — video temporal warm-start
-  Stage 3 (200 steps)  — cross-view coupling
-  Stage 4 (200 steps)  — supervised segmentation head
+  Stage 1 (200 steps)  — DINO semantic warm-start
+  Stage 2 (200 steps)  — V-JEPA temporal warm-start
+  Stage 3 (200 steps)  — cross-modal fusion
+  Stage 4 (200 steps)  — EMA self-distillation divergence
 
 Usage (inside the EDF container):
 
@@ -27,6 +27,8 @@ Environment overrides
     US_SMOKE_DEVICE              Force device
     US_SMOKE_FORCE_REBUILD=1     Rebuild combined manifest
     US_STUDENT_RESUME=1          Resume from latest checkpoint (same as --resume)
+    US_STUDENT_RESUME_STAGE_FRACS  config (default) or checkpoint — stage boundary source
+    US_STUDENT_RESUME_CKPT       Explicit checkpoint path (overrides auto-select)
     US_STUDENT_HIERA_VARIANT     Override hiera_variant
     US_STUDENT_DINO_KEY          Override dino teacher key
     US_STUDENT_VJEPA_KEY         Override vjepa teacher key
@@ -76,10 +78,11 @@ from models.student.teacher_wrappers import FrozenDINOTeacher, FrozenVJEPATeache
 from data.infra.cscs_paths import configure_hf_environment
 from finetune.backbones.paths import student_smoke_checkpoints_dir
 from train.student_phase_steps import (
+    _stage_bounds_from_fracs,
     student_stage1_step,
     student_stage2_step,
     student_stage3_step,
-    student_stage4_step,
+    student_stage4_divergence_step,
 )
 from train.alp import HardnessFeedback, configure_alp_cache
 
@@ -458,7 +461,7 @@ def _find_resume_checkpoint(ckpt_dir: Path) -> Optional[Path]:
     Prefers healthy checkpoints (finite updates track loop step) with the
     highest last-finite step.  Falls back to best-effort when all are degraded.
 
-    Considers latest.pt, stage{N}_end.pt (N=1..3), and step_*.pt snapshots.
+    Considers latest.pt, stage{N}_end.pt (N=1..4), and step_*.pt snapshots.
     """
     if not ckpt_dir.is_dir():
         return None
@@ -467,7 +470,7 @@ def _find_resume_checkpoint(ckpt_dir: Path) -> Optional[Path]:
     latest = ckpt_dir / "latest.pt"
     if latest.is_file():
         candidates.append(latest)
-    for stage in (3, 2, 1):
+    for stage in (4, 3, 2, 1):
         p = ckpt_dir / f"stage{stage}_end.pt"
         if p.is_file():
             candidates.append(p)
@@ -721,13 +724,19 @@ def _build_datamodules(cfg: dict, manifest_path: Path) -> tuple[StudentDataModul
     )
     alp_feedback = HardnessFeedback(alp_cache)
 
+    loaders = cfg["loaders"]
+    student_sd = dict(cfg.get("student_data") or {})
+    for k in ("image_batch_size", "video_batch_size", "paired_batch_size", "num_workers"):
+        if k in loaders:
+            student_sd[k] = loaders[k]
+
     manifest_cfg = cfg.get("manifest", {})
     base_dm = USFoundationDataModule(
         manifest_path=str(manifest_path),
-        image_batch_size=cfg["loaders"]["image_batch_size"],
-        video_batch_size=cfg["loaders"]["video_batch_size"],
-        num_workers=cfg["loaders"]["num_workers"],
-        pin_memory=cfg["loaders"].get("pin_memory", True),
+        image_batch_size=loaders["image_batch_size"],
+        video_batch_size=loaders["video_batch_size"],
+        num_workers=loaders["num_workers"],
+        pin_memory=loaders.get("pin_memory", True),
         image_cfg=img_cfg,
         video_cfg=vid_cfg,
         total_training_steps=cur["total_training_steps"],
@@ -745,7 +754,7 @@ def _build_datamodules(cfg: dict, manifest_path: Path) -> tuple[StudentDataModul
     )
     base_dm.setup()
 
-    student_cfg = StudentDataConfig.from_dict(cfg["student_data"])
+    student_cfg = StudentDataConfig.from_dict(student_sd)
     collators = StudentMixedCollator(
         ImageSSLCollator(),
         VideoSSLCollator(),
@@ -868,14 +877,59 @@ def _prepare_stage4_batch(batch: dict) -> dict:
 
 def _stage_for_step(step: int, total: int, fracs: List[float]) -> int:
     """Return curriculum stage 1–4 for global step (0-indexed)."""
-    bounds = [0]
-    for f in fracs:
-        bounds.append(bounds[-1] + int(total * f))
-    bounds[-1] = total
+    bounds = _stage_bounds_from_fracs(fracs, total)
     for stage_idx in range(1, 5):
         if step < bounds[stage_idx]:
             return stage_idx
     return 4
+
+
+def _resume_stage_frac_mode() -> str:
+    """config (default): yaml stage_fracs; checkpoint: keep saved schedule."""
+    mode = os.environ.get("US_STUDENT_RESUME_STAGE_FRACS", "config").strip().lower()
+    if mode in ("checkpoint", "legacy", "ckpt"):
+        return "checkpoint"
+    return "config"
+
+
+def _format_stage_bounds(fracs: List[float], total: int) -> str:
+    bounds = _stage_bounds_from_fracs(fracs, total)
+    return " ".join(f"S{i}=[{bounds[i - 1]},{bounds[i]})" for i in range(1, 5))
+
+
+def _resolve_resume_stage_fracs(
+    ckpt_fracs: Optional[List[float]],
+    config_fracs: List[float],
+    total: int,
+    completed_step: int,
+) -> List[float]:
+    mode = _resume_stage_frac_mode()
+    if mode == "checkpoint" and ckpt_fracs is not None:
+        resolved = list(ckpt_fracs)
+        msg = (
+            f"Resume stage_fracs=checkpoint: {resolved} | "
+            f"{_format_stage_bounds(resolved, total)}"
+        )
+        log.info(msg)
+        if _is_main():
+            _announce(msg)
+        return resolved
+
+    resolved = list(config_fracs)
+    if ckpt_fracs is not None and list(ckpt_fracs) != resolved:
+        old_stage = _stage_for_step(completed_step, total, ckpt_fracs)
+        new_stage = _stage_for_step(completed_step + 1, total, resolved)
+        msg = (
+            f"Resume schedule migration at step {completed_step}: "
+            f"checkpoint {ckpt_fracs} → config {resolved} | "
+            f"was stage {old_stage} → continuing stage {new_stage} | "
+            f"old {_format_stage_bounds(ckpt_fracs, total)} | "
+            f"new {_format_stage_bounds(resolved, total)}"
+        )
+        log.warning(msg)
+        if _is_main():
+            _announce(msg)
+    return resolved
 
 
 def _stage3_curriculum(
@@ -934,7 +988,7 @@ def _update_resolution_curriculum(step: int, cfg: dict, student_dm: StudentDataM
             base._video_dataset.transform.cfg.max_crop_px = int(vid_px)
 
 
-_STEP_MONITOR_KEYS = ("proto_entropy", "proto_max_prob")
+_STEP_MONITOR_KEYS = ("proto_entropy", "proto_max_prob", "lam_ema_eff")
 
 
 def _extract_loss_metrics(step_out: dict) -> dict[str, float]:
@@ -1237,28 +1291,27 @@ class StudentSmokeTrainer:
             self._ensure_teacher_gpu("dino")
             self._park_teacher("vjepa")
         elif stage in (2, 3):
-            # Stage 2 mix is 40% image (DINO) + 60% video (V-JEPA) — both on GPU.
-            # GH200 120 GB: both teachers fit alongside student + optimizer (~21-29 GB peak).
             self._ensure_teacher_gpu("dino")
             self._ensure_vjepa()
         else:
             self._park_teacher("dino")
             self._park_teacher("vjepa")
+        # Fusion is only trained in stage 3; freeze in stage 4.
+        fusion = _unwrap(self.fusion)
+        train_fusion = stage == 3
+        for p in fusion.parameters():
+            p.requires_grad_(train_fusion)
 
-    def _prepare_stage3_teachers(self, sample_type: str) -> None:
-        """
-        Stage-3 teacher residency.
-
-        On GH200 120 GB both DINO and V-JEPA remain GPU-resident for the entire
-        stage (loaded once by sync_teachers_for_stage). No per-batch swapping.
-        """
-
-    def _set_lr(self, step: int) -> None:
-        lr = _lr_for_step(step, self.cfg)
-        for g in self.optimizer.param_groups:
-            g["lr"] = lr
-
-    def _run_step(self, batch: dict, stage: int, step: int, stage3_start: int, stage3_end: int) -> dict:
+    def _run_step(
+        self,
+        batch: dict,
+        stage: int,
+        step: int,
+        stage3_start: int,
+        stage3_end: int,
+        stage4_start: int,
+        stage4_end: int,
+    ) -> dict:
         student = _unwrap(self.student)
         proto = _unwrap(self.proto)
         fusion = _unwrap(self.fusion)
@@ -1298,12 +1351,28 @@ class StudentSmokeTrainer:
                     proto_queue=self.proto_queue,
                 )
             else:
-                batch = _prepare_stage4_batch(batch)
-                out = student_stage4_step(
-                    batch, student, seg_head, cls_heads={},
-                    lam=self.lam, backbone_frozen=False,
+                out = student_stage4_divergence_step(
+                    batch, student, self.ema_student, proto, self.lam,
+                    global_step=step,
+                    stage4_start=stage4_start,
+                    stage4_end=stage4_end,
+                    alp_feedback=self.alp_feedback,
+                    proto_queue=self.proto_queue,
                 )
         return out
+
+    def _prepare_stage3_teachers(self, sample_type: str) -> None:
+        """
+        Stage-3 teacher residency.
+
+        On GH200 120 GB both DINO and V-JEPA remain GPU-resident for the entire
+        stage (loaded once by sync_teachers_for_stage). No per-batch swapping.
+        """
+
+    def _set_lr(self, step: int) -> None:
+        lr = _lr_for_step(step, self.cfg)
+        for g in self.optimizer.param_groups:
+            g["lr"] = lr
 
     def _loss_is_finite(self, loss: torch.Tensor) -> bool:
         if _is_ddp():
@@ -1323,6 +1392,8 @@ class StudentSmokeTrainer:
         step: int,
         stage3_start: int,
         stage3_end: int,
+        stage4_start: int,
+        stage4_end: int,
         micro_idx: int = 0,
         grad_accum_steps: int = 1,
     ) -> Optional[dict[str, float]]:
@@ -1332,7 +1403,9 @@ class StudentSmokeTrainer:
         elif self._accum_failed:
             return None
 
-        out = self._run_step(batch, stage, step, stage3_start, stage3_end)
+        out = self._run_step(
+            batch, stage, step, stage3_start, stage3_end, stage4_start, stage4_end,
+        )
         loss = out["loss"] / grad_accum_steps
 
         if not self._loss_is_finite(loss):
@@ -1389,6 +1462,7 @@ class StudentSmokeTrainer:
             "stage": stage,
             "total_steps": self.total_steps,
             "stage_fracs": self.stage_fracs,
+            "loss_weights": dict(self.lam),
             "student": _unwrap(self.student).state_dict(),
             "ema_student": self.ema_student.state_dict(),
             "fusion": _unwrap(self.fusion).state_dict(),
@@ -1414,7 +1488,7 @@ class StudentSmokeTrainer:
 
     def save_stage_end(self, step: int, stage: int) -> None:
         """Save stage{N}_end.pt at the boundary between curriculum stages."""
-        if not self.save_stage_end_ckpts or stage not in (1, 2, 3):
+        if not self.save_stage_end_ckpts or stage not in (1, 2, 3, 4):
             return
         self.save_checkpoint(step, stage, self.ckpt_dir / f"stage{stage}_end.pt")
 
@@ -1426,6 +1500,10 @@ class StudentSmokeTrainer:
         """
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         step = int(ckpt["step"])
+        ckpt_fracs = ckpt.get("stage_fracs")
+        self.stage_fracs = _resolve_resume_stage_fracs(
+            ckpt_fracs, self.stage_fracs, self.total_steps, step,
+        )
         stage = int(ckpt.get("stage", _stage_for_step(step, self.total_steps, self.stage_fracs)))
 
         ckpt_total = ckpt.get("total_steps")
@@ -1434,9 +1512,9 @@ class StudentSmokeTrainer:
                 "Checkpoint total_steps=%s differs from run config %s",
                 ckpt_total, self.total_steps,
             )
-        ckpt_fracs = ckpt.get("stage_fracs")
-        if ckpt_fracs is not None and ckpt_fracs != self.stage_fracs:
-            log.warning("Checkpoint stage_fracs differ from run config — using config values")
+
+        if ckpt.get("loss_weights"):
+            self.lam = {**ckpt["loss_weights"], **self.lam}
 
         _unwrap(self.student).load_state_dict(
             _adapt_student_state_dict(ckpt["student"], _unwrap(self.student).state_dict()),
@@ -1487,8 +1565,12 @@ class StudentSmokeTrainer:
             ckpt.get("last_finite_step", _checkpoint_last_finite_step(ckpt))
         )
 
+        resume_stage = _stage_for_step(step + 1, self.total_steps, self.stage_fracs)
+        self.sync_teachers_for_stage(resume_stage)
+
         msg = (
-            f"Resumed from {path.name}  (step={step} stage={stage} "
+            f"Resumed from {path.name}  (step={step} ckpt_stage={stage} "
+            f"resume_stage={resume_stage} fracs={self.stage_fracs} "
             f"last_finite={self.last_finite_step} "
             f"n_finite={self.n_finite} n_nonfinite={self.n_nonfinite})"
         )
@@ -1518,6 +1600,7 @@ def run_training(
         stage_bounds.append(stage_bounds[-1] + int(total * f))
     stage_bounds[-1] = total
     stage3_start, stage3_end = stage_bounds[2], stage_bounds[3]
+    stage4_start, stage4_end = stage_bounds[3], stage_bounds[4]
 
     if start_step >= total:
         if _is_main():
@@ -1577,6 +1660,7 @@ def run_training(
                 trainer._set_lr(opt_step)
                 metrics = trainer.train_step(
                     batch, stage, opt_step, stage3_start, stage3_end,
+                    stage4_start, stage4_end,
                     micro_idx=micro_idx, grad_accum_steps=grad_accum,
                 )
                 if metrics is not None:
@@ -1731,7 +1815,7 @@ def main() -> None:
             else:
                 completed_step = trainer.load_checkpoint(ckpt_path)
                 start_step = completed_step + 1
-                resume_stage = _stage_for_step(completed_step, trainer.total_steps, trainer.stage_fracs)
+                resume_stage = _stage_for_step(start_step, trainer.total_steps, trainer.stage_fracs)
                 student_dm.set_stage(resume_stage)
                 if _is_ddp():
                     student_dm.set_epoch(start_step)
@@ -1859,7 +1943,7 @@ def _print_final_summary(stats: Dict, dataset_status: Dict[str, str]) -> None:
     print(f"  Datasets w/data : {ok}")
     print(f"  Checkpoints     : {stats.get('ckpt_dir', '')}")
     print(f"  Metrics         : {stats.get('log_dir', '')}")
-    print("    stage1_end.pt  stage2_end.pt  stage3_end.pt  latest.pt")
+    print("    stage1_end.pt  stage2_end.pt  stage3_end.pt  stage4_end.pt  latest.pt")
     print("=" * W)
 
 

@@ -370,6 +370,35 @@ From [`configs/data/data_config.yaml`](configs/data/data_config.yaml), the defau
 
 ---
 
+## Student Hiera pretrain (production path)
+
+The single-student pipeline distills frozen DINOv3-L and V-JEPA2-L into a shared
+Hiera encoder, then diverges via EMA self-distillation on ultrasound-native data.
+
+Entry point: `python -m tests.dataset_adapters.student_training_smoke` (via
+[`scripts/submit_student_pretrain.sh`](scripts/submit_student_pretrain.sh)).
+
+Config: [`configs/student/student_pretrain.yaml`](configs/student/student_pretrain.yaml)
+
+### Four-stage curriculum
+
+| Stage | Steps (100k) | Objective |
+|---|---|---|
+| 1 | 0–25k | DINO semantic warm-start (image-heavy) |
+| 2 | 25–45k | V-JEPA temporal warm-start (video-heavy) |
+| 3 | 45–65k | Cross-modal fusion (paired image+clip) |
+| 4 | 65–100k | EMA self-distillation divergence (no frozen teachers) |
+
+Stage 4 parks DINO/V-JEPA, ramps EMA loss weight from 0.15 → 0.8, and trains
+masked student → clean EMA teacher on freq-masked patches/tubes. Paired batches
+keep frame-clip consistency without fusion targets.
+
+Checkpoints: `stage1_end.pt` … `stage4_end.pt`, `latest.pt`
+
+Step functions: [`train/student_phase_steps.py`](train/student_phase_steps.py)
+
+---
+
 ## Downstream fine-tuning & evaluation
 
 ### Fine-tuning

@@ -8,12 +8,13 @@ Contract (identical to existing phase_steps.py)
   - Accept tensors + nn.Modules, return a dict of loss scalars + "loss" tensor
   - Caller does: loss.backward(); clip_grad; optimizer.step(); ema_update()
 
-Four stages
------------
-student_stage1_step   Image warm-start (T=1, image-heavy batches)
-student_stage2_step   Video warm-start (mixed image + video batches)
-student_stage3_step   Cross-view coupling (batch-conditional, three sample types)
-student_stage4_step   Supervised head training (frozen or lightly unfrozen backbone)
+Four stages (student pretrain)
+------------------------------
+student_stage1_step            DINO warm-start (image-heavy)
+student_stage2_step            V-JEPA warm-start (mixed image + video)
+student_stage3_step            Cross-modal fusion (paired + image + video)
+student_stage4_divergence_step EMA self-distillation divergence
+student_stage5_supervised_step Optional supervised heads (not in default pretrain)
 
 Loss weights (lam dict keys)
 -----------------------------
@@ -27,8 +28,10 @@ Loss weights (lam dict keys)
   lam_preserve  preservation_loss (Stage 3 paired)
   lam_fc        frame_clip_consistency
   lam_ema_max   peak weight for EMA self-distillation (ramps from lam_ema_floor)
+  lam_ema_max_by_stage  optional {stage: weight} overrides (e.g. {2: 1.0, 3: 1.0})
   lam_ema_floor optional early floor (default 0)
-  lam_ema_warmup_steps  steps to ramp EMA weight to lam_ema_max
+  lam_ema_warmup_steps  steps to ramp EMA weight to lam_ema_max (per-stage peak)
+  lam_ema_divergence_peak  peak EMA weight in stage 4 (default 0.8)
 """
 from __future__ import annotations
 
@@ -399,6 +402,7 @@ def _video_ssl_losses(
     global_step: int = 0,
     tubelet_size: int = 2,
     proto_queue=None,          # optional ProtoQueue for small-batch video proto loss
+    stage: int = 2,
 ) -> dict:
     """
     Shared video SSL losses for stage 2 and stage 3 video batches.
@@ -477,7 +481,7 @@ def _video_ssl_losses(
     else:
         L_proto = s_global.new_tensor(0.0)
 
-    lam_ema_eff = _lam_ema_eff(lam, global_step)
+    lam_ema_eff = _lam_ema_eff(lam, global_step, stage=stage)
     L_ema_global = img_ema_global_loss(s_out["global"], t_ema_out["global"])
     n_f4 = s_out["F4"].shape[2]
     tube_flat = (
@@ -532,15 +536,65 @@ def _student_crop_pmask(
     return pm if crop_idx == 0 else None
 
 
-def _lam_ema_eff(lam: dict, global_step: int) -> float:
-    """Ramp EMA loss weight from floor to lam_ema_max over warmup steps."""
-    peak = lam.get("lam_ema_max", 0.15)
+def _lam_ema_peak(lam: dict, stage: int) -> float:
+    """Per-curriculum-stage peak EMA weight (falls back to lam_ema_max)."""
+    by_stage = lam.get("lam_ema_max_by_stage") or {}
+    if stage in by_stage:
+        return float(by_stage[stage])
+    return float(lam.get("lam_ema_max", 0.15))
+
+
+def _lam_ema_eff(
+    lam: dict,
+    global_step: int,
+    *,
+    stage: int = 0,
+    stage4_start: int = 0,
+    stage4_end: int = 0,
+) -> float:
+    """Ramp EMA loss weight: warmup in stages 1–3; divergence ramp in stage 4."""
+    if stage == 4 and stage4_end > stage4_start:
+        return _stage4_ema_scale(lam, global_step, stage4_start, stage4_end)
+    peak = _lam_ema_peak(lam, stage) if stage > 0 else float(lam.get("lam_ema_max", 0.15))
     floor = lam.get("lam_ema_floor", 0.0)
     warmup = lam.get("lam_ema_warmup_steps", 10_000)
     if peak <= 0:
         return 0.0
     t = min(1.0, global_step / max(1, warmup))
     return floor + t * (peak - floor)
+
+
+def _stage_bounds_from_fracs(fracs: List[float], total: int) -> List[int]:
+    """Return cumulative step boundaries [0, end_s1, end_s2, …, total]."""
+    bounds = [0]
+    for f in fracs:
+        bounds.append(bounds[-1] + int(total * f))
+    bounds[-1] = total
+    return bounds
+
+
+def _cosine_ramp(step: int, start: int, end: int, v0: float, v1: float) -> float:
+    """Cosine interpolate between v0 (at start) and v1 (at end)."""
+    if end <= start:
+        return v1
+    if step <= start:
+        return v0
+    if step >= end:
+        return v1
+    t = (step - start) / (end - start)
+    return v0 + 0.5 * (1.0 - math.cos(math.pi * t)) * (v1 - v0)
+
+
+def _stage4_ema_scale(lam: dict, step: int, s4_start: int, s4_end: int) -> float:
+    """Ramp EMA weight from stage-3 peak to lam_ema_divergence_peak over stage 4."""
+    v0 = _lam_ema_peak(lam, 3)
+    v1 = lam.get("lam_ema_divergence_peak", 0.8)
+    return _cosine_ramp(step, s4_start, s4_end, v0, v1)
+
+
+def _teacher_scale_for_stage(stage: int) -> float:
+    """Frozen teachers are active in stages 1–3 only."""
+    return 0.0 if stage == 4 else 1.0
 
 
 def _ensure_image_batch(batch: dict) -> dict:
@@ -592,6 +646,7 @@ def student_stage1_step(
     lam: dict,
     global_step: int = 0,
     alp_feedback=None,           # optional HardnessFeedback → ALPScoreCache
+    stage: int = 1,
 ) -> dict:
     """
     Image-only SSL step (T=1 batches).
@@ -659,7 +714,7 @@ def student_stage1_step(
         proto_head.prototypes,
     )
 
-    lam_ema_eff = _lam_ema_eff(lam, global_step)
+    lam_ema_eff = _lam_ema_eff(lam, global_step, stage=stage)
     L_ema_global = img_ema_global_loss(s_out["global"], t_ema_global)
     L_ema_patch = img_ema_patch_loss(
         s_out["F1"][:, 0],
@@ -728,6 +783,7 @@ def student_stage2_step(
     global_step: int = 0,
     alp_feedback=None,
     proto_queue=None,     # optional ProtoQueue; pass None to skip video proto loss
+    stage: int = 2,
 ) -> dict:
     """
     Mixed image + video step.
@@ -743,12 +799,12 @@ def student_stage2_step(
     if sample_type == "image":
         return student_stage1_step(
             batch, student, ema_student, dino_teacher, proto_head, lam,
-            global_step=global_step, alp_feedback=alp_feedback,
+            global_step=global_step, alp_feedback=alp_feedback, stage=stage,
         )
 
     return _video_ssl_losses(
         batch, student, ema_student, vjepa_teacher, proto_head, lam,
-        global_step=global_step, proto_queue=proto_queue,
+        global_step=global_step, proto_queue=proto_queue, stage=stage,
     )
 
 
@@ -962,13 +1018,13 @@ def student_stage3_step(
     if sample_type == "image":
         return student_stage1_step(
             batch, student, ema_student, dino_teacher, proto_head, lam,
-            global_step=global_step, alp_feedback=alp_feedback,
+            global_step=global_step, alp_feedback=alp_feedback, stage=3,
         )
 
     if sample_type == "video":
         return _video_ssl_losses(
             batch, student, ema_student, vjepa_teacher, proto_head, lam,
-            global_step=global_step, proto_queue=proto_queue,
+            global_step=global_step, proto_queue=proto_queue, stage=3,
         )
 
     # ── Paired branch ─────────────────────────────────────────────────
@@ -978,6 +1034,7 @@ def student_stage3_step(
         return student_stage2_step(
             batch, student, ema_student, dino_teacher, vjepa_teacher, proto_head, lam,
             global_step=global_step, alp_feedback=alp_feedback, proto_queue=proto_queue,
+            stage=3,
         )
 
     B = frame.shape[0]
@@ -1021,10 +1078,421 @@ def student_stage3_step(
 
 
 # ---------------------------------------------------------------------------
-# Stage 4: Supervised head training
+# Stage 4: EMA self-distillation divergence (no frozen teachers)
 # ---------------------------------------------------------------------------
 
-def student_stage4_step(
+def _image_ema_ssl_losses(
+    batch: dict,
+    student,
+    ema_student,
+    proto_head,
+    lam: dict,
+    ema_scale: float,
+    global_step: int = 0,
+    alp_feedback=None,
+) -> dict:
+    """
+    Image-only EMA self-distillation (stage 4).
+
+    Student sees masked global crop 0; EMA teacher sees clean global crop 1.
+    No frozen DINO forward.
+    """
+    batch = _ensure_image_batch(batch)
+    s_crop = batch["global_crops"][:, 0]
+    t_crop = batch["global_crops"][:, 1]
+    pmask_s = _student_crop_pmask(batch, 0)
+    pmask_t = _student_crop_pmask(batch, 1)
+    patch_masks = batch.get("patch_masks")
+
+    x_s = s_crop.unsqueeze(1)
+    x_t = t_crop.unsqueeze(1)
+
+    need_alp = alp_feedback is not None and bool(batch.get("sample_ids"))
+
+    with torch.no_grad():
+        t_ema_out = ema_student(x_t, padding_mask=pmask_t)
+        t_ema_global = t_ema_out["global"]
+        t_ema_f1 = t_ema_out["F1"][:, 0]
+
+    s_out = student(x_s, padding_mask=pmask_s)
+    s_global = _student_global(s_out)
+    s_patches = _student_patches(s_out, t=0)
+    pmask_f1 = _student_f1_grid_pmask(s_out)
+
+    unmasked_flat, masked_flat = _dino_patch_masks(s_out, patch_masks)
+
+    L_ema_global = img_ema_global_loss(s_out["global"], t_ema_global)
+
+    L_ema_visible = (
+        img_ema_patch_loss(
+            s_out["F1"][:, 0], t_ema_f1,
+            masked_positions=unmasked_flat,
+            padding_mask=pmask_f1,
+        )
+        if unmasked_flat is not None and unmasked_flat.any()
+        else s_global.new_tensor(0.0)
+    )
+    L_ema_masked = (
+        img_ema_patch_loss(
+            s_out["F1"][:, 0], t_ema_f1,
+            masked_positions=masked_flat,
+            padding_mask=pmask_f1,
+        )
+        if masked_flat is not None and masked_flat.any()
+        else s_global.new_tensor(0.0)
+    )
+
+    L_proto = img_proto_loss(
+        s_global.unsqueeze(1),
+        t_ema_global.detach().unsqueeze(1),
+        proto_head.prototypes,
+    )
+
+    loss = ema_scale * (
+        L_ema_global
+        + lam.get("lam_patch", 1.0) * L_ema_visible
+        + lam.get("lam_masked", 1.0) * L_ema_masked
+    ) + lam.get("lam_proto", 0.5) * L_proto
+
+    if need_alp:
+        with torch.no_grad():
+            from models.losses.student_losses import _interpolate_tokens
+            tp = t_ema_f1
+            if tp.shape[1] != s_patches.shape[1]:
+                tp = _interpolate_tokens(tp, s_patches.shape[1])
+            per_patch = (1.0 - F.cosine_similarity(s_patches, tp, dim=-1)).clamp(min=0.0)
+            if masked_flat is not None and masked_flat.any():
+                patch_hardness = torch.where(
+                    masked_flat, per_patch * 1.5, per_patch * 0.25,
+                )
+            else:
+                patch_hardness = per_patch
+            saliency = tp.norm(dim=-1)
+            alp_feedback.update_from_distill(
+                batch["sample_ids"], patch_hardness, saliency, global_step,
+            )
+
+    return {
+        "loss":            loss,
+        "loss_ema":        (L_ema_global + L_ema_visible + L_ema_masked).item(),
+        "loss_ema_global": L_ema_global.item(),
+        "loss_ema_patch":  (L_ema_visible + L_ema_masked).item(),
+        "loss_proto":      L_proto.item(),
+        "ema_scale":       ema_scale,
+        "sample_type":     "image",
+    }
+
+
+def _video_ema_ssl_losses(
+    batch: dict,
+    student,
+    ema_student,
+    proto_head,
+    lam: dict,
+    ema_scale: float,
+    tubelet_size: int = 2,
+    proto_queue=None,
+) -> dict:
+    """
+    Video-only EMA self-distillation (stage 4).
+
+    Student sees masked clips; EMA teacher sees clean clips.  No V-JEPA forward.
+    """
+    full_clips = batch["full_clips"]
+    visible_clips = batch.get("visible_clips", full_clips)
+    tube_mask = _teacher_tube_mask(batch)
+    pmask_student = _pmask(batch, "padding_masks")
+    pmask_s16 = _teacher_padding_mask(batch, _teacher_video_pmask(batch, pmask_student))
+    valid_frames = batch.get("valid_frames")
+
+    B, T = full_clips.shape[:2]
+    _vid_kw = dict(padding_mask=pmask_student, with_patch_proj=False)
+
+    with torch.no_grad():
+        t_ema_out = ema_student(full_clips, **_vid_kw)
+
+    s_out = student(visible_clips, **_vid_kw)
+
+    if "tube_proj" in s_out:
+        s_frame_globals = s_out["tube_proj"].mean(dim=2)
+    else:
+        s_frame_globals = s_out["F4"].mean(dim=2)
+
+    L_ema_global = img_ema_global_loss(s_out["global"], t_ema_out["global"])
+    n_f4 = s_out["F4"].shape[2]
+    tube_flat = (
+        _tube_mask_f4_grid(tube_mask, n_f4, pmask_s16, valid_frames)
+        if tube_mask is not None else None
+    )
+    s_tube = s_out.get("tube_proj", s_out["F4"])
+    t_tube = t_ema_out.get("tube_proj", t_ema_out["F4"])
+    L_ema_patch = img_ema_patch_loss(
+        s_tube.reshape(B, T * n_f4, -1),
+        t_tube.reshape(B, T * n_f4, -1),
+        masked_positions=tube_flat,
+        padding_mask=_student_f4_grid_pmask(s_out),
+    )
+    L_ema = L_ema_global + L_ema_patch
+
+    L_temp = vid_temporal_consistency(
+        s_frame_globals, padding_mask=pmask_student, valid_frames=valid_frames,
+    )
+
+    proto_entropy = float("nan")
+    proto_max_prob = float("nan")
+    if proto_queue is not None:
+        s_tubes_flat = _student_tubes_flat(s_out, B)
+        t_tubes_flat = t_tube.reshape(B, -1, t_tube.shape[-1])
+        L_proto, teacher_logits_for_queue = vid_proto_loss(
+            s_tubes_flat,
+            t_tubes_flat.detach(),
+            proto_head.prototypes,
+            queue=proto_queue,
+        )
+        if teacher_logits_for_queue is not None:
+            proto_queue.enqueue(teacher_logits_for_queue)
+        with torch.no_grad():
+            ent, mx = prototype_assignment_stats(s_tubes_flat, proto_head.prototypes)
+            proto_entropy = float(ent.item())
+            proto_max_prob = float(mx.item())
+    else:
+        L_proto = s_out["global"].new_tensor(0.0)
+
+    loss = (
+        ema_scale * L_ema
+        + lam.get("lam_temp", 0.5) * L_temp
+        + lam.get("lam_proto", 0.5) * L_proto
+    )
+
+    return {
+        "loss":             loss,
+        "loss_ema":         L_ema.item(),
+        "loss_ema_global":  L_ema_global.item(),
+        "loss_ema_patch":   L_ema_patch.item(),
+        "loss_temporal":    L_temp.item(),
+        "loss_proto":       L_proto.item(),
+        "proto_entropy":    proto_entropy,
+        "proto_max_prob":   proto_max_prob,
+        "ema_scale":        ema_scale,
+        "sample_type":      "video",
+    }
+
+
+def _student_stage4_paired_single(
+    batch: dict,
+    student,
+    ema_student,
+    proto_head,
+    lam: dict,
+    ema_scale: float,
+) -> dict:
+    """Paired EMA divergence: no fusion, no frozen teachers."""
+    frame = batch["frame"]
+    clip = batch["full_clips"]
+    clip_student = batch.get("visible_clips", clip)
+    pmask_student = _pmask(batch, "padding_masks")
+    pmask_img_student = _pmask(batch, "frame_pmask")
+    if pmask_img_student is None:
+        pmask_img_student = pmask_student
+
+    B = frame.shape[0]
+    T = clip.shape[1]
+    anchor_t = _paired_anchor_t(batch, T // 2)
+
+    clean_frame = batch.get("clean_frame")
+    if clean_frame is None:
+        clean_frame = clip[:, anchor_t]
+
+    pmask_clean = batch.get("clean_frame_pmask")
+    if pmask_clean is None and batch.get("global_pmasks") is not None:
+        gpm = batch["global_pmasks"]
+        if gpm.dim() == 4 and gpm.shape[1] >= 2:
+            pmask_clean = gpm[:, 1]
+        elif gpm.dim() == 4:
+            pmask_clean = gpm[:, 0]
+
+    tube_mask = _teacher_tube_mask(batch)
+    pmask_s16 = _teacher_padding_mask(
+        batch, _teacher_video_pmask(batch, pmask_student),
+    )
+
+    with torch.no_grad():
+        t_ema_img = ema_student(frame.unsqueeze(1), padding_mask=pmask_img_student)
+        t_ema_vid = ema_student(
+            clip, padding_mask=pmask_student, with_patch_proj=False,
+        )
+        t_ema_frame = ema_student(
+            clean_frame.unsqueeze(1), padding_mask=pmask_clean,
+        )
+
+    if clip_student.requires_grad:
+        s_vid_out = checkpoint(
+            _paired_student_video_forward,
+            student, clip_student, pmask_student,
+            use_reentrant=False,
+        )
+    else:
+        s_vid_out = _paired_student_video_forward(
+            student, clip_student, pmask_student,
+        )
+
+    s_img_out = student(frame.unsqueeze(1), padding_mask=pmask_img_student)
+
+    L_ema_img_global = img_ema_global_loss(
+        s_img_out["global"], t_ema_img["global"],
+    )
+    L_ema_img_patch = img_ema_patch_loss(
+        s_img_out["F1"][:, 0],
+        t_ema_frame["F1"][:, 0],
+        padding_mask=_student_f1_grid_pmask(s_img_out),
+    )
+
+    L_ema_vid_global = img_ema_global_loss(
+        _student_global(s_vid_out), t_ema_vid["global"],
+    )
+
+    if tube_mask is not None:
+        n_f4 = s_vid_out["F4"].shape[2]
+        tube_flat = _tube_mask_f4_grid(
+            tube_mask, n_f4, pmask_s16, batch.get("valid_frames"),
+        )
+        s_tube = s_vid_out.get("tube_proj", s_vid_out["F4"])
+        t_tube = t_ema_vid.get("tube_proj", t_ema_vid["F4"])
+        L_ema_tube = img_ema_patch_loss(
+            s_tube.reshape(B, T * n_f4, -1),
+            t_tube.reshape(B, T * n_f4, -1),
+            masked_positions=tube_flat,
+            padding_mask=_student_f4_grid_pmask(s_vid_out),
+        )
+    else:
+        L_ema_tube = s_img_out["global"].new_tensor(0.0)
+
+    if "tube_proj" in s_vid_out:
+        s_clip_frame = s_vid_out["tube_proj"][:, anchor_t]
+    else:
+        s_clip_frame = s_vid_out["F4"][:, anchor_t]
+
+    L_fc = frame_clip_consistency(
+        _student_tubes_at_t(s_img_out, t=0),
+        s_clip_frame,
+        padding_mask=_student_f4_grid_pmask(s_img_out),
+    )
+
+    L_ema = L_ema_img_global + L_ema_img_patch + L_ema_vid_global + L_ema_tube
+    loss = (
+        ema_scale * L_ema
+        + lam.get("lam_fc", 0.5) * L_fc
+    )
+
+    return {
+        "loss":            loss,
+        "loss_ema":        L_ema.item(),
+        "loss_ema_global": (L_ema_img_global + L_ema_vid_global).item(),
+        "loss_ema_patch":  (L_ema_img_patch + L_ema_tube).item(),
+        "loss_fc":         L_fc.item(),
+        "ema_scale":       ema_scale,
+    }
+
+
+def student_stage4_divergence_step(
+    batch: dict,
+    student,
+    ema_student,
+    proto_head,
+    lam: dict,
+    global_step: int = 0,
+    stage4_start: int = 0,
+    stage4_end: int = 0,
+    alp_feedback=None,
+    proto_queue=None,
+) -> dict:
+    """
+    Stage 4: EMA-primary self-distillation (no frozen DINO/V-JEPA).
+
+    Routing by batch["sample_type"]:
+      "image"  → _image_ema_ssl_losses
+      "video"  → _video_ema_ssl_losses
+      "paired" → _student_stage4_paired_single + frame_clip_consistency
+    """
+    ema_scale = _lam_ema_eff(
+        lam, global_step,
+        stage=4, stage4_start=stage4_start, stage4_end=stage4_end,
+    )
+    sample_type = batch.get("sample_type", "image")
+
+    if sample_type == "image":
+        out = _image_ema_ssl_losses(
+            batch, student, ema_student, proto_head, lam, ema_scale,
+            global_step=global_step, alp_feedback=alp_feedback,
+        )
+        out["lam_ema_eff"] = ema_scale
+        return out
+
+    if sample_type == "video":
+        out = _video_ema_ssl_losses(
+            batch, student, ema_student, proto_head, lam, ema_scale,
+            proto_queue=proto_queue,
+        )
+        out["lam_ema_eff"] = ema_scale
+        return out
+
+    frame = batch.get("frame")
+    clip = batch.get("full_clips")
+    if frame is None or clip is None:
+        if batch.get("sample_type") == "video":
+            out = _video_ema_ssl_losses(
+                batch, student, ema_student, proto_head, lam, ema_scale,
+                proto_queue=proto_queue,
+            )
+        else:
+            out = _image_ema_ssl_losses(
+                batch, student, ema_student, proto_head, lam, ema_scale,
+                global_step=global_step, alp_feedback=alp_feedback,
+            )
+        out["lam_ema_eff"] = ema_scale
+        return out
+
+    B = frame.shape[0]
+    if B <= 1:
+        metrics = _student_stage4_paired_single(
+            batch, student, ema_student, proto_head, lam, ema_scale,
+        )
+    else:
+        loss_sum = None
+        metric_lists: dict[str, list[float]] = {}
+        for i in range(B):
+            sub = _slice_batch_dim0(batch, i)
+            out_i = _student_stage4_paired_single(
+                sub, student, ema_student, proto_head, lam, ema_scale,
+            )
+            li = out_i["loss"]
+            loss_sum = li if loss_sum is None else loss_sum + li
+            for key, val in out_i.items():
+                if key == "loss":
+                    metric_lists.setdefault(key, []).append(float(val.item()))
+                elif key.startswith("loss_") or key == "ema_scale":
+                    metric_lists.setdefault(key, []).append(float(val))
+        loss = loss_sum / B
+        metrics = {key: sum(vals) / len(vals) for key, vals in metric_lists.items()}
+        metrics["loss"] = loss
+
+    return {
+        "loss":              metrics["loss"],
+        "loss_ema":          metrics.get("loss_ema", float("nan")),
+        "loss_ema_global":   metrics.get("loss_ema_global", float("nan")),
+        "loss_ema_patch":    metrics.get("loss_ema_patch", float("nan")),
+        "loss_fc":           metrics.get("loss_fc", float("nan")),
+        "sample_type":       "paired",
+        "lam_ema_eff":       ema_scale,
+        "ema_scale":         ema_scale,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: Supervised head training (optional; not in default pretrain)
+# ---------------------------------------------------------------------------
+
+def student_stage5_supervised_step(
     batch: dict,
     student,                   # HieraStudentBackbone (frozen or light unfreeze)
     seg_head,                  # UPerNetDecoder or None
@@ -1116,6 +1584,10 @@ def student_stage4_step(
 
     out["loss"] = loss
     return out
+
+
+# Backward-compatible alias (legacy name before stage-4 EMA divergence)
+student_stage4_step = student_stage5_supervised_step
 
 
 def _align_seg_masks_to_pred(seg_masks: Tensor, pred_seg: Tensor) -> Tensor:
