@@ -56,9 +56,16 @@ experiment_smoke_overrides:
     cv_fold: 0
 
 backbones:
-  - key: student_stage1
+  # student_img: image-only pretrained model (stage 1 — DINOv3 distillation)
+  - key: student_img
     type: student
-    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_22500.pt
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_25000.pt
+    use_ema: true
+
+  # student_vid: image+video pretrained model (stage 2 — V-JEPA2 distillation)
+  - key: student_vid
+    type: student
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_29000.pt
     use_ema: true
 
   - key: resnet50

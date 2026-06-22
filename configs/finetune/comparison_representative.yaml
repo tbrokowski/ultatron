@@ -122,25 +122,17 @@ camus_variants:
     monitor_mode: max
 
 backbones:
-  # ── Student pipeline checkpoints (StudentPretrainPilot) ──────────────────────
-  - key: student_stage1
+  # ── Student pipeline checkpoints ────────────────────────────────────────────
+  # student_img: image-only pretrained model (stage 1 — DINOv3 distillation)
+  - key: student_img
     type: student
-    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_10000.pt
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_25000.pt
     use_ema: true
 
-  - key: student_stage2
+  # student_vid: image+video pretrained model (stage 2 — V-JEPA2 distillation)
+  - key: student_vid
     type: student
-    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrainPilot/stage2_end.pt
-    use_ema: true
-
-  - key: student_stage3
-    type: student
-    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrainPilot/stage3_end.pt
-    use_ema: true
-
-  - key: student_latest
-    type: student
-    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrainPilot/latest.pt
+    checkpoint: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_29000.pt
     use_ema: true
 
   # ── General image / video baselines ─────────────────────────────────────────
