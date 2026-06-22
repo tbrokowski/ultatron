@@ -40,7 +40,7 @@ _info "Results root: results/finetune/"
 # ── Representative sweep (comparison_representative.yaml) ─────────────────────
 # busi, busi_multitask, camus, echonet, lus, lus_video
 _info "Submitting representative sweep (6 experiments, 4 GPUs)..."
-"${FINETUNE_PYTHON:-python3.11}" scripts/finetune/run_all.py $( _common_args ) --gpus 4
+"${FINETUNE_PYTHON:-python3}" scripts/finetune/run_all.py $( _common_args ) --gpus 4
 
 # ── OpenUS segmentation (openus_segmentation.yaml) ───────────────────────────
 # busbra + tn3k in parallel (2 GPUs)
@@ -53,4 +53,4 @@ bash scripts/finetune/submit_fetal_planes_db.sh $( _common_args )
 
 _info "All finetune jobs submitted."
 _info "Monitor: ls logs/finetune/ultatron_ft_*.err"
-_info "Report:  python3.11 scripts/finetune/report.py --from-logs --all-sweeps"
+_info "Report:  python3 scripts/finetune/report.py --from-logs --all-sweeps"

@@ -15,15 +15,15 @@ DEFAULT_BACKBONES=(student_stage1 resnet50 vit_b_16 dinov3_l biomedclip usfm ech
 _die() { echo "[ERROR] $*" >&2; exit 1; }
 _info() { echo "[INFO]  $*"; }
 
-# Login-node python3 is 3.6; finetune needs >=3.10. Prefer 3.12 (compute EDF) then 3.11.
+# Finetune needs Python >=3.10. Try python3 first (container default), then versioned fallbacks.
 _FINETUNE_PYTHON=""
-for _py in python3.12 python3.11 python3; do
+for _py in python3 python3.12 python3.11; do
   if command -v "${_py}" >/dev/null 2>&1 && "${_py}" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
     _FINETUNE_PYTHON="${_py}"
     break
   fi
 done
-[[ -n "${_FINETUNE_PYTHON}" ]] || _die "Need Python >=3.10 (tried python3.12, python3.11, python3)"
+[[ -n "${_FINETUNE_PYTHON}" ]] || _die "Need Python >=3.10 (tried python3, python3.12, python3.11)"
 
 _resolve_output_dir() {
   "${_FINETUNE_PYTHON}" -c "
