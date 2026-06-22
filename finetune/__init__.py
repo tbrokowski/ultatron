@@ -35,11 +35,15 @@ from __future__ import annotations
 _LAZY_EXPORTS = {
     "FinetuneExperiment": (".base", "FinetuneExperiment"),
     "FinetuneConfig":     (".base", "FinetuneConfig"),
-    "CAMUSFinetune":   (".experiments.camus",   "CAMUSFinetune"),
-    "BUSIFinetune":    (".experiments.busi",    "BUSIFinetune"),
-    "EchoNetFinetune": (".experiments.echonet", "EchoNetFinetune"),
-    "TN3KFinetune":    (".experiments.tn3k",    "TN3KFinetune"),
-    "BUSBRAFinetune":  (".experiments.busbra",  "BUSBRAFinetune"),
+    "CAMUSFinetune":           (".experiments.camus",           "CAMUSFinetune"),
+    "BUSIFinetune":            (".experiments.busi",            "BUSIFinetune"),
+    "BUSIMultitaskFinetune":   (".experiments.busi",            "BUSIMultitaskFinetune"),
+    "EchoNetFinetune":         (".experiments.echonet",         "EchoNetFinetune"),
+    "TN3KFinetune":            (".experiments.tn3k",            "TN3KFinetune"),
+    "BUSBRAFinetune":          (".experiments.busbra",          "BUSBRAFinetune"),
+    "FetalPlanesDBFinetune":   (".experiments.fetal_planes_db", "FetalPlanesDBFinetune"),
+    "LUSPatientFinetune":      (".experiments.lus_patient",     "LUSPatientFinetune"),
+    "LUSVideoFinetune":        (".experiments.lus_video",       "LUSVideoFinetune"),
 }
 
 __all__ = [
@@ -52,11 +56,15 @@ __all__ = [
 def __getattr__(name: str):
     if name == "EXPERIMENT_REGISTRY":
         return {
-            "camus":   __getattr__("CAMUSFinetune"),
-            "busi":    __getattr__("BUSIFinetune"),
-            "echonet": __getattr__("EchoNetFinetune"),
-            "tn3k":    __getattr__("TN3KFinetune"),
-            "busbra":  __getattr__("BUSBRAFinetune"),
+            "camus":           __getattr__("CAMUSFinetune"),
+            "busi":            __getattr__("BUSIFinetune"),
+            "busi_multitask":  __getattr__("BUSIMultitaskFinetune"),
+            "echonet":         __getattr__("EchoNetFinetune"),
+            "tn3k":            __getattr__("TN3KFinetune"),
+            "busbra":          __getattr__("BUSBRAFinetune"),
+            "fetal_planes_db": __getattr__("FetalPlanesDBFinetune"),
+            "lus":             __getattr__("LUSPatientFinetune"),
+            "lus_video":       __getattr__("LUSVideoFinetune"),
         }
     if name not in _LAZY_EXPORTS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
