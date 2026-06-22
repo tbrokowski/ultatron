@@ -16,9 +16,15 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+# scripts/finetune.py (file) shadows scripts/finetune/ (directory) so
+# `from scripts.finetune.common import ...` fails.  Add this directory
+# to sys.path and import common directly instead.
+_FINETUNE_SCRIPTS = Path(__file__).resolve().parent
+_REPO_ROOT = _FINETUNE_SCRIPTS.parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_FINETUNE_SCRIPTS))
 
-from scripts.finetune.common import add_common_args, launch_all
+from common import add_common_args, launch_all
 
 
 def main() -> None:
