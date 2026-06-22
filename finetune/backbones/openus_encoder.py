@@ -177,9 +177,8 @@ class OpenUSEncoder(BackboneEncoder):
         """
         Build a VMamba-Small model from the vendor/openus repo.
 
-        Imports VSSM from vendor/openus/vmamba_models/vmamba.py (the repo's
-        actual location). vendor/openus/ must already be on sys.path (done
-        in _load_model before this is called).
+        Imports VSSM from vendor/openus/vmamba.py. vendor/openus/ is
+        added to sys.path by _load_model before this is called.
 
         Returns
         -------
@@ -187,10 +186,10 @@ class OpenUSEncoder(BackboneEncoder):
             VMamba-Small with depths=[2,2,9,2], dims=[96,192,384,768].
         """
         try:
-            from vmamba_models.vmamba import VSSM  # type: ignore[import]
+            from vmamba import VSSM  # type: ignore[import]
         except ImportError as exc:
             raise ImportError(
-                "Could not import VSSM from vendor/openus/vmamba_models/vmamba.py.\n"
+                "Could not import VSSM from vendor/openus/vmamba.py.\n"
                 f"Ensure the OpenUS repo is cloned at {_VENDOR_PATH} and that\n"
                 "mamba_ssm is installed (requires CUDA).\n"
                 f"Original error: {exc}"
@@ -202,7 +201,7 @@ class OpenUSEncoder(BackboneEncoder):
             ssm_d_state=16, ssm_ratio=2.0, ssm_dt_rank="auto",
             mlp_ratio=4.0, patch_norm=True, use_checkpoint=False,
         )
-        log.info("[openus] VMamba-Small built via vmamba_models.vmamba.VSSM")
+        log.info("[openus] VMamba-Small built via vmamba.VSSM")
         return model
 
     @property
