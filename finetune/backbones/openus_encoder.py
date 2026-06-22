@@ -196,10 +196,14 @@ class OpenUSEncoder(BackboneEncoder):
                 f"Original error: {exc}"
             ) from exc
 
+        # SSM params matched to the OpenUS checkpoint tensor shapes:
+        #   A_logs: [768, 1]           → d_state=1
+        #   in_proj.weight: [192, 96]  → expand=1 (ssm_ratio=1.0)
+        #   x_proj_weight: [4, 8, 192] → dt_rank=8
         model = VSSM(
             patch_size=4, in_chans=3,
             depths=[2, 2, 9, 2], dims=[96, 192, 384, 768],
-            ssm_d_state=16, ssm_ratio=2.0, ssm_dt_rank="auto",
+            ssm_d_state=1, ssm_ratio=1.0, ssm_dt_rank=8,
             mlp_ratio=4.0, patch_norm=True, use_checkpoint=False,
         )
         log.info("[openus] VMamba-Small built via vmamba_models.vmamba.VSSM")
