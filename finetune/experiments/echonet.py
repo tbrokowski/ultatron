@@ -4,7 +4,7 @@ finetune/experiments/echonet.py  ·  EchoNet-Dynamic EF regression finetune
 
 Task:    Predict ejection fraction (%) from apical 4-chamber cine clips.
 Dataset: EchoNet-Dynamic — 10,030 labelled echocardiogram videos.
-Branch:  Video — full cine loops (32 frames × 112×112).
+Branch:  Video — full cine loops (configurable frames × 112×112).
 
 This is a **video** task: EF depends on motion across the cardiac cycle.
 Encoder handling differs by backbone type:
@@ -30,7 +30,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from finetune.base import FinetuneExperiment, FinetuneConfig
 from finetune.video_regression import (
@@ -168,8 +168,20 @@ class EchoNetFinetune(FinetuneExperiment):
 
     def build_dataloader(self, split: str) -> DataLoader:
         split_map = {"train": "TRAIN", "val": "VAL", "test": "TEST"}
+        dataset = EchoNetFinetuneDataset(
+            str(self.data_root),
+            split_map.get(split, split),
+            n_frames=self.cfg.n_frames,
+        )
+        if split == "train":
+            generator = torch.Generator().manual_seed(42)
+            subset_size = len(dataset) // 2
+            indices = torch.randperm(len(dataset), generator=generator)[:subset_size]
+            dataset = Subset(dataset, indices.tolist())
+            log.info(f"EchoNet TRAIN subsample: {len(dataset)} samples (50%, seed=42)")
+
         return DataLoader(
-            EchoNetFinetuneDataset(str(self.data_root), split_map.get(split, split)),
+            dataset,
             batch_size=self.cfg.batch_size, shuffle=(split == "train"),
             num_workers=self.cfg.num_workers, pin_memory=True,
         )

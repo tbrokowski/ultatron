@@ -82,6 +82,7 @@ class FinetuneConfig:
     max_epochs:   int   = 50
     batch_size:   int   = 16
     num_workers:  int   = 4
+    n_frames:     int   = 8
 
     # Early stopping
     patience:     int   = 10

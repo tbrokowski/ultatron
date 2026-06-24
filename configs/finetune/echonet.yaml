@@ -18,9 +18,10 @@ finetune:
   # ── Optimiser ───────────────────────────────────────────────────────────────
   lr:           1.0e-4
   weight_decay: 0.01
-  max_epochs:   50
+  max_epochs:   10
   batch_size:   16
   num_workers:  4
+  n_frames:     16
 
   # ── Head architecture ────────────────────────────────────────────────────────
   # "linear" = LinearSegHead (1 linear layer on patch tokens)
@@ -31,7 +32,7 @@ finetune:
   # Note: uses video branch (vid_branch), not image branch.
 
   # ── Early stopping ───────────────────────────────────────────────────────────
-  patience:      50
+  patience:      10
   monitor:       val_mae      # metric key in compute_val_metrics() output
   monitor_mode:  min          # "max" for dice/auc, "min" for loss/mae
 
