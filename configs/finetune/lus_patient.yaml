@@ -34,10 +34,10 @@ finetune:
 
   freeze_backbone: true
 
-  n_frames: 8
+  n_frames: 4
   img_size: 224
   clip_encode_bs: 16
-  max_clips_per_patient: 12   # train only; val/test use all clips
+  max_clips_per_patient: 6   # train only; val/test use all clips
 
   log_every: 5
   checkpoint_best: true

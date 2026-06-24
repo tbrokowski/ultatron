@@ -39,7 +39,7 @@ finetune:
   freeze_backbone: true
 
   # ── Video ──────────────────────────────────────────────────────────────────
-  n_frames:   8     # frames sampled per clip (videos) / tiled per image
+  n_frames:   4     # frames sampled per clip (videos) / tiled per image
   img_size:   224   # spatial resize for all frames
   encode_bs:  16    # sub-batch size for video clip encoding
 
