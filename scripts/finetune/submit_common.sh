@@ -172,7 +172,7 @@ EOF
     --ntasks-per-node=1
     "--gpus-per-node=${gpus}"
     "--cpus-per-task=${cpus}"
-    --time=23:00:00
+    --time=12:00:00
     "--partition=${PARTITION}"
     "--account=${ACCOUNT}"
     "--output=${LOG_ROOT}/${job_name}_%j.out"
