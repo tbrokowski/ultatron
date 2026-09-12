@@ -138,12 +138,109 @@ class USManifestEntry:
 
     @classmethod
     def from_dict(cls, d: dict) -> "USManifestEntry":
-        instances = [Instance(**i) for i in d.pop("instances", [])]
-        return cls(**d, instances=instances)
+        payload = dict(d)
+        raw_instances = payload.pop("instances", []) or []
+        inst_fields = set(Instance.__dataclass_fields__)
+        instances = []
+        for inst in raw_instances:
+            if not isinstance(inst, dict):
+                continue
+            instances.append(Instance(**{k: v for k, v in inst.items() if k in inst_fields}))
+        known = set(cls.__dataclass_fields__)
+        filtered = {k: v for k, v in payload.items() if k in known}
+        return cls(**filtered, instances=instances)
 
     @staticmethod
     def make_sample_id(dataset_id: str, path: str) -> str:
         return hashlib.md5(f"{dataset_id}::{path}".encode()).hexdigest()[:16]
+
+
+def coerce_entry_dict(rec: dict, ssl_stream: Optional[str] = None) -> dict:
+    """Map a POCUS / HF / adapter row onto a ``USManifestEntry.to_dict()`` payload.
+
+    Extra keys (caption, clip_plan, body_system, …) land in ``source_meta`` so
+    ``from_dict`` stays strict about the dataclass fields.
+    """
+    rec = dict(rec)
+    meta = dict(rec.get("source_meta") or {})
+    known = set(USManifestEntry.__dataclass_fields__)
+
+    def _first(*names: str):
+        for n in names:
+            v = rec.get(n)
+            if v not in (None, "", [], {}):
+                return v
+            v = meta.get(n)
+            if v not in (None, "", [], {}):
+                return v
+        return None
+
+    paths = rec.get("image_paths")
+    if not paths:
+        raw = _first("image", "video_path", "path")
+        if isinstance(raw, str):
+            paths = [raw]
+        elif isinstance(raw, list):
+            paths = raw
+        else:
+            paths = []
+    rec["image_paths"] = [str(p) for p in paths]
+
+    if not rec.get("num_frames"):
+        nf = _first("n_frames", "num_frames")
+        if nf:
+            rec["num_frames"] = int(nf)
+    if not rec.get("dataset_id"):
+        rec["dataset_id"] = str(_first("dataset_id", "dataset") or "unknown")
+    if not rec.get("sample_id"):
+        stem = Path(rec["image_paths"][0]).stem if rec["image_paths"] else "unknown"
+        rec["sample_id"] = str(_first("sample_id", "study_id") or stem)
+    caption = _first("caption", "report_text")
+    if caption:
+        meta.setdefault("caption", caption)
+        meta.setdefault("report_text", caption)
+    for k in ("body_system", "organ", "attributes", "diagnosis", "findings",
+              "view", "probe", "clip_plan", "labels", "H", "W", "bytes"):
+        v = rec.get(k)
+        if v not in (None, "", [], {}) and k not in meta:
+            meta[k] = v
+    extras = {k: v for k, v in rec.items() if k not in known and k not in ("instances",)}
+    for k, v in extras.items():
+        meta.setdefault(k, v)
+    rec["source_meta"] = meta
+    if ssl_stream:
+        rec["ssl_stream"] = ssl_stream
+    rec.setdefault("ssl_stream", "image")
+    rec.setdefault("split", rec.get("split") or "train")
+    return USManifestEntry.from_dict(rec).to_dict()
+
+
+def concat_manifests(
+    dest: Path,
+    parts: List[tuple],
+) -> dict:
+    """Write ``dest`` as JSONL. ``parts`` is ``[(path, ssl_stream_or_None), ...]``."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    per_stream: Dict[str, int] = {}
+    with dest.open("w", encoding="utf-8") as out:
+        for path, stream in parts:
+            p = Path(path)
+            if not p.exists():
+                continue
+            with p.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = coerce_entry_dict(json.loads(line), ssl_stream=stream)
+                    if stream == "video" and rec.get("ssl_stream") == "image":
+                        rec["ssl_stream"] = "video"
+                    out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    n += 1
+                    per_stream[rec["ssl_stream"]] = per_stream.get(rec["ssl_stream"], 0) + 1
+    return {"path": str(dest), "n": n, "by_ssl_stream": per_stream}
 
 
 def assign_curriculum_tier(e: USManifestEntry) -> int:

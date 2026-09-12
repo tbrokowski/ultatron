@@ -44,7 +44,7 @@ RESUME_ARGS=""
 AFTER_JOB=""
 NODES=32
 GPUS_PER_NODE=4
-CPUS=32
+CPUS="${POCUS_CPUS_PER_TASK:-288}"
 # GH200 nodes expose ~480 GB unified memory; stage-3 resume peaked ~589 GB (job 2544897).
 NODE_MEM="475G"
 # Slurm partition `normal` MaxTime=12:00:00 — use --resume to chain longer runs.
@@ -60,7 +60,7 @@ while [[ $# -gt 0 ]]; do
         --after-job) AFTER_JOB="$2"; shift 2 ;;
         --nodes)     NODES="$2"; shift 2 ;;
         --gpus)      GPUS_PER_NODE="$2"; shift 2 ;;
-        --single)    NODES=1; GPUS_PER_NODE=4; CPUS=32; shift ;;
+        --single)    NODES=1; GPUS_PER_NODE=4; CPUS="${POCUS_CPUS_PER_TASK:-288}"; shift ;;
         -h|--help)
             sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
@@ -81,7 +81,7 @@ if [[ "${RESUME}" -eq 1 ]]; then
         cat <<'STAGE34_EOF'
 export US_STUDENT_RESUME=1
 export US_STUDENT_LOADER_WARMUP=0
-export US_STUDENT_NUM_WORKERS=2
+export US_STUDENT_NUM_WORKERS=${US_STUDENT_NUM_WORKERS:-8}
 STAGE34_EOF
     )
 fi
@@ -111,11 +111,14 @@ export US_STUDENT_MODE=pretrain
 RESUME_ARGS="${RESUME_ARGS}"
 ${STAGE34_RESUME_ENV}
 
-export LD_LIBRARY_PATH=\$(echo "\${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v 'aws-ofi-nccl' | paste -sd ':' -)
-export NCCL_NET=Socket
+# Slingshot: keep the aws-ofi-nccl plugin injected by the EDF hook.
+# Do NOT set NCCL_NET=Socket and do NOT strip aws-ofi-nccl from LD_LIBRARY_PATH.
+unset NCCL_NET || true
+export NCCL_NET="AWS Libfabric"
 export NCCL_P2P_LEVEL=NVL
 export NCCL_SHM_DISABLE=0
-export NCCL_DEBUG=WARN
+export NCCL_DEBUG=INIT
+export FI_CXI_ATS=0
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
 export OMP_NUM_THREADS=8
 
@@ -131,7 +134,7 @@ echo " Config : ${CONFIG}"
 echo " Resume : $([ "${RESUME}" -eq 1 ] && echo yes || echo no)"
 echo " Mem    : ${NODE_MEM}/node"
 if [[ -n "${STAGE34_RESUME_ENV}" ]]; then
-echo " Resume : loader_warmup=0 num_workers=2 US_STUDENT_RESUME=1"
+echo " Resume : loader_warmup=0 num_workers=${US_STUDENT_NUM_WORKERS:-8} US_STUDENT_RESUME=1"
 fi
 echo " Start  : \$(date)"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null \
@@ -139,7 +142,7 @@ nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>
 echo "================================================================"
 echo ""
 
-bash "${REPO_DIR}/scripts/ensure_deps.sh"
+# Dependencies (pydicom, SimpleITK) are baked into the image — no ensure_deps.sh.
 source "${REPO_DIR}/scripts/setup_hf_cache.sh"
 
 python3 -m torch.distributed.run \\
@@ -148,7 +151,7 @@ python3 -m torch.distributed.run \\
     --rdzv_backend=c10d \\
     --rdzv_endpoint="\${MASTER_ADDR}:\${MASTER_PORT}" \\
     --rdzv_id=\${SLURM_JOB_ID} \\
-    -m tests.dataset_adapters.student_training_smoke \${RESUME_ARGS}
+    -m train.student_pretrain \${RESUME_ARGS}
 
 echo ""
 echo "================================================================"
