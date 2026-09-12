@@ -44,6 +44,7 @@ from scripts.pocus.sampling import (
     summarise_clip_fallbacks,
     write_jsonl,
 )
+from data.schema.manifest import coerce_entry_dict
 
 
 def _adapter_entries(dataset_id: str, root: Path, split: Optional[str] = None):
@@ -57,6 +58,17 @@ def _adapter_entries(dataset_id: str, root: Path, split: Optional[str] = None):
 
 
 def _us365k_rows(root: Path, split: str) -> List[dict]:
+    """Prefer the adapter (USManifestEntry rows); fall back to HF jsonl."""
+    try:
+        rows = []
+        for rec in _adapter_entries("US-365K", root):
+            if rec.get("split") != split:
+                continue
+            rows.append(coerce_entry_dict(rec, ssl_stream="image"))
+        if rows:
+            return rows
+    except FileNotFoundError as exc:
+        print(f"[WARN] US-365K adapter: {exc}", file=sys.stderr)
     jsonl = root / "metadata" / f"{split}.jsonl"
     if jsonl.exists():
         rows = []
@@ -64,12 +76,9 @@ def _us365k_rows(root: Path, split: str) -> List[dict]:
             rec.setdefault("split", split)
             rec.setdefault("dataset_id", "US-365K")
             rec.setdefault("dataset", "US-365K")
-            if "sample_id" not in rec:
-                img = rec.get("image") or rec.get("image_fname") or ""
-                rec["sample_id"] = Path(str(img)).stem
-            rows.append(rec)
+            rows.append(coerce_entry_dict(rec, ssl_stream="image"))
         return rows
-    return list(_adapter_entries("US-365K", root, split=split))
+    return []
 
 
 def _video_rows(dataset_id: str, root: Path) -> List[dict]:
@@ -82,6 +91,11 @@ def _video_rows(dataset_id: str, root: Path) -> List[dict]:
             rec.setdefault("dataset", dataset_id)
             rec.setdefault("n_frames", rec.get("num_frames", 0))
             rec["clip_plan"] = clip_plan(int(rec.get("n_frames") or rec.get("num_frames") or 0))
+            rec = coerce_entry_dict(rec, ssl_stream="video")
+            rec["source_meta"] = dict(rec.get("source_meta") or {})
+            rec["source_meta"]["clip_plan"] = rec["source_meta"].get("clip_plan") or clip_plan(
+                int(rec.get("num_frames") or 0)
+            )
             rows.append(rec)
     except FileNotFoundError as exc:
         print(f"[WARN] {dataset_id}: {exc}", file=sys.stderr)
@@ -109,13 +123,18 @@ def build(args: argparse.Namespace) -> dict:
     rl_heldout = stratified_sample(val, args.n_heldout, seed=args.seed + 2)
 
     videos = []
+    videos_by_ds: dict = {}
     for ds in ("CardiacUDC", "COVID-BLUES", "IUGC2024"):
         root = Path(getattr(args, ds.lower().replace("-", "_"), DATASET_DEFAULTS[ds]))
         part = _video_rows(ds, root)
         print(f"[info] {ds}: {len(part)} train/unsplit clips from {root}")
         videos.extend(part)
+        videos_by_ds[ds] = part
     enc_videos = equal_per_dataset(videos, seed=args.seed)
-    clip_fb = summarise_clip_fallbacks([v.get("clip_plan") or clip_plan(0) for v in enc_videos])
+    clip_fb = summarise_clip_fallbacks(
+        [(v.get("source_meta") or {}).get("clip_plan") or clip_plan(int(v.get("num_frames") or 0))
+         for v in enc_videos]
+    )
 
     rl_video = []
     if args.n_video > 0 and videos:
@@ -142,6 +161,11 @@ def build(args: argparse.Namespace) -> dict:
         "rl_heldout": write_jsonl(paths["rl_heldout"], rl_heldout),
         "rl_video_prompts": write_jsonl(paths["rl_video_prompts"], rl_video),
     }
+    for ds, part in videos_by_ds.items():
+        p = out_dir / f"enc_videos_{ds}.jsonl"
+        n = write_jsonl(p, part)
+        counts[f"enc_videos_{ds}"] = n
+        paths[f"enc_videos_{ds}"] = p
 
     mix = {
         "enc_images": _mix_report(enc_images, "enc_images"),

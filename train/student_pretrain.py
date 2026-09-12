@@ -74,7 +74,7 @@ from data.pipeline.student_datamodule import (
     _ddp_broadcast_sample_type,
 )
 from data.pipeline.transforms import build_transform_configs
-from data.schema.manifest import ManifestWriter, USManifestEntry, load_manifest
+from data.schema.manifest import ManifestWriter, USManifestEntry, concat_manifests, load_manifest
 from models.branches.shared import PrototypeHead, ema_update
 from models.losses.proto_loss import ProtoQueue
 from models.heads.hierarchical_seg import build_hierarchical_seg_head
@@ -2007,7 +2007,14 @@ def _run_loader_only(
                 f.write(json.dumps({
                     "step": i, "stage": stage, "type": forced or "mixed",
                     "t_step": t, "t_data_wait": t, "loader_only": True,
+                    "n_images": n_img // n if n else 0,
+                    "n_clips": n_clip // n if n else 0,
+                    "tag": os.environ.get("POCUS_LOADER_TAG", "loader_only"),
                 }) + "\n")
+        tag = os.environ.get("POCUS_LOADER_TAG", "loader_only")
+        Path(jsonl).with_name(f"{tag}.json").write_text(
+            json.dumps(out, indent=2, default=str) + "\n", encoding="utf-8"
+        )
     return out
 
 
@@ -2054,7 +2061,13 @@ def _run_ckpt_probe(trainer: StudentSmokeTrainer, args: argparse.Namespace) -> d
             Path(jsonl).parent.mkdir(parents=True, exist_ok=True)
             with open(jsonl, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"step": 0, "type": "ckpt_probe", **results[-1]}) + "\n")
-    return {"mode": "ckpt_probe", "results": results}
+    out = {"mode": "ckpt_probe", "results": results}
+    jsonl = os.environ.get("US_STUDENT_STEPS_JSONL")
+    if _is_main() and jsonl:
+        Path(jsonl).with_name("ckpt_probe.json").write_text(
+            json.dumps(out, indent=2, default=str) + "\n", encoding="utf-8"
+        )
+    return out
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -2098,6 +2111,32 @@ def main() -> None:
                 manifest_path = _ROOT / manifest_path
             if not manifest_path.exists():
                 raise FileNotFoundError(f"Pretrain manifest not found: {manifest_path}")
+            video_man = args.video_manifest or (cfg.get("manifest") or {}).get("video_path")
+            if video_man:
+                video_path = Path(video_man)
+                if not video_path.is_absolute():
+                    video_path = _ROOT / video_path
+                if not video_path.exists():
+                    raise FileNotFoundError(f"Video manifest not found: {video_path}")
+                log_dir = Path(
+                    os.environ.get("US_STUDENT_LOG_DIR")
+                    or os.environ.get("US_STUDENT_STEPS_JSONL", "./steps.jsonl")
+                )
+                if log_dir.suffix:
+                    log_dir = log_dir.parent
+                dest = log_dir / "combined_manifest.jsonl"
+                if _is_main():
+                    stats = concat_manifests(
+                        dest,
+                        [(manifest_path, "image"), (video_path, "video")],
+                    )
+                    _announce(
+                        f"Merged image+video manifests → {dest} "
+                        f"({stats['n']} rows, {stats['by_ssl_stream']})"
+                    )
+                    log.info("Merged manifests: %s", stats)
+                _barrier()
+                manifest_path = dest
             if _is_main():
                 _announce(f"Pretrain mode — manifest: {manifest_path}")
         else:

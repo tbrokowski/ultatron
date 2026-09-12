@@ -36,6 +36,7 @@ def test_parse_bench_flags(monkeypatch):
             "--gbs-img", "2048",
             "--gbs-vid", "32",
             "--num-workers", "8",
+            "--video-manifest", "/tmp/enc_videos.jsonl",
         ],
     )
     args = _parse_args()
@@ -44,6 +45,7 @@ def test_parse_bench_flags(monkeypatch):
     assert args.no_ckpt
     assert args.per_step_timing
     assert args.bench_window
+    assert args.video_manifest == "/tmp/enc_videos.jsonl"
     cfg = {"training": {}, "loaders": {}, "student_data": {}, "pretrain": {}}
     apply_bench_overrides(cfg, args)
     assert cfg["training"]["total_steps"] == 80
@@ -51,3 +53,4 @@ def test_parse_bench_flags(monkeypatch):
     assert cfg["training"]["ckpt_every"] == 0
     assert cfg["training"]["global_batch_image"] == 2048
     assert cfg["loaders"]["num_workers"] == 8
+    assert cfg["manifest"]["video_path"] == "/tmp/enc_videos.jsonl"

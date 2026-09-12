@@ -94,3 +94,38 @@ def test_build_manifests_from_us365k_layout(tmp_path: Path):
     assert summary["counts"]["enc_images"] == 1
     assert (ns.out / "enc_images.jsonl").exists()
     assert summary["attribute_report"]["captions_only"] is True
+    img = json.loads((ns.out / "enc_images.jsonl").read_text().splitlines()[0])
+    assert img["ssl_stream"] == "image"
+    assert img.get("image_paths")
+
+
+def test_coerce_and_concat_manifests(tmp_path: Path):
+    from data.schema.manifest import coerce_entry_dict, concat_manifests, load_manifest
+
+    hf = coerce_entry_dict({
+        "image": str(tmp_path / "a.jpg"),
+        "caption": "kidney ultrasound",
+        "dataset": "US-365K",
+        "split": "train",
+        "clip_plan": {"stride": 2},
+    }, ssl_stream="image")
+    assert hf["sample_id"]
+    assert hf["image_paths"] == [str(tmp_path / "a.jpg")]
+    assert hf["ssl_stream"] == "image"
+    assert hf["source_meta"]["caption"] == "kidney ultrasound"
+
+    img = tmp_path / "enc_images.jsonl"
+    vid = tmp_path / "enc_videos.jsonl"
+    img.write_text(json.dumps({"image": "/x.jpg", "caption": "c", "dataset": "US-365K"}) + "\n")
+    vid.write_text(json.dumps({
+        "video_path": "/y.mp4", "dataset": "COVID-BLUES", "num_frames": 80, "ssl_stream": "video",
+    }) + "\n")
+    dest = tmp_path / "combined.jsonl"
+    stats = concat_manifests(dest, [(img, "image"), (vid, "video")])
+    assert stats["n"] == 2
+    assert stats["by_ssl_stream"]["image"] == 1
+    assert stats["by_ssl_stream"]["video"] == 1
+    entries = load_manifest(dest)
+    assert len(entries) == 2
+    streams = {e.ssl_stream for e in entries}
+    assert streams == {"image", "video"}

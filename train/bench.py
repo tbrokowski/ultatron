@@ -169,6 +169,9 @@ def apply_bench_overrides(cfg: dict, args: Any) -> dict:
     if getattr(args, "log_every", None):
         tcfg["log_every"] = int(args.log_every)
         tcfg["metrics_every"] = int(args.log_every)
+    video_man = getattr(args, "video_manifest", None)
+    if video_man:
+        cfg.setdefault("manifest", {})["video_path"] = video_man
     # Bench runs want every-step JSONL.
     if getattr(args, "per_step_timing", False) or getattr(args, "bench_window", False):
         tcfg["log_every"] = min(int(tcfg.get("log_every", 1)), 1)
