@@ -139,6 +139,8 @@ class StudentDataConfig:
     video_batch_size:  int   = 16
     paired_batch_size: int   = 8
     num_workers:       int   = 8
+    prefetch_factor:   int   = 4
+    persistent_workers: bool = True
     patch_size:        int   = 4    # Hiera effective stride
     video_sample_as_image_frac: float = 0.30  # 30% of image batches from video frames
 
@@ -148,7 +150,8 @@ class StudentDataConfig:
         if "stage_mixes" in d:
             cfg.stage_mixes = [StageMixConfig(**m) for m in d["stage_mixes"]]
         for k in ["image_batch_size", "video_batch_size", "paired_batch_size",
-                  "num_workers", "patch_size", "video_sample_as_image_frac"]:
+                  "num_workers", "prefetch_factor", "persistent_workers",
+                  "patch_size", "video_sample_as_image_frac"]:
             if k in d:
                 setattr(cfg, k, d[k])
         return cfg
@@ -467,12 +470,11 @@ class StudentDataModule:
             collate_fn=collate_fn,
             pin_memory=True,
             drop_last=True,
-            persistent_workers=nw > 0,
+            persistent_workers=bool(self.cfg.persistent_workers) and nw > 0,
             sampler=sampler,
         )
         if nw > 0:
-            # DDP: keep prefetch low — stage 3 may hold 3 loaders × workers × prefetch.
-            kwargs["prefetch_factor"] = 1 if _ddp_active() else 4
+            kwargs["prefetch_factor"] = int(getattr(self.cfg, "prefetch_factor", 4) or 4)
         return DataLoader(ds, **kwargs)
 
     def _prefetch_batches(self, loader: DataLoader, n_batches: int) -> None:
@@ -615,13 +617,18 @@ class StudentDataModule:
             batch = next(it)
         return batch
 
-    def next_batch(self) -> dict:
+    def next_batch(self, forced_type: Optional[str] = None) -> dict:
         """
         Sample the next batch according to the current stage mix ratios.
 
-        Returns a batch dict with batch["sample_type"] set.
+        ``forced_type`` pins the stream (image/video/paired) so an optimizer
+        step's micro-batches stay the same type under gradient accumulation.
         """
-        if _ddp_active():
+        if forced_type in ("image", "video", "paired"):
+            sample_type = forced_type
+            if _ddp_active():
+                sample_type = _ddp_broadcast_sample_type(sample_type)
+        elif _ddp_active():
             sample_type = (
                 self.current_mix.sample_type()
                 if dist.get_rank() == 0

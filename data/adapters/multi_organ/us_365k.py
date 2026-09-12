@@ -83,6 +83,17 @@ class US365KAdapter(BaseAdapter):
                 split = "val"
 
             sample_id = img_path.stem
+            meta = {
+                "report_text": caption,
+                "caption": caption,
+                "image_fname": img_path.name,
+            }
+            for key in (
+                "body_system", "organ", "attributes", "diagnosis",
+                "findings", "view", "probe", "structured_attributes",
+            ):
+                if rec.get(key) not in (None, "", []):
+                    meta[key] = rec[key]
             yield self._make_entry(
                 str(img_path),
                 split,
@@ -93,9 +104,5 @@ class US365KAdapter(BaseAdapter):
                 ssl_stream="image",
                 is_promptable=False,
                 study_id=sample_id,
-                source_meta={
-                    "report_text": caption,
-                    "caption": caption,
-                    "image_fname": img_path.name,
-                },
+                source_meta=meta,
             )
