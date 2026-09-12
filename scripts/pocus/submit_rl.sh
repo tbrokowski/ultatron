@@ -80,6 +80,23 @@ export MASTER_PORT=29500
 JOBID="\${SLURM_JOB_ID:-local}"
 EVID="${LOG_DIR}/\${JOBID}"
 mkdir -p "\${EVID}"
+export EVID
+export POCUS_EXPERIMENT="${EXP}"
+python3 - << PY
+import json, os, pathlib
+evid = pathlib.Path(os.environ["EVID"])
+wl = {
+    "R0": "B-probe", "R1": "B-prod", "R2": "B-handbook",
+    "R3": "B-learn", "R4": "B-ref", "R5": "B-video",
+}.get("${EXP}", "rl")
+(evid / "run.json").write_text(json.dumps({
+    "experiment": "${EXP}",
+    "workload": wl,
+    "nodes": ${NODES},
+    "n_gpus": ${TOTAL_GPUS},
+    "jobid": os.environ.get("SLURM_JOB_ID", "local"),
+}, indent=2) + "\n")
+PY
 # Env capture (NeMo-RL tree + Ultatron helper).
 bash "${REPO_DIR}/scripts/pocus/capture_env.sh" "\${EVID}/env.txt" "${REPO_DIR}/configs/pocus/rl.yaml" || true
 source "${REPO_DIR}/scripts/gssr_sidecar.sh"
@@ -99,6 +116,7 @@ try:
 except Exception as exc:
     ok = False
     note = f"import failed: {exc}"
+evid.mkdir(parents=True, exist_ok=True)
 (evid / "vlm_versions.json").write_text(json.dumps({"ok": ok, "note": note, "fallback": "Qwen/Qwen2.5-VL-7B-Instruct"}) + "\n")
 print(note)
 PY

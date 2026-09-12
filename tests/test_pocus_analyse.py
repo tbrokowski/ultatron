@@ -104,3 +104,61 @@ def test_wp5_results_uses_analysis_numbers(tmp_path: Path):
     assert "123" in text or "123.0" in text
     assert "0.800" in text or "0.8" in text
     assert "A-stage1" in text
+
+
+def test_attach_derived_fills_gpuh():
+    from scripts.pocus.analyse import attach_derived
+    analysis = {
+        "series": {
+            "A-stage1": {
+                "n_star": 16,
+                "n_star_reason": "n*=4 nodes",
+                "t_mean": {"4": 1.0, "16": 0.35},
+                "rates": {"4": 2048.0, "16": 2048 / 0.35},
+            },
+            "A-stage2-vid": {
+                "n_star": 16,
+                "t_mean": {"16": 2.0},
+                "rates": {"16": 16.0},
+            },
+        }
+    }
+    attach_derived(analysis, loader={"images_per_s": 10000.0})
+    enc = analysis["gpuh"]["encoder"]
+    assert enc["n_star"] == 16
+    assert enc["GPUh_enc_total"] > enc["GPUh_enc"]
+    assert analysis["loader_headroom"]["images"]["H"] > 1.0
+
+
+def test_analyse_main_writes_gpuh(tmp_path: Path, monkeypatch):
+    from scripts.pocus.analyse import main
+
+    def _write_run(jobid: str, n_gpus: int, t: float):
+        d = tmp_path / "encoder" / jobid
+        d.mkdir(parents=True)
+        (d / "run.json").write_text(json.dumps({
+            "experiment": "E1", "workload": "A-stage1", "n_gpus": n_gpus, "jobid": jobid,
+        }))
+        rows = []
+        for i in range(1200):
+            rows.append({
+                "step": i, "stage": 1, "type": "image", "t_step": t,
+                "t_data_wait": 0.1 * t, "t_fwd_student": 0.4 * t,
+                "t_fwd_teachers": 0.2 * t, "t_bwd": 0.2 * t, "t_opt": 0.05 * t,
+                "t_allreduce": 0.05 * t, "n_images": 32, "n_clips": 0,
+                "n_frames": 32, "mem_peak_GB": 56.9, "loss": 1.0, "nonfinite": False,
+            })
+        (d / "steps.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    for jobid, n, t in [("a", 4, 1.0), ("b", 8, 0.55), ("c", 16, 0.35), ("d", 32, 0.30)]:
+        _write_run(jobid, n, t)
+
+    out = tmp_path / "out"
+    monkeypatch.setattr("sys.argv", ["analyse", "--evidence", str(tmp_path), "--out", str(out)])
+    main()
+    analysis = json.loads((out / "analysis.json").read_text())
+    assert "A-stage1" in analysis["series"]
+    assert analysis["gpuh"]["encoder"]["GPUh_enc_total"] > 0
+    assert analysis["series"]["A-stage1"]["n_star"] is not None
+    csv = (out / "runs.csv").read_text()
+    assert "A-stage1" in csv

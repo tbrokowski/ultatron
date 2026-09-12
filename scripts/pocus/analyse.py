@@ -37,6 +37,12 @@ from train.bench import (
 EFFICIENCY_THRESHOLD = 0.70
 UNACCOUNTED_TARGET = 0.10
 STAGE_STEPS = [25_000, 20_000, 20_000, 35_000]
+STAGE_MIX_DEFAULT = [
+    {"image_frac": 0.90, "video_frac": 0.10, "paired_frac": 0.00},
+    {"image_frac": 0.40, "video_frac": 0.60, "paired_frac": 0.00},
+    {"image_frac": 0.50, "video_frac": 0.30, "paired_frac": 0.20},
+    {"image_frac": 0.50, "video_frac": 0.30, "paired_frac": 0.20},
+]
 GPUS_PER_NODE = 4
 CONTINGENCY = 1.05
 N_STAR_JUSTIFY_BELOW = 0.80
@@ -378,7 +384,155 @@ def write_components_csv(path: Path, rows: List[dict]) -> None:
             w.writerow(r)
 
 
-def _infer_n_gpus(job_dir: Path, rows: List[dict]) -> int:
+WORKLOAD_FROM_EXP = {
+    "E0": "E0",
+    "E1": "A-stage1",
+    "E2": "A-stage2",
+    "E3": "A-stage3",
+    "E4": "E4",
+    "E5": "E5",
+    "E6": "E6",
+    "R0": "B-probe",
+    "R1": "B-prod",
+    "R2": "B-handbook",
+    "R3": "B-learn",
+    "R4": "B-ref",
+    "R5": "B-video",
+}
+
+
+def loader_headroom(r_loader: float, r_needed: float) -> dict:
+    """Spec §6.1: H = R_loader(E5) / R_needed(n*). H < 1.5 ⇒ I/O-bound."""
+    if not r_loader or not r_needed or not math.isfinite(r_loader) or not math.isfinite(r_needed) or r_needed <= 0:
+        return {"H": float("nan"), "R_loader": r_loader, "R_needed": r_needed, "io_bound": None}
+    h = r_loader / r_needed
+    return {"H": h, "R_loader": r_loader, "R_needed": r_needed, "io_bound": h < 1.5}
+
+
+def load_run_meta(job_dir: Path) -> dict:
+    p = job_dir / "run.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+    env: Dict[str, str] = {}
+    envp = job_dir / "env.txt"
+    if envp.exists():
+        for line in envp.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                env[k.strip()] = v.strip()
+    exp = env.get("POCUS_EXPERIMENT") or job_dir.parent.name
+    exp = str(exp).upper() if str(exp).lower() in {e.lower() for e in WORKLOAD_FROM_EXP} else str(exp)
+    if exp.lower() in {k.lower() for k in WORKLOAD_FROM_EXP}:
+        exp = next(k for k in WORKLOAD_FROM_EXP if k.lower() == exp.lower())
+    return {
+        "experiment": exp,
+        "workload": WORKLOAD_FROM_EXP.get(exp, str(exp)),
+        "n_gpus": env.get("SLURM_NTASKS") or env.get("WORLD_SIZE"),
+    }
+
+
+def series_workload_name(base: str, typ: str) -> str:
+    if base == "A-stage2":
+        if typ == "video":
+            return "A-stage2-vid"
+        return "A-stage2-img"
+    if base == "A-stage1" and typ == "video":
+        return "A-stage1-vid"
+    return base
+
+
+def attach_derived(
+    analysis: dict,
+    *,
+    mix: Optional[Sequence[dict]] = None,
+    P: int = 218_402,
+    p: int = 256,
+    epochs: int = 1,
+    data_facts: Optional[dict] = None,
+    ckpt: Optional[dict] = None,
+    loader: Optional[dict] = None,
+) -> dict:
+    """Fill gpuh / storage / loader-headroom (spec §6.3–6.6) from series."""
+    mix = list(mix or STAGE_MIX_DEFAULT)
+    series = analysis.get("series") or {}
+    img_series = series.get("A-stage1") or series.get("A-stage2-img")
+    vid_series = series.get("A-stage2-vid")
+    n_star = None
+    n_star_reason = ""
+    t_img = float("nan")
+    t_vid = float("nan")
+    r_img = float("nan")
+    r_clip = float("nan")
+    if img_series:
+        n_star = img_series.get("n_star")
+        n_star_reason = img_series.get("n_star_reason") or ""
+        t_img = (img_series.get("t_mean") or {}).get(str(n_star), float("nan"))
+        r_img = (img_series.get("rates") or {}).get(str(n_star), float("nan"))
+    if vid_series:
+        if n_star is None:
+            n_star = vid_series.get("n_star")
+            n_star_reason = vid_series.get("n_star_reason") or n_star_reason
+        t_vid = (vid_series.get("t_mean") or {}).get(str(n_star), float("nan"))
+        r_clip = (vid_series.get("rates") or {}).get(str(n_star), float("nan"))
+    gpuh: Dict[str, Any] = {}
+    if n_star is not None:
+        gpuh["encoder"] = gpuh_encoder(
+            t_img=float(t_img) if t_img is not None and math.isfinite(float(t_img)) else 0.0,
+            t_vid=float(t_vid) if t_vid is not None and math.isfinite(float(t_vid)) else 0.0,
+            n_star_gpus=int(n_star),
+            mix=mix,
+        )
+        gpuh["encoder"]["n_star"] = n_star
+        gpuh["encoder"]["n_star_reason"] = n_star_reason
+        gpuh["encoder"]["t_img"] = t_img
+        gpuh["encoder"]["t_vid"] = t_vid
+    rl_series = series.get("B-prod") or series.get("B-handbook")
+    if rl_series and rl_series.get("n_star") is not None:
+        t_bar = (rl_series.get("t_mean") or {}).get(str(rl_series["n_star"]), float("nan"))
+        gpuh["rl"] = gpuh_rl(
+            t_bar=float(t_bar) if t_bar and math.isfinite(float(t_bar)) else 0.0,
+            n_star_gpus=int(rl_series["n_star"]),
+            P=P,
+            p=p,
+            epochs=epochs,
+        )
+        gpuh["rl"]["n_star"] = rl_series["n_star"]
+        gpuh["rl"]["n_star_reason"] = rl_series.get("n_star_reason")
+    analysis["gpuh"] = gpuh
+    rates = {"R_img": r_img, "R_clip": r_clip}
+    if data_facts:
+        img_m = (data_facts.get("manifests") or {}).get("enc_images") or {}
+        vid_m = (data_facts.get("manifests") or {}).get("enc_videos") or {}
+        rates["mean_bytes_image"] = img_m.get("bytes_mean")
+        rates["mean_bytes_clip"] = vid_m.get("bytes_mean")
+    analysis["storage"] = storage_block(data_facts, ckpt, int(n_star) if n_star else None, rates)
+    headroom = {}
+    if loader:
+        if loader.get("images_per_s") and r_img and math.isfinite(float(r_img)):
+            headroom["images"] = loader_headroom(float(loader["images_per_s"]), float(r_img))
+        if loader.get("clips_per_s") and r_clip and math.isfinite(float(r_clip)):
+            headroom["clips"] = loader_headroom(float(loader["clips_per_s"]), float(r_clip))
+    analysis["loader_headroom"] = headroom
+    return analysis
+
+
+def _infer_n_gpus(job_dir: Path, rows: List[dict], meta: Optional[dict] = None) -> int:
+    if meta:
+        for key in ("n_gpus", "gpus", "world_size"):
+            v = meta.get(key)
+            if v is not None:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    pass
+        if meta.get("nodes") is not None:
+            try:
+                return int(meta["nodes"]) * GPUS_PER_NODE
+            except (TypeError, ValueError):
+                pass
     env = job_dir / "env.txt"
     if env.exists():
         for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -387,7 +541,7 @@ def _infer_n_gpus(job_dir: Path, rows: List[dict]) -> int:
                     return int(line.split("=", 1)[1].strip())
                 except ValueError:
                     pass
-            if "SLURM_NNODES=" in line:
+            if line.startswith("SLURM_NNODES="):
                 try:
                     nodes = int(line.split("=", 1)[1].strip())
                     return nodes * GPUS_PER_NODE
@@ -425,31 +579,56 @@ def main() -> None:
     runs_csv = []
     components_csv = []
     series: Dict[str, List[dict]] = defaultdict(list)
+    loader_stats: Dict[str, float] = {}
+    ckpt_stats: Dict[str, Any] = {}
+    skip_types = {"ckpt_probe", "loader_only", "mixed"}
 
     for job_dir in collect_jobs(evidence):
+        meta = load_run_meta(job_dir)
         rows = load_jsonl(job_dir / "steps.jsonl")
-        n_gpus = _infer_n_gpus(job_dir, rows)
+        n_gpus = _infer_n_gpus(job_dir, rows, meta)
         parsed = analyse_run(rows, gbs_img=args.gbs_img, gbs_vid=args.gbs_vid, n_gpus=n_gpus)
-        workload = job_dir.parent.name
-        jobid = job_dir.name
-        parsed["workload"] = workload
+        experiment = str(meta.get("experiment") or "")
+        base = str(meta.get("workload") or WORKLOAD_FROM_EXP.get(experiment, job_dir.parent.name))
+        jobid = str(meta.get("jobid") or job_dir.name)
+        parsed["workload"] = base
+        parsed["experiment"] = experiment
         parsed["jobid"] = jobid
+        parsed["n_gpus"] = n_gpus
         parsed["log"] = str(job_dir / "steps.jsonl")
+        parsed["meta"] = meta
         per_run.append(parsed)
-        series[workload].append(parsed)
+
+        loader_path = job_dir / "loader_only.json"
+        if loader_path.exists():
+            paths = [loader_path]
+        else:
+            paths = []
+        paths.extend(p for p in job_dir.glob("loader_only*.json") if p not in paths)
+        for loader_path in paths:
+            lo = json.loads(loader_path.read_text(encoding="utf-8"))
+            for k in ("images_per_s", "clips_per_s"):
+                v = lo.get(k)
+                if v and math.isfinite(float(v)):
+                    loader_stats[k] = max(float(v), float(loader_stats.get(k, 0.0)))
+        ckpt_path = job_dir / "ckpt_probe.json"
+        if ckpt_path.exists():
+            ckpt_stats = json.loads(ckpt_path.read_text(encoding="utf-8"))
+
+        scaling = experiment in {"E1", "E2", "E3", "R1", "R2"} or base in {
+            "A-stage1", "A-stage2", "A-stage3", "B-prod", "B-handbook",
+        }
         for typ, block in (parsed.get("types") or {}).items():
+            if typ in skip_types:
+                continue
+            wl = series_workload_name(base, typ)
+            if scaling:
+                typed = dict(parsed)
+                typed["types"] = {typ: block}
+                series[wl].append(typed)
             thr = block.get("throughput") or {}
             rate = thr.get("R_img") or thr.get("R_clip") or thr.get("R_tok") or thr.get("R_samp")
             unit = thr.get("unit") or ""
-            wl = {
-                "image": f"{workload}-img" if workload.startswith("A") else workload,
-                "video": f"{workload}-vid" if not workload.endswith("-vid") else workload,
-            }.get(typ, workload)
-            if workload == "encoder" or workload.startswith("A"):
-                if typ == "image":
-                    wl = "A-stage1" if "stage1" in str(job_dir) or "e1" in str(job_dir).lower() else "A-stage2-img"
-                elif typ == "video":
-                    wl = "A-stage2-vid"
             runs_csv.append({
                 "workload": wl,
                 "gpus": n_gpus,
@@ -470,27 +649,49 @@ def main() -> None:
         series_out[name] = analyse_series(runs, rate_key=rate_key)
 
     data_facts = None
-    if args.data_facts and args.data_facts.exists():
-        data_facts = json.loads(args.data_facts.read_text(encoding="utf-8"))
+    facts_path = args.data_facts
+    if facts_path is None:
+        cand = evidence / "data_facts.json"
+        facts_path = cand if cand.exists() else None
+    if facts_path and Path(facts_path).exists():
+        data_facts = json.loads(Path(facts_path).read_text(encoding="utf-8"))
 
     analysis = {
         "runs": per_run,
         "series": series_out,
         "gpuh": {},
-        "storage": storage_block(data_facts, None, None, {}),
+        "storage": {},
         "constants": {
             "GBS_img": args.gbs_img,
             "GBS_vid": args.gbs_vid,
             "efficiency_threshold": EFFICIENCY_THRESHOLD,
             "unaccounted_target": UNACCOUNTED_TARGET,
             "stage_steps": STAGE_STEPS,
+            "stage_mix": STAGE_MIX_DEFAULT,
             "contingency": CONTINGENCY,
+            "P": args.P,
+            "p": args.p,
+            "epochs": args.epochs,
         },
     }
+    attach_derived(
+        analysis,
+        mix=STAGE_MIX_DEFAULT,
+        P=args.P,
+        p=args.p,
+        epochs=args.epochs,
+        data_facts=data_facts,
+        ckpt=ckpt_stats or None,
+        loader=loader_stats or None,
+    )
     (out_dir / "analysis.json").write_text(json.dumps(analysis, indent=2, default=str) + "\n")
     write_runs_csv(out_dir / "runs.csv", runs_csv)
     write_components_csv(out_dir / "components.csv", components_csv)
-    print(f"wrote {out_dir / 'analysis.json'}  ({len(per_run)} runs)")
+    print(f"wrote {out_dir / 'analysis.json'}  ({len(per_run)} runs, series={list(series_out)})")
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
