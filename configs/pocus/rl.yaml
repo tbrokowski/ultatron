@@ -1,0 +1,73 @@
+# configs/pocus/rl.yaml
+# ============================================================
+# WP5 Workload B — multimodal GRPO (NeMo-RL fork).
+#
+# Policy: Qwen/Qwen3-VL-8B-Instruct (fallback Qwen/Qwen2.5-VL-7B-Instruct).
+# Teacher: same checkpoint, frozen, colocated vLLM [DEFAULT].
+# KL = 0 (WP1 1-node run with a KL reference was host-OOM killed).
+# Image tokens constant: min_pixels = max_pixels = 448×448.
+# ============================================================
+
+experiment: pocus_wp5_grpo
+seed: 1234
+
+model:
+  policy: Qwen/Qwen3-VL-8B-Instruct
+  teacher: Qwen/Qwen3-VL-8B-Instruct   # frozen; optional 32B quality comparison
+  fallback_policy: Qwen/Qwen2.5-VL-7B-Instruct
+  dtype: bfloat16
+  thinking: false
+  max_tokens: 1024
+  min_pixels: 200704    # 448×448
+  max_pixels: 200704
+  tensor_parallel_size: 1
+  placement: colocated_vllm   # alternative: dedicated_gpu_per_node
+  vllm_gpu_memory_utilization: 0.4
+
+data:
+  prompts: rl_prompts.jsonl
+  heldout: rl_heldout.jsonl
+  video_prompts: rl_video_prompts.jsonl
+  prompt_order: fixed
+
+batches:
+  production:
+    p: 256
+    G: 16
+    responses: 4096
+    steps: 12
+    avg_steps: [3, 12]
+  handbook:
+    p: 32
+    G: 16
+    responses: 512
+    steps: 30
+    avg_steps: [3, 30]
+  learning_check:          # R3
+    p: 32
+    G: 16
+    steps: 150
+    eval_every: 10
+  teacher_reference:       # R4
+    n_prompts: 20000
+  video_variant:           # R5
+    p: 32
+    G: 16
+    n_frames: 16
+
+reward:
+  weights:
+    organ: 0.25
+    diagnosis: 0.35
+    attribute: 0.25
+    hallucinated: -0.15
+    format: 0.15
+  exact_match_organ_diagnosis: true
+  parse_failure_alert: 0.05   # guided JSON decoding if exceeded
+
+kl:
+  coeff: 0.0
+
+parallel:
+  strategy: DTensor/FSDP2
+  nodes: [1, 2, 4, 8]

@@ -4,6 +4,7 @@ from vlm.rewards.format_reward import FormatReward
 from vlm.rewards.seg_reward  import SegmentationReward
 from vlm.rewards.medgemini   import MedGeminiReward
 from vlm.rewards.composite   import CompositeReward
+from vlm.rewards.teacher_rubric import TeacherRubricReward, DEFAULT_WEIGHTS
 
 __all__ = [
     "RewardFunction", "RewardOutput",
@@ -11,4 +12,6 @@ __all__ = [
     "SegmentationReward",
     "MedGeminiReward",
     "CompositeReward",
+    "TeacherRubricReward",
+    "DEFAULT_WEIGHTS",
 ]
