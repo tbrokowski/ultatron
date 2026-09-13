@@ -6,10 +6,10 @@
 set -euo pipefail
 
 REPO_DIR="${ULTATRON_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-ACCOUNT="${POCUS_ACCOUNT:-${ULTATRON_ACCOUNT:-a127}}"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/account.sh"
 PARTITION="${ULTATRON_PARTITION:-normal}"
 EDF_ENV="${ULTATRON_EDF_ENV:-${HOME}/.edf/ultatron.toml}"
-EVIDENCE="${POCUS_EVIDENCE_ROOT:-/capstor/store/cscs/swissai/infra01/meditron-feasibility-review/pocus}"
 NODES=2
 GPUS_PER_NODE=4
 CPUS="${POCUS_CPUS_PER_TASK:-288}"
@@ -27,8 +27,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 JOB_NAME="pocus_E6_${MODE}"
-LOG_DIR="${EVIDENCE}/nccl"
-mkdir -p "${LOG_DIR}" "${REPO_DIR}/logs/pocus"
+mkdir -p "${REPO_DIR}/logs/pocus"
+LOG_DIR="$(pocus_ensure_dir "${EVIDENCE}/nccl" "${REPO_DIR}/logs/pocus/nccl")"
 INNERSCRIPT="$(mktemp "${REPO_DIR}/logs/pocus/inner_e6.XXXXXX.sh")"
 OUTERSCRIPT="$(mktemp /tmp/pocus_e6_XXXXX.sh)"
 trap "rm -f ${OUTERSCRIPT}" EXIT

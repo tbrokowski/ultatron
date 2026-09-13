@@ -6,9 +6,9 @@
 # Reuses the a127 US-365K copy when present.  Writes $ROOT/PROVENANCE.md.
 set -euo pipefail
 
-ACCOUNT="${POCUS_ACCOUNT:-${ULTATRON_ACCOUNT:-a127}}"
-ROOT="${POCUS_RAW_ROOT:-/capstor/store/cscs/swissai/${ACCOUNT}/pocus-bench/raw}"
-US365K_A127="/capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/US-365K"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/account.sh"
+ROOT="${RAW_ROOT}"
 DATE_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 mkdir -p "${ROOT}"

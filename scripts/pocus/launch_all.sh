@@ -10,7 +10,7 @@
 #   4. E3/E4/E5, R3/R4/R5 at n* (default 4 nodes; override --nstar-nodes)
 #
 # On a Clariden login node:
-#   export POCUS_ACCOUNT=a127          # [TBC: a127 or infra01]
+#   export POCUS_ACCOUNT=a0238         # default; billed account + writable store
 #   bash scripts/pocus/launch_all.sh
 #   bash scripts/pocus/launch_all.sh --dry-run
 #   bash scripts/pocus/launch_all.sh --prep-data --nstar-nodes 4
@@ -22,9 +22,8 @@
 set -euo pipefail
 
 REPO_DIR="${ULTATRON_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-ACCOUNT="${POCUS_ACCOUNT:-${ULTATRON_ACCOUNT:-a127}}"
-EVIDENCE="${POCUS_EVIDENCE_ROOT:-/capstor/store/cscs/swissai/infra01/meditron-feasibility-review/pocus}"
-MANIFESTS="${POCUS_MANIFEST_ROOT:-/capstor/store/cscs/swissai/${ACCOUNT}/pocus-bench/manifests}"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/account.sh"
 NODES=(1 2 4 8)
 NSTAR_NODES="${POCUS_NSTAR_NODES:-4}"
 DRY_RUN=0

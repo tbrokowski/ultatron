@@ -6,7 +6,10 @@ This tree cannot submit to Clariden from CI.  On a login node:
 
 1. Copy `edf/ultatron.toml.example` to `~/.edf/ultatron.toml` and set `image`.
    Confirm `[annotations] com.hooks.aws_ofi_nccl.enabled = "true"`.
-2. Confirm account `[TBC: a127 or infra01]`: `export POCUS_ACCOUNT=...`
+2. Account is `a0238` (Slurm `--account` and writable store). Optional:
+   `export POCUS_ACCOUNT=a0238`. Evidence lands under
+   `/capstor/store/cscs/swissai/a0238/meditron-feasibility-review/pocus`.
+   Existing US-365K / video copies / student ckpts are still read from a127.
 3. Licence checks `[TBC]` for US-365K and CardiacUDC; CAMUS is the CardiacUDC fallback.
 4. Download / reuse Alps copies: `bash scripts/pocus/download.sh`
 5. Inspect US-365K attributes: `python3 scripts/pocus/inspect_us365k.py --out manifests/us365k_fields.json`
@@ -31,6 +34,6 @@ Encoder entry point: `python -m train.student_pretrain` (Slingshot, rank-0 logs,
 `--bench-stage`, `--bench-window`, `--per-step-timing`, `--no-ckpt`,
 `--ckpt-probe`, `--loader-only`).
 
-Open decisions remain marked `[TBC]` / `[DEFAULT]` in the spec: account, GBS
-vs production yaml, 100k from step 0 vs continue from 30,800, RL prompt set P
+Open decisions remain marked `[TBC]` / `[DEFAULT]` in the spec: GBS vs
+production yaml, 100k from step 0 vs continue from 30,800, RL prompt set P
 and epochs, 8B vs 32B teacher.

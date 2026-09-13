@@ -2,10 +2,12 @@
 scripts/pocus/paths.py  ·  WP5 path constants
 =============================================
 
-Defaults match the feasibility spec (11 Sep 2026).  Override with env:
+Defaults: billed account a0238.  Override with env:
 
   POCUS_ACCOUNT, POCUS_EVIDENCE_ROOT, POCUS_RAW_ROOT, POCUS_SHARD_ROOT,
   POCUS_SCRATCH_ROOT, ULTATRON_EDF_ENV, ULTATRON_REPO
+
+Production ultrasound copies and student checkpoints stay on a127 (read-only).
 """
 from __future__ import annotations
 
@@ -13,15 +15,15 @@ import os
 from pathlib import Path
 
 
-ACCOUNT_DEFAULT = os.environ.get("POCUS_ACCOUNT", os.environ.get("ULTATRON_ACCOUNT", "a127"))
-# Spec §1: evidence tree is shared with WP1 under infra01.
-EVIDENCE_ROOT = Path(os.environ.get(
-    "POCUS_EVIDENCE_ROOT",
-    "/capstor/store/cscs/swissai/infra01/meditron-feasibility-review/pocus",
-))
+ACCOUNT_DEFAULT = os.environ.get("POCUS_ACCOUNT", os.environ.get("ULTATRON_ACCOUNT", "a0238"))
 STORE_ACCT = Path(os.environ.get(
     "POCUS_STORE_ACCT",
     f"/capstor/store/cscs/swissai/{ACCOUNT_DEFAULT}",
+))
+# Evidence under the billed account.  infra01 is not writable from a0238.
+EVIDENCE_ROOT = Path(os.environ.get(
+    "POCUS_EVIDENCE_ROOT",
+    str(STORE_ACCT / "meditron-feasibility-review" / "pocus"),
 ))
 RAW_ROOT = Path(os.environ.get(
     "POCUS_RAW_ROOT",

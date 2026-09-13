@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # set_acls.sh  ·  Make the evidence tree readable by group csstaff (spec §7)
 set -euo pipefail
-ROOT="${1:-${POCUS_EVIDENCE_ROOT:-/capstor/store/cscs/swissai/infra01/meditron-feasibility-review/pocus}}"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/account.sh"
+ROOT="${1:-${EVIDENCE}}"
 GROUP="${2:-csstaff}"
 
 mkdir -p "${ROOT}"

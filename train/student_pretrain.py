@@ -2018,17 +2018,26 @@ def _run_loader_only(
     return out
 
 
-def _run_ckpt_probe(trainer: StudentSmokeTrainer, args: argparse.Namespace) -> dict:
-    """E4: time one resumable checkpoint write and read on scratch and store."""
+def _ckpt_probe_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    """Scratch + store destinations for E4 checkpoint timing."""
     user = os.environ.get("USER", "unknown")
     scratch = Path(
         args.ckpt_probe_scratch
         or f"/capstor/scratch/cscs/{user}/pocus-bench/ckpt_probe"
     )
+    acct = os.environ.get("POCUS_ACCOUNT") or os.environ.get("ULTATRON_ACCOUNT") or "a0238"
+    store_acct = os.environ.get("POCUS_STORE_ACCT") or f"/capstor/store/cscs/swissai/{acct}"
     store = Path(
         args.ckpt_probe_store
-        or "/capstor/store/cscs/swissai/a127/pocus-bench/ckpt_probe"
+        or os.environ.get("POCUS_CKPT_PROBE_STORE")
+        or f"{store_acct}/pocus-bench/ckpt_probe"
     )
+    return scratch, store
+
+
+def _run_ckpt_probe(trainer: StudentSmokeTrainer, args: argparse.Namespace) -> dict:
+    """E4: time one resumable checkpoint write and read on scratch and store."""
+    scratch, store = _ckpt_probe_paths(args)
     results = []
     for dest, label in ((scratch, "scratch"), (store, "store")):
         try:

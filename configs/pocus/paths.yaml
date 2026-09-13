@@ -1,14 +1,15 @@
 # configs/pocus/paths.yaml
 # Path defaults for WP5.  Override with POCUS_* environment variables.
 
-account: a127          # [TBC: a127 or infra01]
+account: a0238
 partition: normal
 cluster: clariden
 
-evidence_root: /capstor/store/cscs/swissai/infra01/meditron-feasibility-review/pocus
-raw_root: /capstor/store/cscs/swissai/a127/pocus-bench/raw
-shard_root: /capstor/store/cscs/swissai/a127/pocus-bench/shards
-manifest_root: /capstor/store/cscs/swissai/a127/pocus-bench/manifests
+# Writable under the billed account. US-365K / ckpts below stay on a127.
+evidence_root: /capstor/store/cscs/swissai/a0238/meditron-feasibility-review/pocus
+raw_root: /capstor/store/cscs/swissai/a0238/pocus-bench/raw
+shard_root: /capstor/store/cscs/swissai/a0238/pocus-bench/shards
+manifest_root: /capstor/store/cscs/swissai/a0238/pocus-bench/manifests
 scratch_root: /iopsstor/scratch/${USER}/pocus-bench
 
 us365k: /capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/US-365K

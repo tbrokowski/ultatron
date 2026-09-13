@@ -17,19 +17,18 @@
 #   bash scripts/pocus/submit_encoder.sh E6            # 2-node NCCL
 #
 # Env:
-#   POCUS_ACCOUNT          [TBC: a127 or infra01]
+#   POCUS_ACCOUNT          default a0238 (Slurm --account + writable store)
 #   ULTATRON_EDF_ENV       default ~/.edf/ultatron.toml
 #   POCUS_EVIDENCE_ROOT    evidence tree (csstaff-readable)
 # =============================================================================
 set -euo pipefail
 
 REPO_DIR="${ULTATRON_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-ACCOUNT="${POCUS_ACCOUNT:-${ULTATRON_ACCOUNT:-a127}}"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/account.sh"
 PARTITION="${ULTATRON_PARTITION:-normal}"
 EDF_ENV="${ULTATRON_EDF_ENV:-${HOME}/.edf/ultatron.toml}"
-EVIDENCE="${POCUS_EVIDENCE_ROOT:-/capstor/store/cscs/swissai/infra01/meditron-feasibility-review/pocus}"
 CONFIG="${REPO_DIR}/configs/pocus/encoder_bench.yaml"
-MANIFESTS="${POCUS_MANIFEST_ROOT:-/capstor/store/cscs/swissai/${ACCOUNT}/pocus-bench/manifests}"
 GPUS_PER_NODE=4
 CPUS="${POCUS_CPUS_PER_TASK:-288}"   # [TBC per CSCS guidance] all GH200 node cores
 NODE_MEM="475G"
@@ -94,8 +93,8 @@ fi
 
 TOTAL_GPUS=$((NODES * GPUS_PER_NODE))
 JOB_NAME="pocus_${EXP}_${NODES}n"
-LOG_DIR="${EVIDENCE}/encoder"
-mkdir -p "${LOG_DIR}" "${REPO_DIR}/logs/pocus"
+mkdir -p "${REPO_DIR}/logs/pocus"
+LOG_DIR="$(pocus_ensure_dir "${EVIDENCE}/encoder" "${REPO_DIR}/logs/pocus/encoder")"
 
 INNERSCRIPT="$(mktemp "${REPO_DIR}/logs/pocus/inner_${EXP}.XXXXXX.sh")"
 OUTERSCRIPT="$(mktemp /tmp/pocus_outer_XXXXX.sh)"
@@ -154,6 +153,8 @@ export US_STUDENT_CONFIG="${CONFIG}"
 export US_STUDENT_MODE=pretrain
 export US_STUDENT_NUM_WORKERS=${NUM_WORKERS}
 export POCUS_EVIDENCE_ROOT="${EVIDENCE}"
+export POCUS_ACCOUNT="${ACCOUNT}"
+export POCUS_STORE_ACCT="${STORE_ACCT}"
 
 # Slingshot: keep aws-ofi-nccl (injected by the EDF hook). Never Socket.
 unset NCCL_NET || true

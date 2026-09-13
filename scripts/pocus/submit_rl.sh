@@ -18,10 +18,10 @@
 set -euo pipefail
 
 REPO_DIR="${ULTATRON_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-ACCOUNT="${POCUS_ACCOUNT:-${ULTATRON_ACCOUNT:-a127}}"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/account.sh"
 PARTITION="${ULTATRON_PARTITION:-normal}"
 EDF_ENV="${NEMO_RL_EDF_ENV:-${HOME}/.edf/nemo-rl.toml}"
-EVIDENCE="${POCUS_EVIDENCE_ROOT:-/capstor/store/cscs/swissai/infra01/meditron-feasibility-review/pocus}"
 NEMO_RL="${NEMO_RL_REPO:-/users/${USER}/nemo-rl-development}"
 SQSH="${NEMO_RL_SQSH:-nemo-rl_image_0_7_0_swissai_k8.sqsh}"
 GPUS_PER_NODE=4
@@ -59,8 +59,8 @@ if [[ "${NODES}" -ge 8 || "${GSSR}" -eq 1 ]]; then GSSR=1; fi
 
 TOTAL_GPUS=$((NODES * GPUS_PER_NODE))
 JOB_NAME="pocus_${EXP}_${NODES}n"
-LOG_DIR="${EVIDENCE}/rl"
-mkdir -p "${LOG_DIR}" "${REPO_DIR}/logs/pocus"
+mkdir -p "${REPO_DIR}/logs/pocus"
+LOG_DIR="$(pocus_ensure_dir "${EVIDENCE}/rl" "${REPO_DIR}/logs/pocus/rl")"
 INNERSCRIPT="$(mktemp "${REPO_DIR}/logs/pocus/inner_${EXP}.XXXXXX.sh")"
 OUTERSCRIPT="$(mktemp /tmp/pocus_rl_XXXXX.sh)"
 trap "rm -f ${OUTERSCRIPT}" EXIT
@@ -82,6 +82,9 @@ EVID="${LOG_DIR}/\${JOBID}"
 mkdir -p "\${EVID}"
 export EVID
 export POCUS_EXPERIMENT="${EXP}"
+export POCUS_ACCOUNT="${ACCOUNT}"
+export POCUS_EVIDENCE_ROOT="${EVIDENCE}"
+export POCUS_STORE_ACCT="${STORE_ACCT}"
 python3 - << PY
 import json, os, pathlib
 evid = pathlib.Path(os.environ["EVID"])
