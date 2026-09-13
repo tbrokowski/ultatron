@@ -14,11 +14,12 @@ This tree cannot submit to Clariden from CI.  On a login node:
 7. Shards + drop unreadable files: `python3 scripts/pocus/build_shards.py`
 8. Data facts: `python3 scripts/pocus/data_facts.py --out $EVIDENCE/data_facts.json`
 9. E6 NCCL (Slingshot, then `--sockets`): `bash scripts/pocus/submit_nccl.sh`
-10. E0 / R0 OOM probes, then E1/E2 in parallel with R1/R2.
-    `bash scripts/pocus/submit_encoder.sh E0`              # 1 GPU MBS probe
-    `bash scripts/pocus/submit_encoder.sh E0 --full-node`  # 1 node, 4 GPUs
-    `bash scripts/pocus/submit_series.sh encoder`          # E1+E2 at 1/2/4/8, repeats at 1 and 8
-    `bash scripts/pocus/submit_series.sh rl`
+10. Launch everything (or step through):
+    `bash scripts/pocus/launch_all.sh --dry-run`   # print the campaign
+    `bash scripts/pocus/launch_all.sh`             # E0–E6 and R0–R5 with Slurm deps
+    `bash scripts/pocus/launch_all.sh --prep-data` # download + manifests + shards first
+    `bash scripts/pocus/submit_encoder.sh E0`      # 1 GPU MBS probe only
+    Repeats at 1 and 8 nodes are included in `launch_all.sh`.
 11. After logs land: `python3 scripts/pocus/analyse.py --evidence $EVIDENCE`
     then `scaling_plot.py`, `gantt.py`, `wp5_results.py`
 12. ACLs: `bash scripts/pocus/set_acls.sh`

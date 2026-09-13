@@ -287,14 +287,19 @@ SBATCH_CMD=(
     --parsable
 )
 if [[ -n "${AFTER_JOB}" ]]; then
+    AFTER_JOB="${AFTER_JOB//,/:}"
     SBATCH_CMD+=(--dependency="afterok:${AFTER_JOB}")
 fi
 JOB_ID=$("${SBATCH_CMD[@]}" "${OUTERSCRIPT}")
 echo "  Job ID : ${JOB_ID}"
+echo "JOB_ID=${JOB_ID}"
 echo "  Log    : ${LOG_DIR}/${JOB_NAME}_${JOB_ID}.out"
 echo "  Evidence: ${LOG_DIR}/${JOB_ID}/"
 
 if [[ "${REPEAT}" -eq 1 ]]; then
     echo "Submitting repeat..."
-    bash "$0" "${EXP}" --nodes "${NODES}" --time "${TIME_LIMIT}" ${STAGE:+--stage ${STAGE}} --after-job "${JOB_ID}"
+    gssr_flag=()
+    [[ "${GSSR}" -eq 1 ]] && gssr_flag+=(--gssr)
+    bash "$0" "${EXP}" --nodes "${NODES}" --time "${TIME_LIMIT}" \
+        ${STAGE:+--stage "${STAGE}"} "${gssr_flag[@]}" --after-job "${JOB_ID}"
 fi

@@ -14,12 +14,14 @@ NODES=2
 GPUS_PER_NODE=4
 CPUS="${POCUS_CPUS_PER_TASK:-288}"
 MODE="slingshot"
+AFTER_JOB=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --nodes) NODES="$2"; shift 2 ;;
         --sockets) MODE="sockets"; shift ;;
         --slingshot) MODE="slingshot"; shift ;;
+        --after-job) AFTER_JOB="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
@@ -84,6 +86,8 @@ JOB_ID=$(sbatch \
     --output="${LOG_DIR}/${JOB_NAME}_%j.out" \
     --error="${LOG_DIR}/${JOB_NAME}_%j.err" \
     --parsable \
+    ${AFTER_JOB:+--dependency=afterok:${AFTER_JOB//,/:}} \
     "${OUTERSCRIPT}")
 echo "  Job ID : ${JOB_ID}  mode=${MODE}"
+echo "JOB_ID=${JOB_ID}"
 echo "  Log    : ${LOG_DIR}/${JOB_NAME}_${JOB_ID}.out"

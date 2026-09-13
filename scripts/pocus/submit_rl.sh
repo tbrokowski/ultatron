@@ -144,9 +144,13 @@ SBATCH_CMD=(
     --time="${TIME_LIMIT}" --partition="${PARTITION}" --account="${ACCOUNT}"
     --output="${LOG_DIR}/${JOB_NAME}_%j.out" --error="${LOG_DIR}/${JOB_NAME}_%j.err" --parsable
 )
-if [[ -n "${AFTER_JOB}" ]]; then SBATCH_CMD+=(--dependency="afterok:${AFTER_JOB}"); fi
+if [[ -n "${AFTER_JOB}" ]]; then
+    AFTER_JOB="${AFTER_JOB//,/:}"
+    SBATCH_CMD+=(--dependency="afterok:${AFTER_JOB}")
+fi
 JOB_ID=$("${SBATCH_CMD[@]}" "${OUTERSCRIPT}")
 echo "  Job ID : ${JOB_ID}"
+echo "JOB_ID=${JOB_ID}"
 echo "  Log    : ${LOG_DIR}/${JOB_NAME}_${JOB_ID}.out"
 if [[ "${REPEAT}" -eq 1 ]]; then
     bash "$0" "${EXP}" --nodes "${NODES}" --after-job "${JOB_ID}"
