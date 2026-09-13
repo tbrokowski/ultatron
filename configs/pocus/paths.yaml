@@ -1,0 +1,27 @@
+# configs/pocus/paths.yaml
+# Path defaults for WP5.  Override with POCUS_* environment variables.
+
+account: a0238
+partition: normal
+cluster: clariden
+
+# Writable under the billed account. US-365K / ckpts below stay on a127.
+evidence_root: /capstor/store/cscs/swissai/a0238/meditron-feasibility-review/pocus
+raw_root: /capstor/store/cscs/swissai/a0238/pocus-bench/raw
+shard_root: /capstor/store/cscs/swissai/a0238/pocus-bench/shards
+manifest_root: /capstor/store/cscs/swissai/a0238/pocus-bench/manifests
+scratch_root: /iopsstor/scratch/${USER}/pocus-bench
+
+us365k: /capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/US-365K
+cardiacudc: /capstor/store/cscs/swissai/a127/ultrasound/raw/cardiac/CardiacUDC
+covid_blues: /capstor/store/cscs/swissai/a127/ultrasound/raw/lung/COVID-BLUES
+iugc2024: /capstor/store/cscs/swissai/a127/ultrasound/raw/fetal/IUGC-2024
+
+student_resume_ckpt: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_30000.pt
+
+edf: ~/.edf/ultatron.toml
+cpus_per_task: 288     # [TBC per CSCS guidance]
+gpus_per_node: 4
+node_counts: [1, 2, 4, 8]
+seed: 1234
+group_acl: csstaff

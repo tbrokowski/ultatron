@@ -1,0 +1,184 @@
+# configs/pocus/encoder_bench.yaml
+# ============================================================
+# WP5 Workload A — strong-scaling encoder (spec §4.2).
+#
+# Fixed problem [DEFAULT, from the production pilot, TBC against
+# student_pretrain.yaml]:
+#   image MBS 32 / GPU, 2 global crops ≤512 px
+#   video MBS 1 clip / GPU, 32 frames at stride 2
+#   GBS_img = 2048, GBS_vid = 32
+#   accum at 1/2/4/8 nodes: images 16/8/4/2, videos 8/4/2/1
+#
+# Stage mixes are the *production* ratios (not the pilot debug 100/0).
+# Resume from step_30000.pt for a realistic student state [DEFAULT].
+# ============================================================
+
+manifest:
+  path: "enc_images.jsonl"   # overridden by --manifest on the CLI
+  root_remap: {}
+  exclude_datasets: []
+
+training:
+  total_steps: 400          # hard cap; --bench-window stops earlier
+  log_every: 1
+  metrics_every: 1
+  ckpt_every: 0
+  seed: 1234
+  global_batch_image: 2048
+  global_batch_video: 32
+  # Fallback if GBS is unset: must stay integer with MBS × n_gpus.
+  grad_accum_steps: 16
+
+  stage_fracs: [0.25, 0.20, 0.20, 0.35]
+  stage3_curriculum_boundaries: [0.33, 0.67]
+
+  optimizer: adamw
+  lr: 5.0e-5
+  lr_min: 1.0e-6
+  weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  warmup_steps: 1000
+  use_amp: true
+
+compute:
+  total_gpus: 4
+  gpus_per_node: 4
+  nodes: 1
+
+loaders:
+  image_batch_size: 32
+  video_batch_size: 1
+  paired_batch_size: 2
+  num_workers: 8          # spec: 8–12 per GPU
+  prefetch_factor: 4
+  persistent_workers: true
+  pin_memory: true
+
+transforms:
+  image:
+    n_global_crops: 2
+    n_local_crops: 0
+    max_global_crop_px: 512
+    min_crop_px: 32
+    mask_strategy: both
+    mask_ratio: 0.40
+    spatial_mask_ratio: 0.40
+    hflip_p: 0.0
+    vflip_p: 0.0
+    rotation_p: 0.0
+    grayscale_p: 0.5
+    color_jitter_p: 0.2
+    jitter_brightness: 0.2
+    jitter_contrast: 0.2
+    jitter_saturation: 0.1
+    apply_speckle: true
+    speckle_sigma: 0.10
+    apply_blur: false
+    apply_solarize: false
+    freq_mask:
+      mask_ratio: 0.40
+
+  video:
+    n_frames: 32
+    max_n_frames: 64
+    temporal_stride: 2
+    tube_mask_ratio: 0.75
+    max_crop_px: 512
+    min_crop_px: 64
+    mask_strategy: both
+    tube_size: 2
+    spatial_mask_ratio: 0.40
+    hflip_p: 0.0
+    vflip_p: 0.0
+    rotation_p: 0.0
+    grayscale_p: 0.5
+    color_jitter_p: 0.2
+    jitter_brightness: 0.2
+    jitter_contrast: 0.2
+    jitter_saturation: 0.1
+    apply_speckle: true
+    speckle_sigma: 0.08
+    apply_blur: false
+    apply_solarize: false
+    freq_mask:
+      mask_ratio: 0.75
+
+resolution_curriculum: []
+
+curriculum:
+  total_training_steps: 400
+  image_samples_per_epoch: 50000
+  video_samples_per_epoch: 10000
+  alp_stage_fracs: [0.25, 0.50]
+  alp_n_frames: [16, 32, 32]
+  alp_alpha_init: 0.1
+  alp_alpha_final: 0.9
+  alp_guidance_threshold_init: 0.1
+  alp_guidance_threshold_final: 0.9
+
+alp:
+  disk_cache_dir: null
+  max_entries: 1000000
+  score_ema: 0.9
+  hardness_temperature: 1.0
+
+student_data:
+  image_batch_size: 32
+  video_batch_size: 1
+  paired_batch_size: 2
+  num_workers: 8
+  prefetch_factor: 4
+  persistent_workers: true
+  patch_size: 4
+  stage_mixes:
+    - {image_frac: 0.90, video_frac: 0.10, paired_frac: 0.00}
+    - {image_frac: 0.40, video_frac: 0.60, paired_frac: 0.00}
+    - {image_frac: 0.50, video_frac: 0.30, paired_frac: 0.20}
+    - {image_frac: 0.50, video_frac: 0.30, paired_frac: 0.20}
+
+model:
+  student:
+    hiera_variant: sam2_hiera_large
+    hiera_hf_cache_dir: null
+    temporal_mixing: factorized_attn
+    temporal_adapter_stages: [2, 3]
+    max_frames: 64
+    trainable_stages: null
+    align_dim: 1024
+    n_prototypes: 256
+    ema_momentum: 0.9995
+    dino_teacher_key: dinov3_l
+    vjepa_teacher_key: vjepa2_l
+    fusion_radius: 2
+    fusion_init_gate: -3.0
+    dtype: bfloat16
+
+loss_weights:
+  lam_global: 1.0
+  lam_patch: 1.0
+  lam_masked: 1.0
+  lam_proto: 0.25
+  lam_ema_max: 0.15
+  lam_ema_floor: 0.0
+  lam_ema_warmup_steps: 10000
+  lam_ema_divergence_peak: 0.8
+  lam_teacher_floor: 0.05
+  stage4_teacher_decay: cosine
+  stage4_ema_ramp: cosine
+  lam_tube: 1.0
+  lam_temp: 0.5
+  lam_fused: 0.5
+  lam_preserve: 0.1
+  lam_fc: 0.5
+  lam_seg: 1.0
+  lam_seg_dice: 1.0
+
+pretrain:
+  hf_cache_dir: null
+  ckpt_dir: "/capstor/scratch/cscs/${USER}/pocus-bench/ckpts"
+  save_stage_end_ckpts: false
+  loader_warmup_batches: 2
+  resume_ckpt: "/capstor/store/cscs/swissai/a127/ultrasound/checkpoints/StudentPretrain/step_30000.pt"
+  tensorboard: false

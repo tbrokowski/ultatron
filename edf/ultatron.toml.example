@@ -1,0 +1,23 @@
+# edf/ultatron.toml.example
+# Copy to ~/.edf/ultatron.toml and set `image` to the Ultatron squashfs.
+#
+# Slingshot: enable the AWS OFI NCCL hook (CSCS Container Engine).
+# Do NOT set NCCL_NET=Socket in the job script; the hook injects the
+# plugin and NCCL_NET="AWS Libfabric".  Clariden uses network-stack
+# artifacts, so the variant annotation is ignored there.
+#
+# Docs:
+#   https://docs.cscs.ch/software/container-engine/resource-hook/
+#   https://docs.cscs.ch/software/communication/nccl/
+
+image = "/capstor/scratch/cscs/USER/images/ultatron.sqsh"  # [TBC: actual path]
+entrypoint = false
+writable = true
+
+[annotations]
+com.hooks.aws_ofi_nccl.enabled = "true"
+com.hooks.aws_ofi_nccl.variant = "cuda-dl"
+
+# Optional: extra mounts for store / scratch / iopsstor.
+# [mounts]
+# ...

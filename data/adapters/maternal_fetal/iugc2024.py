@@ -51,7 +51,7 @@ class IUGC2024Adapter(BaseAdapter):
     DATASET_ID     = "IUGC2024"
     ANATOMY_FAMILY = "intrapartum"
     SONODQS        = "silver"
-    DOI            = ""
+    DOI            = "https://doi.org/10.5281/zenodo.17655183"
 
     def __init__(self, root: str | Path, split_override: Optional[str] = None):
         super().__init__(

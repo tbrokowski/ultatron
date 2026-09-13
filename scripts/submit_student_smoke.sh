@@ -93,8 +93,8 @@ INNER_EOF
 if [[ "${DDP}" -eq 1 ]]; then
 cat >> "${INNERSCRIPT}" << 'INNER_DDP_EOF'
 
-export LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v 'aws-ofi-nccl' | paste -sd ':' -)
-export NCCL_NET=Socket
+export NCCL_NET="AWS Libfabric"
+export FI_CXI_ATS=0
 export NCCL_P2P_LEVEL=NVL
 export NCCL_SHM_DISABLE=0
 export NCCL_DEBUG=WARN
@@ -103,14 +103,14 @@ export OMP_NUM_THREADS=4
 echo "Running 800-step student smoke (4-GPU DDP, 200 steps/stage)..."
 python3 -m torch.distributed.run \
     --nproc_per_node=4 \
-    -m tests.dataset_adapters.student_training_smoke ${RESUME_ARGS}
+    -m train.student_pretrain ${RESUME_ARGS}
 
 INNER_DDP_EOF
 else
 cat >> "${INNERSCRIPT}" << 'INNER_SINGLE_EOF'
 
 echo "Running 800-step student smoke (single-GPU, 200 steps/stage)..."
-python3 -m tests.dataset_adapters.student_training_smoke ${RESUME_ARGS}
+python3 -m train.student_pretrain ${RESUME_ARGS}
 
 INNER_SINGLE_EOF
 fi

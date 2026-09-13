@@ -375,8 +375,11 @@ From [`configs/data/data_config.yaml`](configs/data/data_config.yaml), the defau
 The single-student pipeline distills frozen DINOv3-L and V-JEPA2-L into a shared
 Hiera encoder, then diverges via EMA self-distillation on ultrasound-native data.
 
-Entry point: `python -m tests.dataset_adapters.student_training_smoke` (via
-[`scripts/submit_student_pretrain.sh`](scripts/submit_student_pretrain.sh)).
+Entry point: `python -m train.student_pretrain` (via
+[`scripts/submit_student_pretrain.sh`](scripts/submit_student_pretrain.sh)
+or the WP5 launcher [`scripts/pocus/submit_encoder.sh`](scripts/pocus/submit_encoder.sh)).
+
+A compatibility shim remains at `tests.dataset_adapters.student_training_smoke`.
 
 Config: [`configs/student/student_pretrain.yaml`](configs/student/student_pretrain.yaml)
 
