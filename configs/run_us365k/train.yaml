@@ -1,0 +1,80 @@
+# Run US-365K: image-only training with a random Hiera-L student and EMA teacher.
+# Submit: bash scripts/submit_student_pretrain.sh --run-us365k
+# The submission script builds the manifest from data.yaml before training.
+# Requires US-365K images/metadata and the cached SAM2.1 architecture config.
+# No pretrained model weights are loaded.
+manifest:
+  path: dataset_exploration_outputs/run_us365k/train.jsonl
+
+training:
+  total_steps: 50
+  stage_fracs: [0.0, 0.0, 0.0, 1.0]
+  log_every: 5
+  metrics_every: 1
+  ckpt_every: 25
+  grad_accum_steps: 1
+  lr: 1.0e-4
+  lr_min: 1.0e-6
+  weight_decay: 0.05
+  grad_clip: 1.0
+  warmup_steps: 5
+  use_amp: true
+
+loaders:
+  image_batch_size: 2
+  # Required by the shared trainer; these streams have zero sampling weight.
+  video_batch_size: 1
+  paired_batch_size: 1
+  num_workers: 2
+  pin_memory: true
+
+transforms:
+  image:
+    n_global_crops: 2
+    n_local_crops: 0
+    max_global_crop_px: 160
+    min_crop_px: 32
+    mask_strategy: both
+    mask_ratio: 0.30
+    spatial_mask_ratio: 0.30
+    freq_mask:
+      mask_ratio: 0.30
+
+resolution_curriculum: []
+curriculum:
+  total_training_steps: 50
+  image_samples_per_epoch: 512
+  video_samples_per_epoch: 0
+
+student_data:
+  patch_size: 4
+  video_sample_as_image_frac: 0.0
+  stage_mixes:
+    - {image_frac: 1.0, video_frac: 0.0, paired_frac: 0.0}
+    - {image_frac: 1.0, video_frac: 0.0, paired_frac: 0.0}
+    - {image_frac: 1.0, video_frac: 0.0, paired_frac: 0.0}
+    - {image_frac: 1.0, video_frac: 0.0, paired_frac: 0.0}
+
+model:
+  student:
+    hiera_variant: sam2_hiera_large
+    pretrained: false
+    max_frames: 1
+    align_dim: 1024
+    n_prototypes: 256
+    ema_momentum: 0.9995
+    dtype: bfloat16
+
+loss_weights:
+  lam_patch: 1.0
+  lam_masked: 1.0
+  lam_proto: 0.0
+  lam_ema_max: 1.0
+  lam_ema_divergence_peak: 1.0
+
+pretrain:
+  hf_cache_dir: null
+  ckpt_dir: /capstor/store/cscs/swissai/a127/ultrasound/checkpoints/RunUS365K
+  save_stage_end_ckpts: true
+  loader_warmup_batches: 0
+  tensorboard: true

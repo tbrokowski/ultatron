@@ -43,6 +43,37 @@ python scripts/build_manifest.py --config configs/data/data_config.yaml --out /t
 python scripts/train.py --config configs/experiments/full.yaml
 ```
 
+### Run US-365K
+
+Set the dataset root in `configs/run_us365k/data.yaml`, then submit:
+
+```bash
+bash scripts/submit_student_pretrain.sh --run-us365k
+```
+
+The job builds a dedicated manifest with `scripts/build_manifest.py` and
+trains a randomly initialized Hiera-L student with its EMA teacher on
+US-365K training images only. No DINO or V-JEPA teachers are loaded.
+`configs/run_us365k/train.yaml` sets 50 steps, two images per GPU,
+160px maximum crops, and checkpoints every 25 steps. The job requests one
+node with four GPUs for 15 minutes. Checkpoints go to
+`/capstor/store/cscs/swissai/a127/ultrasound/checkpoints/RunUS365K`.
+Use `--resume` to continue an interrupted run.
+
+To build the manifest separately:
+
+```bash
+python3 scripts/build_manifest.py \
+    --config configs/run_us365k/data.yaml \
+    --no-prefer-scratch \
+    --out dataset_exploration_outputs/run_us365k/train.jsonl
+```
+
+The builder preserves split labels; the training loader selects `train`.
+Random initialization requires the cached `facebook/sam2.1-hiera-large`
+architecture config, but no pretrained weights. Adjust the repository and
+EDF paths in the submission script for your CSCS account.
+
 ### Validate (linear probe)
 
 ```bash

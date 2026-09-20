@@ -11,6 +11,9 @@
 # 15k pilot (all 4 stages, fixed 512px, separate ckpt dir):
 #   bash scripts/submit_student_pretrain.sh --pilot
 #
+# Run US-365K: random student + EMA, 50 image-only steps on one node:
+#   bash scripts/submit_student_pretrain.sh --run-us365k
+#
 # 16 GPUs:
 #   bash scripts/submit_student_pretrain.sh --pilot --nodes 4
 #
@@ -39,6 +42,7 @@ EDF_ENV="/users/tbrokowski/.edf/ultatron.toml"
 LOG_DIR="${REPO_DIR}/logs/pretrain"
 
 PILOT=0
+RUN_US365K=0
 RESUME=0
 RESUME_ARGS=""
 AFTER_JOB=""
@@ -56,6 +60,7 @@ STEPS_LABEL="100k steps"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pilot)     PILOT=1; shift ;;
+        --run-us365k) RUN_US365K=1; NODES=1; TIME_LIMIT="00:15:00"; shift ;;
         --resume)    RESUME=1; RESUME_ARGS="--resume"; shift ;;
         --after-job) AFTER_JOB="$2"; shift 2 ;;
         --nodes)     NODES="$2"; shift 2 ;;
@@ -68,10 +73,21 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "${RUN_US365K}" -eq 1 && "${PILOT}" -eq 1 ]]; then
+    echo "[ERROR] Choose either --pilot or --run-us365k" >&2
+    exit 1
+fi
+
 if [[ "${PILOT}" -eq 1 ]]; then
     CONFIG="${REPO_DIR}/configs/student/student_pretrain_pilot.yaml"
     JOB_NAME="ultatron_student_pretrain_pilot"
     STEPS_LABEL="15k pilot"
+fi
+
+if [[ "${RUN_US365K}" -eq 1 ]]; then
+    CONFIG="${REPO_DIR}/configs/run_us365k/train.yaml"
+    JOB_NAME="ultatron_run_us365k"
+    STEPS_LABEL="50 steps, US-365K, random student + EMA"
 fi
 
 # Stage-3/4 resume: skip loader warmup + cap workers (OOM / shm, jobs 2543314/2544897/2547540).
@@ -161,6 +177,18 @@ chmod +x "${INNERSCRIPT}"
 cat > "${OUTERSCRIPT}" << OUTER_EOF
 #!/bin/bash
 set -euo pipefail
+if [[ "${RUN_US365K}" -eq 1 ]]; then
+    srun --nodes=1 --ntasks=1 --ntasks-per-node=1 \\
+         --environment=${EDF_ENV} \\
+         bash -ec '
+             cd "${REPO_DIR}"
+             bash scripts/ensure_deps.sh
+             python3 scripts/build_manifest.py \\
+                 --config configs/run_us365k/data.yaml \\
+                 --no-prefer-scratch \\
+                 --out dataset_exploration_outputs/run_us365k/train.jsonl
+         '
+fi
 srun --ntasks-per-node=1 \\
      --environment=${EDF_ENV} \\
      bash ${INNERSCRIPT}

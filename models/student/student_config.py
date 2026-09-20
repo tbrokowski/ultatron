@@ -66,6 +66,7 @@ class StudentModelConfig:
     """
     hiera_variant:           str        = "hiera_large_video_mae_k400"
     hiera_hf_cache_dir:      Optional[str] = None
+    pretrained:             bool       = True
 
     temporal_mixing:         str        = "factorized_attn"
     temporal_adapter_stages: List[int]  = field(default_factory=lambda: [2, 3])
@@ -113,6 +114,7 @@ def build_student_encoder(
         trainable_stages        = cfg.trainable_stages,
         hf_cache_dir            = cfg.hiera_hf_cache_dir,
         align_dim               = cfg.align_dim,
+        pretrained              = cfg.pretrained,
     )
     model = model.to(device)
     return model

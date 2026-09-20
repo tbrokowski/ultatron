@@ -365,6 +365,7 @@ class HieraStudentBackbone(nn.Module):
         trainable_stages: int | None = None,
         hf_cache_dir: Optional[str] = None,
         align_dim: Optional[int] = None,
+        pretrained: bool = True,
     ):
         super().__init__()
         self.hiera_variant          = hiera_variant
@@ -373,8 +374,11 @@ class HieraStudentBackbone(nn.Module):
         self.max_frames             = max_frames
         self.trainable_stages       = trainable_stages
         self.align_dim              = align_dim
+        self.pretrained             = pretrained
+        if not pretrained and hiera_variant != "sam2_hiera_large":
+            raise ValueError("Random initialization currently requires sam2_hiera_large")
 
-        # Load the pretrained Hiera backbone
+        # Build the Hiera backbone with the requested initialization.
         self.hiera, self.embed_dims = self._load_hiera(hiera_variant, hf_cache_dir)
         self.hidden_size = self.embed_dims[-1]
 
@@ -469,15 +473,26 @@ class HieraStudentBackbone(nn.Module):
         Load SAM2.1-Hiera-Large image encoder via HuggingFace transformers.
         Extracts only the Hiera backbone (drops SAM2 neck + prompt encoder).
         """
-        from transformers import AutoModel
+        from transformers import AutoConfig, AutoModel
         from models.hf_loading import load_pretrained
         log.info("Loading SAM2.1-Hiera-Large backbone from facebook/sam2.1-hiera-large ...")
-        sam2 = load_pretrained(
-            AutoModel,
-            "facebook/sam2.1-hiera-large",
-            hf_cache_dir=hf_cache_dir,
-            trust_remote_code=True,
-        )
+        if self.pretrained:
+            sam2 = load_pretrained(
+                AutoModel,
+                "facebook/sam2.1-hiera-large",
+                hf_cache_dir=hf_cache_dir,
+                trust_remote_code=True,
+            )
+        else:
+            # Read only the cached architecture; never load pretrained weights.
+            config = AutoConfig.from_pretrained(
+                "facebook/sam2.1-hiera-large",
+                cache_dir=hf_cache_dir,
+                local_files_only=True,
+                trust_remote_code=True,
+            )
+            log.info("Initializing SAM2.1-Hiera-Large with random weights")
+            sam2 = AutoModel.from_config(config, trust_remote_code=True)
         # Sam2Model.vision_encoder is Sam2VisionModel; the Hiera trunk is .backbone
         vision = getattr(sam2, "vision_encoder", None) or getattr(sam2, "image_encoder", None)
         if vision is None:

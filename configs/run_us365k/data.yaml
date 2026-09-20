@@ -1,0 +1,3 @@
+# Only this dataset is scanned. Change the root if the data is staged elsewhere.
+datasets:
+  US-365K: /capstor/store/cscs/swissai/a127/ultrasound/raw/multi_organ/US-365K

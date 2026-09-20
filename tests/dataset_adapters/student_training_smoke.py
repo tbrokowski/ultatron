@@ -1145,6 +1145,7 @@ class StudentSmokeTrainer:
             or self.tcfg["total_steps"]
         )
         self.stage_fracs = self.tcfg["stage_fracs"]
+        ema_only = list(self.stage_fracs) == [0.0, 0.0, 0.0, 1.0]
         self.ema_momentum = self.model_cfg.ema_momentum
         self.use_amp = self.tcfg.get("use_amp", True) and device.startswith("cuda")
         # GradScaler unscale is not implemented for bfloat16 on GH200/CUDA builds.
@@ -1168,13 +1169,15 @@ class StudentSmokeTrainer:
                  self.model_cfg.hiera_variant, self.model_cfg.align_dim)
         student = build_student_encoder(self.model_cfg, device=device).to(dtype=self.dtype)
 
-        log.info("Loading DINO teacher (%s) ...", self.model_cfg.dino_teacher_key)
-        dino = FrozenDINOTeacher(
-            backbone_key=self.model_cfg.dino_teacher_key,
-            align_dim=self.model_cfg.align_dim,
-            dtype=self.dtype,
-            hf_cache_dir=self.model_cfg.hiera_hf_cache_dir,
-        ).to(device=device, dtype=self.dtype)
+        dino = None
+        if not ema_only:
+            log.info("Loading DINO teacher (%s) ...", self.model_cfg.dino_teacher_key)
+            dino = FrozenDINOTeacher(
+                backbone_key=self.model_cfg.dino_teacher_key,
+                align_dim=self.model_cfg.align_dim,
+                dtype=self.dtype,
+                hf_cache_dir=self.model_cfg.hiera_hf_cache_dir,
+            ).to(device=device, dtype=self.dtype)
 
         self.vjepa = None  # lazy-loaded before stage 2 (saves ~600 MB in stage 1)
 
@@ -1185,7 +1188,7 @@ class StudentSmokeTrainer:
         self.ema_student.eval()
         self.ema_student.to(device=device, dtype=self.dtype)
 
-        fusion = build_fusion_target_builder(self.model_cfg, device=device)
+        fusion = nn.Identity() if ema_only else build_fusion_target_builder(self.model_cfg, device=device)
         proto = PrototypeHead(
             embed_dim=self.model_cfg.align_dim,
             n_prototypes=self.model_cfg.n_prototypes,
@@ -1205,7 +1208,7 @@ class StudentSmokeTrainer:
         if self.proto_queue is not None and _is_main():
             log.info("Video proto queue enabled: size=%d, K=%d", _queue_size, _n_proto)
 
-        seg_head = build_hierarchical_seg_head(
+        seg_head = nn.Identity() if ema_only else build_hierarchical_seg_head(
             _unwrap(student).embed_dims,
             n_classes=1,
             fpn_channels=128,
@@ -1213,9 +1216,9 @@ class StudentSmokeTrainer:
 
         self.student = _maybe_ddp(student)
         self.dino = dino
-        self.fusion = _maybe_ddp(fusion)
+        self.fusion = fusion if ema_only else _maybe_ddp(fusion)
         self.proto = _maybe_ddp(proto)
-        self.seg_head = _maybe_ddp(seg_head)
+        self.seg_head = seg_head if ema_only else _maybe_ddp(seg_head)
 
         params = (
             list(_unwrap(self.student).parameters())
