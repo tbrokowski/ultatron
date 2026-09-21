@@ -7,17 +7,17 @@ manifest:
   path: dataset_exploration_outputs/run_us365k/train.jsonl
 
 training:
-  total_steps: 50
+  total_steps: 100000
   stage_fracs: [0.0, 0.0, 0.0, 1.0]
-  log_every: 5
-  metrics_every: 1
-  ckpt_every: 25
+  log_every: 100
+  metrics_every: 100
+  ckpt_every: 1000
   grad_accum_steps: 1
   lr: 1.0e-4
   lr_min: 1.0e-6
   weight_decay: 0.05
   grad_clip: 1.0
-  warmup_steps: 5
+  warmup_steps: 10000
   use_amp: true
 
 loaders:
@@ -42,7 +42,7 @@ transforms:
 
 resolution_curriculum: []
 curriculum:
-  total_training_steps: 50
+  total_training_steps: 100000
   # US-365K is tier 2; admit all tiers from step 0 to avoid an empty pool.
   alp_stage_fracs: [0.0, 0.0]
   image_samples_per_epoch: 512

@@ -11,7 +11,7 @@
 # 15k pilot (all 4 stages, fixed 512px, separate ckpt dir):
 #   bash scripts/submit_student_pretrain.sh --pilot
 #
-# Run US-365K: random student + EMA, 50 image-only steps on one node:
+# Run US-365K: random student + EMA, 100k image-only steps on one node:
 #   bash scripts/submit_student_pretrain.sh --run-us365k
 #
 # 16 GPUs:
@@ -60,7 +60,7 @@ STEPS_LABEL="100k steps"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pilot)     PILOT=1; shift ;;
-        --run-us365k) RUN_US365K=1; NODES=1; TIME_LIMIT="00:15:00"; shift ;;
+        --run-us365k) RUN_US365K=1; NODES=1; TIME_LIMIT="04:00:00"; shift ;;
         --resume)    RESUME=1; RESUME_ARGS="--resume"; shift ;;
         --after-job) AFTER_JOB="$2"; shift 2 ;;
         --nodes)     NODES="$2"; shift 2 ;;
@@ -87,7 +87,7 @@ fi
 if [[ "${RUN_US365K}" -eq 1 ]]; then
     CONFIG="${REPO_DIR}/configs/run_us365k/train.yaml"
     JOB_NAME="ultatron_run_us365k"
-    STEPS_LABEL="50 steps, US-365K, random student + EMA"
+    STEPS_LABEL="100k steps, US-365K, random student + EMA"
 fi
 
 # Stage-3/4 resume: skip loader warmup + cap workers (OOM / shm, jobs 2543314/2544897/2547540).

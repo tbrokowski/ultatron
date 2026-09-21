@@ -84,12 +84,16 @@ bash scripts/submit_student_pretrain.sh --run-us365k
 
 The job builds a dedicated manifest with `scripts/build_manifest.py` and
 trains a randomly initialized Hiera-L student with its EMA teacher on
-US-365K training images only. `configs/run_us365k/train.yaml` sets 50 steps,
-two images per GPU, 160px maximum crops, and checkpoints every 25 steps.
-The job requests one node with four GPUs for 15 minutes. Checkpoints go to
+US-365K training images only. `configs/run_us365k/train.yaml` sets 100,000 steps,
+two images per GPU, 160px maximum crops, 10,000 warmup steps, and checkpoints
+every 1,000 steps. Metrics are logged every 100 steps.
+The job requests one node with four GPUs for up to four hours, including
+manifest building and dependency installation. The 100,000-step target may
+require multiple jobs. Checkpoints go to
 `/capstor/store/cscs/swissai/a127/ultrasound/checkpoints/RunUS365K`.
-Use `--resume` to continue an interrupted run. Container execution has not
-yet been verified on Clariden.
+Start this longer run without `--resume` to initialize fresh weights.
+If it reaches the job time limit, continue from its latest checkpoint with
+`bash scripts/submit_student_pretrain.sh --run-us365k --resume`.
 
 To build the manifest separately inside the container:
 
