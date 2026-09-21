@@ -1116,7 +1116,8 @@ def _image_ema_ssl_losses(
 
     s_out = student(x_s, padding_mask=pmask_s)
     s_global = _student_global(s_out)
-    s_patches = _student_patches(s_out, t=0)
+    # EMA patch loss and ALP hardness compare raw F1 features on both sides.
+    s_patches = s_out["F1"][:, 0]
     pmask_f1 = _student_f1_grid_pmask(s_out)
 
     unmasked_flat, masked_flat = _dino_patch_masks(s_out, patch_masks)

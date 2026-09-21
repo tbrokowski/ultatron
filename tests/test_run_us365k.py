@@ -17,9 +17,12 @@ def test_image_ema_prototypes_use_projected_teacher(monkeypatch):
         "global": torch.randn(2, 1152, requires_grad=True),
         "global_proj": torch.randn(2, 1024, requires_grad=True),
         "F1": torch.randn(2, 1, 4, 144),
+        "patch_proj": torch.randn(2, 1, 4, 1024),
     }
     teacher_out = {key: value.detach().clone() for key, value in student_out.items()}
     teacher_out["global_proj"] = torch.randn(2, 1024, requires_grad=True)
+    teacher_out["F1"] = torch.randn(2, 1, 4, 144)
+    feedback = Mock()
     prototypes = torch.nn.Parameter(torch.randn(2, 1024))
     monkeypatch.setattr(steps, "_ensure_image_batch", lambda batch: batch)
     monkeypatch.setattr(steps, "_student_crop_pmask", lambda *args: None)
@@ -28,11 +31,12 @@ def test_image_ema_prototypes_use_projected_teacher(monkeypatch):
     prototype_loss = Mock(wraps=steps.img_proto_loss)
     monkeypatch.setattr(steps, "img_proto_loss", prototype_loss)
     kwargs = dict(
-        batch={"global_crops": torch.randn(2, 2, 3, 8, 8)},
+        batch={"global_crops": torch.randn(2, 2, 3, 8, 8), "sample_ids": ["a", "b"]},
         student=lambda *args, **kw: student_out,
         ema_student=lambda *args, **kw: teacher_out,
         proto_head=SimpleNamespace(prototypes=prototypes),
         ema_scale=1.0,
+        alp_feedback=feedback,
     )
     result = steps._image_ema_ssl_losses(**kwargs, lam={"lam_proto": 1.0})
     student_tokens, teacher_tokens, _ = prototype_loss.call_args.args
@@ -43,6 +47,16 @@ def test_image_ema_prototypes_use_projected_teacher(monkeypatch):
     assert student_out["global_proj"].grad is not None
     assert prototypes.grad is not None
     assert teacher_out["global_proj"].grad is None
+    feedback.update_from_distill.assert_called_once()
+    sample_ids, hardness, saliency, step = feedback.update_from_distill.call_args.args
+    assert sample_ids == ["a", "b"] and step == 0
+    expected = (1 - torch.nn.functional.cosine_similarity(
+        student_out["F1"][:, 0], teacher_out["F1"][:, 0], dim=-1,
+    )).clamp(min=0)
+    torch.testing.assert_close(hardness, expected)
+    torch.testing.assert_close(saliency, teacher_out["F1"][:, 0].norm(dim=-1))
+    assert hardness.shape == saliency.shape == (2, 4)
+    assert not hardness.requires_grad
 
     prototype_loss.reset_mock()
     result = steps._image_ema_ssl_losses(**kwargs, lam={"lam_proto": 0.0})
