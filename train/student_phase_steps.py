@@ -1142,11 +1142,14 @@ def _image_ema_ssl_losses(
         else s_global.new_tensor(0.0)
     )
 
-    L_proto = img_proto_loss(
-        s_global.unsqueeze(1),
-        t_ema_global.detach().unsqueeze(1),
-        proto_head.prototypes,
-    )
+    # A disabled auxiliary loss must not execute its forward pass.
+    L_proto = s_global.new_tensor(0.0)
+    if lam.get("lam_proto", 0.5) != 0.0:
+        L_proto = img_proto_loss(
+            s_global.unsqueeze(1),
+            _student_global(t_ema_out).detach().unsqueeze(1),
+            proto_head.prototypes,
+        )
 
     loss = ema_scale * (
         L_ema_global
