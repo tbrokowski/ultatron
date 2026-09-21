@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Ultatron project dependencies (pyproject.toml) when not already present.
+# Install missing runtime packages using the container's Python environment.
 set -euo pipefail
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck source=disable_core_dumps.sh

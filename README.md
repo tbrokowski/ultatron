@@ -45,22 +45,53 @@ python scripts/train.py --config configs/experiments/full.yaml
 
 ### Run US-365K
 
-Set the dataset root in `configs/run_us365k/data.yaml`, then submit:
+The EDF at `configs/run_us365k/ultatron.toml` uses the
+[CSCS PyTorch container](https://docs.cscs.ch/software/alps-extended-images/)
+and mounts `/users`, `/capstor`, and `/iopsstor`. The existing job scripts call
+`ensure_deps.sh` to install missing packages directly in the running container,
+while preserving its PyTorch, torchvision, and NumPy versions. No venv or
+editable installation is required. Packages added at runtime may need to be
+installed again in a fresh container session.
+
+On Clariden, set `REPO_DIR` in `scripts/submit_student_pretrain.sh` to your
+repository path and `EDF_ENV` to the absolute path of
+`configs/run_us365k/ultatron.toml`. Check that `ACCOUNT` is your allocation.
+Set the dataset root in `configs/run_us365k/data.yaml`.
+
+Before the first run, cache the SAM2 architecture configuration from within the
+container. The setup script requests a 30-minute allocation and calls the
+existing dependency and cache setup scripts:
 
 ```bash
+bash scripts/setup_run_us365k.sh
+```
+
+The setup defaults to account `a127` and partition `normal`. Override these
+with `ULTATRON_ACCOUNT` and `ULTATRON_PARTITION`, or select a different EDF
+with `ULTATRON_EDF_ENV`.
+
+This downloads configuration only, with no pretrained weights. The EDF uses
+your own Capstor scratch directory for the cache. If this configuration is
+already cached there, skip this preparation step.
+
+Submit using the CSCS image's recommended Slurm settings:
+
+```bash
+export SLURM_NETWORK=disable_rdzv_get
+export SLURM_MPI_TYPE=pmix
 bash scripts/submit_student_pretrain.sh --run-us365k
 ```
 
 The job builds a dedicated manifest with `scripts/build_manifest.py` and
 trains a randomly initialized Hiera-L student with its EMA teacher on
-US-365K training images only. No DINO or V-JEPA teachers are loaded.
-`configs/run_us365k/train.yaml` sets 50 steps, two images per GPU,
-160px maximum crops, and checkpoints every 25 steps. The job requests one
-node with four GPUs for 15 minutes. Checkpoints go to
+US-365K training images only. `configs/run_us365k/train.yaml` sets 50 steps,
+two images per GPU, 160px maximum crops, and checkpoints every 25 steps.
+The job requests one node with four GPUs for 15 minutes. Checkpoints go to
 `/capstor/store/cscs/swissai/a127/ultrasound/checkpoints/RunUS365K`.
-Use `--resume` to continue an interrupted run.
+Use `--resume` to continue an interrupted run. Container execution has not
+yet been verified on Clariden.
 
-To build the manifest separately:
+To build the manifest separately inside the container:
 
 ```bash
 python3 scripts/build_manifest.py \
@@ -70,9 +101,6 @@ python3 scripts/build_manifest.py \
 ```
 
 The builder preserves split labels; the training loader selects `train`.
-Random initialization requires the cached `facebook/sam2.1-hiera-large`
-architecture config, but no pretrained weights. Adjust the repository and
-EDF paths in the submission script for your CSCS account.
 
 ### Validate (linear probe)
 
@@ -477,4 +505,3 @@ an intended future “agent loop” that uses backbone attention and/or concept 
   - [`data/pipeline/collators.py`](data/pipeline/collators.py)
   - [`data/pipeline/transforms.py`](data/pipeline/transforms.py)
   - backbone interfaces in [`models/base.py`](models/base.py)
-

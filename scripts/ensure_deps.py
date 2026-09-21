@@ -1,26 +1,39 @@
 #!/usr/bin/env python3
-"""Ensure Ultatron runtime dependencies are installed for analysis scripts.
+"""Ensure Ultatron runtime dependencies are installed inside the job container.
 
 Jobs and one-off scripts often set PYTHONPATH without installing the package,
 so declared deps (pydicom, h5py, etc.) are missing until pip-installed ad hoc.
-Only the missing I/O packages are installed — not a full editable install, so
-preloaded container pins (numpy, cupy, ultr-ai, etc.) are left untouched.
+Install missing training and I/O packages without an editable install or venv.
+Preserve the container's installed torch, torchvision, and numpy versions.
 """
 from __future__ import annotations
 
 import fcntl
+from importlib.metadata import PackageNotFoundError, version
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Imports that must work for DICOM/HDF5/volume I/O across analysis + training.
+# Import names mapped to pip requirements. PyTorch and NumPy come from the image.
 _RUNTIME_PACKAGES: dict[str, str] = {
     "pydicom": "pydicom>=2.4.0",
     "h5py": "h5py>=3.11.0,<3.13",
     "SimpleITK": "SimpleITK>=2.3.0",
+    "yaml": "pyyaml>=6.0",
+    "PIL": "Pillow>=10.0.0",
+    "scipy": "scipy>=1.11.0",
+    "sklearn": "scikit-learn>=1.3.0",
+    "tqdm": "tqdm>=4.65.0",
+    "omegaconf": "omegaconf>=2.3.0",
+    "openpyxl": "openpyxl>=3.1.0",
+    "tensorboard": "tensorboard>=2.14.0",
+    "accelerate": "accelerate>=0.28.0",
+    "huggingface_hub": "huggingface_hub>=0.34.0,<1.0",
+    "transformers": "transformers>=4.56.0,<5.0",
 }
 
 # Optional on GH200 (aarch64) — video decode fallback in dataset.load_video_frames.
@@ -35,7 +48,12 @@ def missing_imports() -> list[str]:
     for name in _RUNTIME_PACKAGES:
         try:
             __import__(name)
-        except ImportError:
+            if name == "transformers":
+                # Importing an older Transformers succeeds even without SAM2 support.
+                from packaging.version import Version
+                if Version(version("transformers")) < Version("4.56.0"):
+                    missing.append(name)
+        except (ImportError, PackageNotFoundError):
             missing.append(name)
     return missing
 
@@ -75,8 +93,17 @@ def _pip_install(specs: list[str], *, attempts: int = 3) -> None:
     ]
     lock_path = REPO_ROOT / ".ensure_deps.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w", encoding="utf-8") as lock_file:
+    with open(lock_path, "w", encoding="utf-8") as lock_file, tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", encoding="utf-8",
+    ) as constraints:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        for package in ("torch", "torchvision", "numpy"):
+            try:
+                constraints.write(f"{package}=={version(package)}\n")
+            except PackageNotFoundError:
+                pass
+        constraints.flush()
+        cmd.extend(["--constraint", constraints.name])
         last_exc: subprocess.CalledProcessError | None = None
         for attempt in range(1, attempts + 1):
             try:
@@ -104,7 +131,7 @@ def _pip_install(specs: list[str], *, attempts: int = 3) -> None:
 
 
 def ensure_deps(*, force: bool = False) -> None:
-    """Install only missing runtime I/O packages (never the full project)."""
+    """Install missing runtime packages in the current Python environment."""
     missing = list(_RUNTIME_PACKAGES) if force else missing_imports()
     if missing:
         specs = [_RUNTIME_PACKAGES[name] for name in missing]

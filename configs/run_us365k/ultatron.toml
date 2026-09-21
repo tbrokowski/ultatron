@@ -1,0 +1,16 @@
+# CSCS Clariden / GH200. Jobs install missing packages through ensure_deps.sh.
+# Image and runtime settings: https://docs.cscs.ch/software/alps-extended-images/
+image = "jfrog.svc.cscs.ch/docker-group-csstaff/alps-images/ngc-pytorch:26.02-py3-alps6"
+mounts = ["/users", "/capstor", "/iopsstor"]
+workdir = "/tmp"
+writable = true
+entrypoint = true
+
+[env]
+PMIX_MCA_psec = "native"
+PYTHONUNBUFFERED = "1"
+PYTHONNOUSERSITE = "1"
+US_HF_CACHE_DIR = "/capstor/scratch/cscs/${USER}/ultatron/hf_cache"
+
+[annotations]
+com.hooks.cxi.enabled = "false"
