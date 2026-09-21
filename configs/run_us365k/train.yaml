@@ -43,6 +43,8 @@ transforms:
 resolution_curriculum: []
 curriculum:
   total_training_steps: 50
+  # US-365K is tier 2; admit all tiers from step 0 to avoid an empty pool.
+  alp_stage_fracs: [0.0, 0.0]
   image_samples_per_epoch: 512
   video_samples_per_epoch: 0
 
